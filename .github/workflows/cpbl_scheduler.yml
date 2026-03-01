@@ -1,0 +1,29 @@
+name: CPBL Schedule Updater
+
+on:
+  schedule:
+    # 台灣時間 15:00–24:00（UTC 07:00–16:00），每 30 分鐘執行一次
+    # 涵蓋假日午場（12:05 開始）到平日晚場（18:35 開始，約 22:00 結束）
+    - cron: "*/30 7-16 * * *"
+  workflow_dispatch: # 允許手動觸發（測試用）
+
+jobs:
+  update-sheet:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run CPBL updater
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: python cpbl.py
