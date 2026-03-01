@@ -1,13 +1,35 @@
 import json
+import os
 import requests
 from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 import time
+from datetime import datetime
+
+# --- Configuration ---
+SPREADSHEET_KEY = "1EQ24A5wLW80bZ6kQHE9j0qEdxK7t-QBy5bx5k1DXwVo"
+CREDENTIALS_FILE = (
+    "/Users/evansmac/Desktop/project-e0a5748a-0bec-4063-a99-0721295c7390.json"
+)
+
+# KindCode: A = 正式賽, G = 熱身賽
+WORKSHEET_MAP = {
+    "A": "賽程副本",
+    "G": "熱身賽賽程副本",
+}
+
+TEAM_MAP = {
+    "樂天桃猿": "樂天",
+    "統一7-ELEVEn獅": "統一7-ELEVEn",
+    "中信兄弟": "中信兄弟",
+    "味全龍": "味全",
+    "富邦悍將": "富邦",
+    "台鋼雄鷹": "台鋼",
+}
 
 
-def main():
-    # Setup Session
+def get_session():
     session = requests.Session()
     session.headers.update(
         {
@@ -15,48 +37,103 @@ def main():
             "Referer": "https://www.cpbl.com.tw/",
         }
     )
+    return session
 
-    # 1. Fetch Data
-    game_sno = "239"
-    year = "2025"
-    url = f"https://www.cpbl.com.tw/box/index?gameSno={game_sno}&year={year}&kindCode=A"
 
+def get_worksheet(kind_code):
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    # 優先使用環境變數（GitHub Actions），否則使用本地憑證檔
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    if creds_json:
+        creds = Credentials.from_service_account_info(
+            json.loads(creds_json), scopes=scope
+        )
+    else:
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
+    client = gspread.authorize(creds)
+    worksheet_name = WORKSHEET_MAP.get(kind_code, "賽程副本")
+    return client.open_by_key(SPREADSHEET_KEY).worksheet(worksheet_name)
+
+
+def fetch_schedule(year, month, kind_code, session):
+    """從 CPBL 賽程 API 抓取指定月份的賽程。"""
+    try:
+        # 先取得 CSRF token
+        response = session.get("https://www.cpbl.com.tw/schedule")
+        soup = BeautifulSoup(response.text, "html.parser")
+        token_input = soup.find("input", {"name": "__RequestVerificationToken"})
+        token = token_input.get("value") if token_input else ""
+
+        payload = {
+            "__RequestVerificationToken": token,
+            "KindCode": kind_code,
+            "Year": year,
+            "Month": month,
+        }
+        post_response = session.post(
+            "https://www.cpbl.com.tw/schedule/getgamedatas",
+            data=payload,
+        )
+        if post_response.status_code != 200:
+            print(f"[schedule] HTTP {post_response.status_code}")
+            return []
+
+        result = post_response.json()
+        if result.get("Success"):
+            return json.loads(result.get("GameDatas", "[]"))
+        return []
+    except Exception as e:
+        print(f"Error fetching schedule ({kind_code} {year}/{month}): {e}")
+        return []
+
+
+def is_game_recorded(game_sno, year, sheet):
+    """回傳 True 如果 B 欄有相同 game_sno 且 C 欄日期包含相同年份。"""
+    col_b = sheet.col_values(2)
+    for idx, val in enumerate(col_b, start=1):
+        if str(val) == str(game_sno):
+            row_vals = sheet.row_values(idx)
+            if len(row_vals) > 2 and str(year) in str(row_vals[2]):
+                return True
+    return False
+
+
+def fetch_game_data(game_sno, year, kind_code, session):
+    """從 box/getlive 抓取比賽的詳細資料，回傳 JSON dict 或 None。"""
+    url = f"https://www.cpbl.com.tw/box/index?gameSno={game_sno}&year={year}&kindCode={kind_code}"
     try:
         response = session.get(url)
         if response.status_code != 200:
-            print(f"Failed to fetch page: {response.status_code}")
-            return
+            print(f"[box] HTTP {response.status_code} for game {game_sno}")
+            return None
 
         soup = BeautifulSoup(response.text, "html.parser")
         token_input = soup.find("input", {"name": "__RequestVerificationToken"})
         if not token_input:
-            print("Token not found.")
-            return
+            print(f"Token not found for game {game_sno}.")
+            return None
         token = token_input.get("value")
 
         payload = {
             "__RequestVerificationToken": token,
             "GameSno": game_sno,
-            "KindCode": "A",
+            "KindCode": kind_code,
             "Year": year,
-            "SelectKindCode": "A",
+            "SelectKindCode": kind_code,
             "SelectYear": year,
-            "SelectMonth": "4",
+            "SelectMonth": str(datetime.now().month),
         }
-
-        post_url = "https://www.cpbl.com.tw/box/getlive"
-        post_response = session.post(post_url, data=payload)
-
+        post_response = session.post(
+            "https://www.cpbl.com.tw/box/getlive", data=payload
+        )
         if post_response.status_code != 200:
-            print("Failed to fetch API data.")
-            return
+            print(f"[getlive] HTTP {post_response.status_code} for game {game_sno}")
+            return None
 
-        data = post_response.json()
-
-        process_and_update_sheet(data, game_sno, year, session)
-
+        return post_response.json()
     except Exception as e:
-        print(f"Error in main: {e}")
+        print(f"Error fetching game {game_sno}: {e}")
+        return None
 
 
 def get_pitching_habit(acnt_id, session):
@@ -79,12 +156,12 @@ def get_pitching_habit(acnt_id, session):
     return ""
 
 
-def process_and_update_sheet(data, game_sno, year, session):
-    # --- Parse JSON ---
+def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
+    """解析比賽資料並寫入對應 worksheet。回傳 True 代表成功寫入。"""
     curt_game_detail = json.loads(data.get("CurtGameDetailJson", "{}"))
     game_detail_list = json.loads(data.get("GameDetailJson", "[]"))
 
-    # Identify the correct game detail that matches game_sno
+    # 找到對應的 game_detail
     game_detail = None
     if str(curt_game_detail.get("GameSno")) == str(game_sno):
         game_detail = curt_game_detail
@@ -95,26 +172,29 @@ def process_and_update_sheet(data, game_sno, year, session):
                 break
 
     if not game_detail:
-        # Fallback to first item if no match found (old behavior, but safer to warn)
         if game_detail_list:
             game_detail = game_detail_list[0]
             print(
-                f"Warning: No exact match for GameSno {game_sno}. Using first available game {game_detail.get('GameSno')}."
+                f"Warning: No exact match for GameSno {game_sno}. Using first available."
             )
         else:
             print("No game detail found.")
-            return
+            return False
 
-    # Only update if the game is finished
+    # 只在比賽結束時更新
     if game_detail.get("GameStatusChi") != "比賽結束":
-        print(f"Game {game_sno} ({year}) is not finished. Skipping.")
-        return
+        print(f"Game {game_sno} ({year}) is not finished yet. Skipping.")
+        return False
+
+    # 貼上前先再確認沒有重複（double-check）
+    if is_game_recorded(game_sno, year, sheet):
+        print(f"Game {game_sno} ({year}) already recorded. Skipping.")
+        return True
 
     scoreboard = json.loads(data.get("ScoreboardJson", "[]"))
     pitching = json.loads(data.get("PitchingJson", "[]"))
     batting = json.loads(data.get("BattingJson", "[]"))
 
-    # Helpers
     def get_pitching_stats(ptype, is_starter=False):
         stats = [0] * 13
         target_pitchers = [
@@ -150,11 +230,7 @@ def process_and_update_sheet(data, game_sno, year, session):
             stats[10] += int(p.get("BalkCnt", 0))
             stats[11] += int(p.get("RunCnt", 0))
             stats[12] += int(p.get("EarnedRunCnt", 0))
-
-        if total_outs % 3 == 0:
-            stats[0] = total_outs // 3
-        else:
-            stats[0] = round(total_outs / 3, 3)
+        stats[0] = total_outs // 3 if total_outs % 3 == 0 else round(total_outs / 3, 3)
         return stats, name, acnt
 
     def get_batting_stats(ptype):
@@ -163,7 +239,6 @@ def process_and_update_sheet(data, game_sno, year, session):
             b for b in batting if str(b.get("VisitingHomeType")) == str(ptype)
         ]
         for b in target_batters:
-            # Swap HitCnt and HittingCnt to match correct data (AB vs H)
             stats[0] += int(b.get("HitCnt", 0))  # 打數 (AB)
             stats[1] += int(b.get("ScoreCnt", 0))
             stats[2] += int(b.get("HittingCnt", 0))  # 安打 (H)
@@ -180,65 +255,26 @@ def process_and_update_sheet(data, game_sno, year, session):
             stats[13] += int(b.get("StealBaseOKCnt", 0))
             stats[14] += int(b.get("StealBaseFailCnt", 0))
             stats[15] += int(b.get("ErrorCnt", 0))
-
-        # Also add errors from PitchingJson
-        target_pitchers = [
-            p for p in pitching if str(p.get("VisitingHomeType")) == str(ptype)
-        ]
-        for p in target_pitchers:
-            stats[15] += int(p.get("ErrorCnt", 0))
-
+        # 加上 PitchingJson 的失誤
+        for p in pitching:
+            if str(p.get("VisitingHomeType")) == str(ptype):
+                stats[15] += int(p.get("ErrorCnt", 0))
         return stats
 
-    # --- Authenticate ---
-    scope = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(
-        "/Users/evansmac/Desktop/project-e0a5748a-0bec-4063-a99-0721295c7390.json",
-        scopes=scope,
-    )
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(
-        "1EQ24A5wLW80bZ6kQHE9j0qEdxK7t-QBy5bx5k1DXwVo"
-    ).worksheet("賽程副本")
-
-    # --- Determine Target Row ---
-    # Fetch all values in Column B to find the actual last row of data
+    # --- 決定目標列 ---
     col_b_values = sheet.col_values(2)
-
-    # Check if record already exists
-    for idx, val in enumerate(col_b_values, start=1):
-        if str(val) == str(game_sno):
-            row_vals = sheet.row_values(idx)
-            if len(row_vals) > 2 and str(year) in str(row_vals[2]):
-                print(f"Game {game_sno} already exists at Row {idx}. Skipping.")
-                # We still proceed to update if it's the target row for comparison
-                # return
-
-    # Target row is the very next row after the last entry in Column B
     target_row = len(col_b_values) + 1
-    print(f"Targeting Row {target_row} for Game {game_sno}...")
+    print(f"Targeting Row {target_row} for Game {game_sno} ({kind_code})...")
 
-    # Team Name Mapping
-    team_map = {
-        "樂天桃猿": "樂天",
-        "統一7-ELEVEn獅": "統一7-ELEVEn",
-        "中信兄弟": "中信兄弟",
-        "味全龍": "味全",
-        "富邦悍將": "富邦",
-        "台鋼雄鷹": "台鋼",
-    }
-
-    # --- Prepare Row Data (125 columns: A to DU) ---
+    # --- 準備資料 (125 欄: A to DU) ---
     update_values = [""] * 125
     update_values[0] = game_detail.get("GameStatusChi", "")
     update_values[1] = game_sno
-    # Ensure date format is strictly YYYY-MM-DD
-    raw_date = game_detail.get("GameDate", "").split("T")[0]
-    update_values[2] = raw_date
-    update_values[3] = team_map.get(
+    update_values[2] = game_detail.get("GameDate", "").split("T")[0]
+    update_values[3] = TEAM_MAP.get(
         game_detail.get("VisitingTeamName", ""), game_detail.get("VisitingTeamName", "")
     )
-    update_values[5] = team_map.get(
+    update_values[5] = TEAM_MAP.get(
         game_detail.get("HomeTeamName", ""), game_detail.get("HomeTeamName", "")
     )
     update_values[7] = game_detail.get("FieldAbbe", "")
@@ -246,7 +282,7 @@ def process_and_update_sheet(data, game_sno, year, session):
         "HeadUmpire", ""
     )
 
-    # Scoreboard Visitor
+    # 客隊逐局得分
     for score in scoreboard:
         if str(score.get("VisitingHomeType")) == "1":
             inning = int(float(score.get("InningSeq", 0)))
@@ -258,40 +294,30 @@ def process_and_update_sheet(data, game_sno, year, session):
     update_values[22] = v_batting[2]
     update_values[23] = v_batting[15]
 
-    # Scoreboard Home
+    # 主隊逐局得分（含 X 判斷）
     for score in scoreboard:
         if str(score.get("VisitingHomeType")) == "2":
             inning = int(float(score.get("InningSeq", 0)))
             if 1 <= inning <= 12:
                 score_val = int(float(score.get("ScoreCnt", 0)))
-
-                # Check for 'X' in the last inning for the home team
                 if inning >= 9 and game_detail.get("GameStatusChi") == "比賽結束":
                     v_total = int(game_detail.get("VisitingTotalScore", 0))
                     h_total = int(game_detail.get("HomeTotalScore", 0))
-
                     if h_total > v_total:
-                        # Calculate Home score before this inning
-                        h_score_before = 0
-                        for s2 in scoreboard:
-                            if (
-                                str(s2.get("VisitingHomeType")) == "2"
-                                and int(float(s2.get("InningSeq", 0))) < inning
-                            ):
-                                h_score_before += int(float(s2.get("ScoreCnt", 0)))
-
-                        # Calculate Visitor score up to this inning
-                        v_score_up_to = 0
-                        for s2 in scoreboard:
-                            if (
-                                str(s2.get("VisitingHomeType")) == "1"
-                                and int(float(s2.get("InningSeq", 0))) <= inning
-                            ):
-                                v_score_up_to += int(float(s2.get("ScoreCnt", 0)))
-
+                        h_score_before = sum(
+                            int(float(s2.get("ScoreCnt", 0)))
+                            for s2 in scoreboard
+                            if str(s2.get("VisitingHomeType")) == "2"
+                            and int(float(s2.get("InningSeq", 0))) < inning
+                        )
+                        v_score_up_to = sum(
+                            int(float(s2.get("ScoreCnt", 0)))
+                            for s2 in scoreboard
+                            if str(s2.get("VisitingHomeType")) == "1"
+                            and int(float(s2.get("InningSeq", 0))) <= inning
+                        )
                         if h_score_before > v_score_up_to:
                             score_val = "X"
-
                 update_values[24 + inning - 1] = score_val
 
     h_batting = get_batting_stats(2)
@@ -299,7 +325,7 @@ def process_and_update_sheet(data, game_sno, year, session):
     update_values[37] = h_batting[2]
     update_values[38] = h_batting[15]
 
-    # Pitching Mapping
+    # 投球資料
     v_starter_stats, v_starter_name, v_starter_acnt = get_pitching_stats(1, True)
     update_values[4] = v_starter_name
     for i in range(13):
@@ -318,26 +344,110 @@ def process_and_update_sheet(data, game_sno, year, session):
     for i in range(13):
         update_values[78 + i] = h_total_pitch[i]
 
-    # Fetch habits for starters
     update_values[91] = get_pitching_habit(v_starter_acnt, session)
     update_values[92] = get_pitching_habit(h_starter_acnt, session)
 
-    # Batting Mapping
+    # 打擊資料
     for i in range(16):
         update_values[93 + i] = v_batting[i]
     for i in range(16):
         update_values[109 + i] = h_batting[i]
 
-    # --- Final Update ---
-    range_label = f"A{target_row}"
-    # We wrap update_values in a list because update() expects a list of lists (rows)
+    # --- 寫入 ---
     sheet.update(
-        range_name=range_label,
+        range_name=f"A{target_row}",
         values=[update_values],
         value_input_option="USER_ENTERED",
     )
-    print(f"Successfully updated Row {target_row}.")
+    print(f"Successfully updated Row {target_row} (Game {game_sno}, {kind_code}).")
+    return True
+
+
+def run_once(year: str = None, kind_codes=None):
+    """
+    執行一次檢查：抓賽程，若比賽結束且尚未記錄就寫入 sheet。
+    由 GitHub Actions cron 觸發，不需要自己維持迴圈。
+
+    Args:
+        year: 賽季年份，預設為今年
+        kind_codes: 要監控的賽事種類列表，預設 ["A", "G"]（正式賽 + 熱身賽）
+    """
+    if year is None:
+        year = str(datetime.now().year)
+    if kind_codes is None:
+        kind_codes = ["A", "G"]
+
+    session = get_session()
+    now = datetime.now()
+    current_month = str(now.month)
+    print(
+        f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Run started (year={year}, kind_codes={kind_codes})"
+    )
+
+    for kind_code in kind_codes:
+        games = fetch_schedule(year, current_month, kind_code, session)
+        if not games:
+            continue
+
+        sheet = get_worksheet(kind_code)
+
+        for game in games:
+            print(f"Processing GameSno {game.get('GameSno')} ({kind_code})...")
+            game_sno = str(game.get("GameSno"))
+            game_date_str = game.get("GameDate", "").split("T")[0]
+
+            try:
+                game_date = datetime.strptime(game_date_str, "%Y-%m-%d")
+            except ValueError:
+                continue
+
+            # 未到比賽日，跳過
+            if game_date.date() > now.date():
+                print(
+                    f"Game {game_sno} is scheduled for {game_date_str}, which is in the future. Skipping."
+                )
+                continue
+
+            # 已記錄，跳過
+            if is_game_recorded(game_sno, year, sheet):
+                print(f"Game {game_sno} ({year}) already recorded. Skipping.")
+                continue
+
+            # 抓 box score，確認是否結束並寫入
+            data = fetch_game_data(game_sno, year, kind_code, session)
+            if not data:
+                continue
+
+            process_and_update_sheet(data, game_sno, year, kind_code, session, sheet)
+            time.sleep(2)  # 避免打 API 太快
+
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Run finished.")
+
+
+def main(game_sno: str, year: str, kind_code="A"):
+    """
+    手動跑單場比賽。
+
+    Args:
+        game_sno: 比賽編號
+        year: 年份
+        kind_code: "A" = 正式賽, "G" = 熱身賽
+    """
+
+    session = get_session()
+    data = fetch_game_data(game_sno, year, kind_code, session)
+    if not data:
+        return
+
+    sheet = get_worksheet(kind_code)
+    process_and_update_sheet(data, game_sno, year, kind_code, session, sheet)
 
 
 if __name__ == "__main__":
-    main()
+
+    # GitHub Actions cron 觸發時執行此入口
+    run_once(year=str(datetime.now().year), kind_codes=["G"])
+
+    # 手動跑單場範例（本地測試用）：
+    # main(game_sno="1", year="2025", kind_code="G")  # 熱身賽
+    # main(game_sno="239", year="2025", kind_code="A")  # 正式賽
