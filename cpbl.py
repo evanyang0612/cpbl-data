@@ -8,15 +8,12 @@ import time
 from datetime import datetime
 
 # --- Configuration ---
-SPREADSHEET_KEY = "1EQ24A5wLW80bZ6kQHE9j0qEdxK7t-QBy5bx5k1DXwVo"
-CREDENTIALS_FILE = (
-    "/Users/evansmac/Desktop/project-e0a5748a-0bec-4063-a99-0721295c7390.json"
-)
-
+SPREADSHEET_KEY = os.getenv("SPREADSHEET_KEY")
+CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
 # KindCode: A = 正式賽, G = 熱身賽
 WORKSHEET_MAP = {
-    "A": "賽程副本",
-    "G": "熱身賽賽程副本",
+    "A": "賽程",
+    "G": "熱身賽賽程",
 }
 
 TEAM_MAP = {
@@ -51,7 +48,7 @@ def get_worksheet(kind_code):
     else:
         creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
     client = gspread.authorize(creds)
-    worksheet_name = WORKSHEET_MAP.get(kind_code, "賽程副本")
+    worksheet_name = WORKSHEET_MAP.get(kind_code, "賽程")
     return client.open_by_key(SPREADSHEET_KEY).worksheet(worksheet_name)
 
 
@@ -444,7 +441,6 @@ def main(game_sno: str, year: str, kind_code="A"):
 
 
 if __name__ == "__main__":
-
     # GitHub Actions cron 觸發時執行此入口
     run_once(year=str(datetime.now().year), kind_codes=["G"])
 

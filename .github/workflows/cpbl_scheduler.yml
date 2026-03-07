@@ -26,4 +26,5 @@ jobs:
       - name: Run CPBL updater
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          SPREADSHEET_KEY: ${{ secrets.SPREADSHEET_KEY }}
         run: python cpbl.py
