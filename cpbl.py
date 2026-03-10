@@ -80,6 +80,10 @@ def fetch_schedule(year, month, kind_code, session):
             data=payload,
         )
         if post_response.status_code != 200:
+            print(f"[schedule] GET status: {response.status_code}")
+            print(f"[schedule] POST URL: https://www.cpbl.com.tw/schedule/getgamedatas")
+            print(f"[schedule] POST status: {post_response.status_code}")
+            print(f"[schedule] Response text (first 500): {post_response.text[:500]}")
             print(f"[schedule] HTTP {post_response.status_code}")
             return []
 
