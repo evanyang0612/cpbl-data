@@ -2,10 +2,8 @@ name: CPBL Schedule Updater
 
 on:
   schedule:
-    # 台灣時間 15:00–24:00（UTC 07:00–16:00），每 30 分鐘執行一次
-    # 涵蓋假日午場（12:05 開始）到平日晚場（18:35 開始，約 22:00 結束）
     - cron: "*/30 7-16 * * *"
-  workflow_dispatch: # 允許手動觸發（測試用）
+  workflow_dispatch:
 
 jobs:
   update-sheet:
@@ -14,6 +12,37 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup WireGuard + NordVPN (Taiwan)
+        run: |
+          sudo apt-get install -y wireguard curl jq
+
+          PRIVATE_KEY=$(curl -s -u token:${{ secrets.NORDVPN_TOKEN }} \
+            https://api.nordvpn.com/v1/users/services/credentials | \
+            jq -r '.nordlynx_private_key')
+
+          API_RESP=$(curl -s "https://api.nordvpn.com/v1/servers/recommendations?filters\[servers_technologies\]\[identifier\]=wireguard_udp&filters\[country_id\]=211&limit=1")
+
+          SERVER_PUBLIC_KEY=$(echo $API_RESP | jq -r '.[0].technologies[] | select(.identifier=="wireguard_udp") | .metadata[] | select(.name=="public_key") | .value')
+          SERVER_IP=$(echo $API_RESP | jq -r '.[0].station')
+          SERVER_NAME=$(echo $API_RESP | jq -r '.[0].hostname')
+
+          sudo bash -c "cat > /etc/wireguard/wg0.conf << EOF
+          [Interface]
+          PrivateKey = $PRIVATE_KEY
+          Address = 10.5.0.2/32
+          DNS = 103.86.96.100
+
+          [Peer]
+          PublicKey = $SERVER_PUBLIC_KEY
+          Endpoint = $SERVER_IP:51820
+          AllowedIPs = 0.0.0.0/0
+          PersistentKeepalive = 25
+          EOF"
+
+          sudo wg-quick up wg0
+          echo "Connected to: $SERVER_NAME"
+          curl -s https://ifconfig.me
 
       - name: Set up Python
         uses: actions/setup-python@v5
