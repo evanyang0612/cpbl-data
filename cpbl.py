@@ -6,7 +6,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 import time
 from datetime import datetime
+from dotenv import load_dotenv
 
+load_dotenv()
 # --- Configuration ---
 SPREADSHEET_KEY = os.getenv("SPREADSHEET_KEY")
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
@@ -267,7 +269,7 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     update_values = [""] * 125
     update_values[0] = game_detail.get("GameStatusChi", "")
     update_values[1] = game_sno
-    update_values[2] = game_detail.get("GameDate", "").split("T")[0]
+    update_values[2] = game_detail.get("GameDate", "").split("T")[0].replace("/", "-")
     update_values[3] = TEAM_MAP.get(
         game_detail.get("VisitingTeamName", ""), game_detail.get("VisitingTeamName", "")
     )
