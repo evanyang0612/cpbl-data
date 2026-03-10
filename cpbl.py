@@ -372,6 +372,60 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     return True
 
 
+def update_huizi(year: str = None):
+    """
+    找出今天的比賽資料（來自 賽程 或 熱身賽賽程），
+    清除 彙資 B4:DU6 後貼上最多 3 場比賽（對應 VS1/VS2/VS3）。
+    """
+    if year is None:
+        year = str(datetime.now().year)
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    print(f"Updating 彙資 for {today_str}...")
+
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    if creds_json:
+        creds = Credentials.from_service_account_info(
+            json.loads(creds_json), scopes=scope
+        )
+    else:
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(SPREADSHEET_KEY)
+    huizi = spreadsheet.worksheet("彙資")
+
+    # Clear yesterday's data in B4:DU6
+    huizi.batch_clear(["B4:DU6"])
+    print("Cleared 彙資 B4:DU6.")
+
+    # Collect today's games from 賽程 then 熱身賽賽程
+    today_games = []
+    for sheet_name in WORKSHEET_MAP.values():
+        sheet = spreadsheet.worksheet(sheet_name)
+        col_c = sheet.col_values(3)  # column C = date
+        for idx, val in enumerate(col_c, start=1):
+            if today_str in str(val):
+                row_data = sheet.row_values(idx)
+                today_games.append(row_data[1:])  # paste from column B onwards
+
+    if not today_games:
+        print(f"No games found for {today_str}.")
+        return
+
+    # Paste up to 3 games into rows 4-6
+    for i, game_data in enumerate(today_games[:3]):
+        row_num = 4 + i
+        huizi.update(
+            range_name=f"B{row_num}",
+            values=[game_data],
+            value_input_option="USER_ENTERED",
+        )
+        print(f"Pasted game {i + 1} into 彙資 row {row_num}.")
+
+    print(f"彙資 updated with {min(len(today_games), 3)} game(s) for {today_str}.")
+
+
 def run_once(year: str = None, kind_codes=None):
     """
     執行一次檢查：抓賽程，若比賽結束且尚未記錄就寫入 sheet。
@@ -431,6 +485,7 @@ def run_once(year: str = None, kind_codes=None):
             time.sleep(2)  # 避免打 API 太快
 
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Run finished.")
+    update_huizi(year=year)
 
 
 def main(game_sno: str, year: str, kind_code="A"):
