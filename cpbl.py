@@ -411,7 +411,7 @@ def update_huizi(year: str = None):
         for idx, val in enumerate(col_c, start=1):
             if today_str in str(val):
                 row_data = sheet.row_values(idx)
-                today_games.append(row_data[1:])  # paste from column B onwards
+                today_games.append(row_data[1:125])  # paste columns B through DU
 
     if not today_games:
         print(f"No games found for {today_str}. Keeping existing 彙資 data.")
