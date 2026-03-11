@@ -61,38 +61,46 @@ def get_worksheet(kind_code):
 
 
 def fetch_schedule(year, month, kind_code, session):
-    """從 CPBL 賽程 API 抓取指定月份的賽程。"""
     try:
-        # 先取得 CSRF token
         response = session.get("https://www.cpbl.com.tw/schedule")
         soup = BeautifulSoup(response.text, "html.parser")
-        token_input = soup.find("input", {"name": "__RequestVerificationToken"})
-        token = token_input.get("value") if token_input else ""
 
+        # 從頁面 HTML 抓 hardcoded 的 token（格式是 token1:token2）
+        import re
+
+        token_match = re.search(r"RequestVerificationToken:\s*'([^']+)'", response.text)
+        token = token_match.group(1) if token_match else ""
+        print(f"[token] {token}")
+
+        calendar_str = f"{year}/{int(month):02d}/01"
         payload = {
-            "__RequestVerificationToken": token,
-            "KindCode": kind_code,
-            "Year": year,
-            "Month": month,
+            "calendar": calendar_str,
+            "location": "",
+            "kindCode": kind_code,
         }
+        headers = {
+            "RequestVerificationToken": token,  # 注意大小寫和冒號格式
+            "x-requested-with": "XMLHttpRequest",
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "origin": "https://www.cpbl.com.tw",
+            "referer": "https://www.cpbl.com.tw/schedule",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        }
+
         post_response = session.post(
             "https://www.cpbl.com.tw/schedule/getgamedatas",
             data=payload,
+            headers=headers,
         )
-        if post_response.status_code != 200:
-            print(f"[schedule] GET status: {response.status_code}")
-            print(f"[schedule] POST URL: https://www.cpbl.com.tw/schedule/getgamedatas")
-            print(f"[schedule] POST status: {post_response.status_code}")
-            print(f"[schedule] Response text (first 500): {post_response.text[:500]}")
-            print(f"[schedule] HTTP {post_response.status_code}")
-            return []
+        print(f"[status] {post_response.status_code}")
+        print(f"[response] {post_response.text[:300]}")
 
         result = post_response.json()
         if result.get("Success"):
             return json.loads(result.get("GameDatas", "[]"))
         return []
     except Exception as e:
-        print(f"Error fetching schedule ({kind_code} {year}/{month}): {e}")
+        print(f"Error: {e}")
         return []
 
 
