@@ -61,38 +61,46 @@ def get_worksheet(kind_code):
 
 
 def fetch_schedule(year, month, kind_code, session):
-    """從 CPBL 賽程 API 抓取指定月份的賽程。"""
     try:
-        # 先取得 CSRF token
         response = session.get("https://www.cpbl.com.tw/schedule")
         soup = BeautifulSoup(response.text, "html.parser")
-        token_input = soup.find("input", {"name": "__RequestVerificationToken"})
-        token = token_input.get("value") if token_input else ""
 
+        # 從頁面 HTML 抓 hardcoded 的 token（格式是 token1:token2）
+        import re
+
+        token_match = re.search(r"RequestVerificationToken:\s*'([^']+)'", response.text)
+        token = token_match.group(1) if token_match else ""
+        print(f"[token] {token}")
+
+        calendar_str = f"{year}/{int(month):02d}/01"
         payload = {
-            "__RequestVerificationToken": token,
-            "KindCode": kind_code,
-            "Year": year,
-            "Month": month,
+            "calendar": calendar_str,
+            "location": "",
+            "kindCode": kind_code,
         }
+        headers = {
+            "RequestVerificationToken": token,  # 注意大小寫和冒號格式
+            "x-requested-with": "XMLHttpRequest",
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "origin": "https://www.cpbl.com.tw",
+            "referer": "https://www.cpbl.com.tw/schedule",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        }
+
         post_response = session.post(
             "https://www.cpbl.com.tw/schedule/getgamedatas",
             data=payload,
+            headers=headers,
         )
-        if post_response.status_code != 200:
-            print(f"[schedule] GET status: {response.status_code}")
-            print(f"[schedule] POST URL: https://www.cpbl.com.tw/schedule/getgamedatas")
-            print(f"[schedule] POST status: {post_response.status_code}")
-            print(f"[schedule] Response text (first 500): {post_response.text[:500]}")
-            print(f"[schedule] HTTP {post_response.status_code}")
-            return []
+        print(f"[status] {post_response.status_code}")
+        print(f"[response] {post_response.text[:300]}")
 
         result = post_response.json()
         if result.get("Success"):
             return json.loads(result.get("GameDatas", "[]"))
         return []
     except Exception as e:
-        print(f"Error fetching schedule ({kind_code} {year}/{month}): {e}")
+        print(f"Error: {e}")
         return []
 
 
@@ -372,6 +380,60 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     return True
 
 
+def update_huizi(year: str = None):
+    """
+    找出今天的比賽資料（來自 賽程 或 熱身賽賽程），
+    清除 彙資 B4:DU6 後貼上最多 3 場比賽（對應 VS1/VS2/VS3）。
+    """
+    if year is None:
+        year = str(datetime.now().year)
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    print(f"Updating 彙資 for {today_str}...")
+
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    if creds_json:
+        creds = Credentials.from_service_account_info(
+            json.loads(creds_json), scopes=scope
+        )
+    else:
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(SPREADSHEET_KEY)
+    huizi = spreadsheet.worksheet("彙資")
+
+    # Clear yesterday's data in B4:DU6
+    huizi.batch_clear(["B4:DU6"])
+    print("Cleared 彙資 B4:DU6.")
+
+    # Collect today's games from 賽程 then 熱身賽賽程
+    today_games = []
+    for sheet_name in WORKSHEET_MAP.values():
+        sheet = spreadsheet.worksheet(sheet_name)
+        col_c = sheet.col_values(3)  # column C = date
+        for idx, val in enumerate(col_c, start=1):
+            if today_str in str(val):
+                row_data = sheet.row_values(idx)
+                today_games.append(row_data[1:])  # paste from column B onwards
+
+    if not today_games:
+        print(f"No games found for {today_str}.")
+        return
+
+    # Paste up to 3 games into rows 4-6
+    for i, game_data in enumerate(today_games[:3]):
+        row_num = 4 + i
+        huizi.update(
+            range_name=f"B{row_num}",
+            values=[game_data],
+            value_input_option="USER_ENTERED",
+        )
+        print(f"Pasted game {i + 1} into 彙資 row {row_num}.")
+
+    print(f"彙資 updated with {min(len(today_games), 3)} game(s) for {today_str}.")
+
+
 def run_once(year: str = None, kind_codes=None):
     """
     執行一次檢查：抓賽程，若比賽結束且尚未記錄就寫入 sheet。
@@ -431,6 +493,7 @@ def run_once(year: str = None, kind_codes=None):
             time.sleep(2)  # 避免打 API 太快
 
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Run finished.")
+    update_huizi(year=year)
 
 
 def main(game_sno: str, year: str, kind_code="A"):
