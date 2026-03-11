@@ -403,10 +403,6 @@ def update_huizi(year: str = None):
     spreadsheet = client.open_by_key(SPREADSHEET_KEY)
     huizi = spreadsheet.worksheet("彙資")
 
-    # Clear yesterday's data in B4:DU6
-    huizi.batch_clear(["B4:DU6"])
-    print("Cleared 彙資 B4:DU6.")
-
     # Collect today's games from 賽程 then 熱身賽賽程
     today_games = []
     for sheet_name in WORKSHEET_MAP.values():
@@ -418,8 +414,12 @@ def update_huizi(year: str = None):
                 today_games.append(row_data[1:])  # paste from column B onwards
 
     if not today_games:
-        print(f"No games found for {today_str}.")
+        print(f"No games found for {today_str}. Keeping existing 彙資 data.")
         return
+
+    # Only clear if we have today's data to replace with
+    huizi.batch_clear(["B4:DU6"])
+    print("Cleared 彙資 B4:DU6.")
 
     # Paste up to 3 games into rows 4-6
     for i, game_data in enumerate(today_games[:3]):
