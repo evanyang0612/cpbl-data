@@ -13,36 +13,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup WireGuard + NordVPN (Taiwan)
-        run: |
-          sudo apt-get install -y wireguard curl jq
+      # - name: Setup WireGuard + NordVPN (Taiwan)
+      #   run: |
+      #     sudo apt-get install -y wireguard curl jq
 
-          PRIVATE_KEY=$(curl -s -u token:${{ secrets.NORDVPN_TOKEN }} \
-            https://api.nordvpn.com/v1/users/services/credentials | \
-            jq -r '.nordlynx_private_key')
+      #     PRIVATE_KEY=$(curl -s -u token:${{ secrets.NORDVPN_TOKEN }} \
+      #       https://api.nordvpn.com/v1/users/services/credentials | \
+      #       jq -r '.nordlynx_private_key')
 
-          API_RESP=$(curl -s "https://api.nordvpn.com/v1/servers/recommendations?filters\[servers_technologies\]\[identifier\]=wireguard_udp&filters\[country_id\]=211&limit=1")
+      #     API_RESP=$(curl -s "https://api.nordvpn.com/v1/servers/recommendations?filters\[servers_technologies\]\[identifier\]=wireguard_udp&filters\[country_id\]=211&limit=1")
 
-          SERVER_PUBLIC_KEY=$(echo $API_RESP | jq -r '.[0].technologies[] | select(.identifier=="wireguard_udp") | .metadata[] | select(.name=="public_key") | .value')
-          SERVER_IP=$(echo $API_RESP | jq -r '.[0].station')
-          SERVER_NAME=$(echo $API_RESP | jq -r '.[0].hostname')
+      #     SERVER_PUBLIC_KEY=$(echo $API_RESP | jq -r '.[0].technologies[] | select(.identifier=="wireguard_udp") | .metadata[] | select(.name=="public_key") | .value')
+      #     SERVER_IP=$(echo $API_RESP | jq -r '.[0].station')
+      #     SERVER_NAME=$(echo $API_RESP | jq -r '.[0].hostname')
 
-          sudo bash -c "cat > /etc/wireguard/wg0.conf << EOF
-          [Interface]
-          PrivateKey = $PRIVATE_KEY
-          Address = 10.5.0.2/32
-          DNS = 103.86.96.100
+      #     sudo bash -c "cat > /etc/wireguard/wg0.conf << EOF
+      #     [Interface]
+      #     PrivateKey = $PRIVATE_KEY
+      #     Address = 10.5.0.2/32
+      #     DNS = 103.86.96.100
 
-          [Peer]
-          PublicKey = $SERVER_PUBLIC_KEY
-          Endpoint = $SERVER_IP:51820
-          AllowedIPs = 0.0.0.0/0
-          PersistentKeepalive = 25
-          EOF"
+      #     [Peer]
+      #     PublicKey = $SERVER_PUBLIC_KEY
+      #     Endpoint = $SERVER_IP:51820
+      #     AllowedIPs = 0.0.0.0/0
+      #     PersistentKeepalive = 25
+      #     EOF"
 
-          sudo wg-quick up wg0
-          echo "Connected to: $SERVER_NAME"
-          curl -s https://ifconfig.me
+      #     sudo wg-quick up wg0
+      #     echo "Connected to: $SERVER_NAME"
+      #     curl -s https://ifconfig.me
 
       - name: Set up Python
         uses: actions/setup-python@v5
