@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import requests
 from bs4 import BeautifulSoup
 import gspread
@@ -100,8 +101,8 @@ def fetch_schedule(year, month, kind_code, session):
             return json.loads(result.get("GameDatas", "[]"))
         return []
     except Exception as e:
-        print(f"Error: {e}")
-        return []
+        print(f"Error fetching schedule: {e}")
+        raise
 
 
 def is_game_recorded(game_sno, year, sheet):
@@ -451,12 +452,17 @@ def run_once(year: str = None, kind_codes=None):
     session = get_session()
     now = datetime.now()
     current_month = str(now.month)
+    errors = []
     print(
         f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Run started (year={year}, kind_codes={kind_codes})"
     )
 
     for kind_code in kind_codes:
-        games = fetch_schedule(year, current_month, kind_code, session)
+        try:
+            games = fetch_schedule(year, current_month, kind_code, session)
+        except Exception as e:
+            errors.append(f"fetch_schedule({kind_code}): {e}")
+            continue
         if not games:
             continue
 
@@ -485,15 +491,29 @@ def run_once(year: str = None, kind_codes=None):
                 continue
 
             # 抓 box score，確認是否結束並寫入
-            data = fetch_game_data(game_sno, year, kind_code, session)
-            if not data:
+            try:
+                data = fetch_game_data(game_sno, year, kind_code, session)
+                if not data:
+                    continue
+                process_and_update_sheet(data, game_sno, year, kind_code, session, sheet)
+            except Exception as e:
+                errors.append(f"game {game_sno} ({kind_code}): {e}")
                 continue
 
-            process_and_update_sheet(data, game_sno, year, kind_code, session, sheet)
             time.sleep(2)  # 避免打 API 太快
 
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Run finished.")
-    update_huizi(year=year)
+
+    try:
+        update_huizi(year=year)
+    except Exception as e:
+        errors.append(f"update_huizi: {e}")
+
+    if errors:
+        print(f"\n[ERROR] {len(errors)} failure(s) occurred:")
+        for err in errors:
+            print(f"  - {err}")
+        sys.exit(1)
 
 
 def main(game_sno: str, year: str, kind_code="A"):
