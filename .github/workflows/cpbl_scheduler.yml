@@ -59,7 +59,7 @@ jobs:
         run: python cpbl.py
 
       - name: Send failure Telegram message
-        if: failure()
+        if: success()
         run: |
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
