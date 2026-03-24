@@ -55,21 +55,6 @@ NPB_FIELDS = {
     "楽天モバイル": "宮 城",
 }
 
-# Stadium → home team key (for determining home/away from venue)
-VENUE_HOME_TEAM = {
-    "東京ドーム": "巨人",
-    "バンテリンドーム": "中日",
-    "甲子園": "阪神",
-    "神宮": "ヤクルト",
-    "マツダスタジアム": "広島",
-    "横浜": "DeNA",
-    "ZOZOマリン": "ロッテ",
-    "ベルーナドーム": "西武",
-    "PayPayドーム": "ソフトバンク",
-    "京セラD大阪": "オリックス",
-    "エスコンF": "日本ハム",
-    "楽天モバイル": "楽天",
-}
 
 LEAGUE_SHEETS = {
     "央盟": "近十場a",
@@ -164,9 +149,9 @@ async def get_game_info(game_id: str, session: aiohttp.ClientSession) -> Optiona
     if len(teams_info) < 2:
         return None
 
-    # teams_info[0] = home team, teams_info[1] = away/guest team
-    home_raw = teams_info[0].text.strip()
-    away_raw = teams_info[1].text.strip()
+    # teams_info[0] = away team, teams_info[1] = home team
+    away_raw = teams_info[0].text.strip()
+    home_raw = teams_info[1].text.strip()
     if home_raw not in NPB_TEAMS or away_raw not in NPB_TEAMS:
         return None
 
@@ -211,9 +196,9 @@ async def get_game_info(game_id: str, session: aiohttp.ClientSession) -> Optiona
         "game_id": game_id,
     }
 
-    # Batting stats: idx=0 → home team, idx=1 → away team
+    # Batting stats: idx=0 → away team, idx=1 → home team
     for idx, tbl in enumerate(soup.find_all(class_="bb-statsTable")):
-        key = home_name if idx == 0 else away_name
+        key = away_name if idx == 0 else home_name
         cells = tbl.find_all(class_="bb-statsTable__data--result")
         if len(cells) < 12:
             continue
@@ -228,18 +213,17 @@ async def get_game_info(game_id: str, session: aiohttp.ClientSession) -> Optiona
             }
         )
 
-    # Pitching stats: score table idx=0 → home pitchers (faced by away batters)
-    #                              idx=1 → away pitchers (faced by home batters)
-    # main.py uses main_key=guest when idx==0, meaning:
-    #   - idx=0: pitcher_side=home, batter_side=away
-    #     → away["実分"] += home pitcher ER  (earned runs away scored vs home pitching)
-    #     → home["失分"] += home pitcher R   (total runs away scored vs home pitching)
-    #   - idx=1: pitcher_side=away, batter_side=home
+    # Pitching stats: score table idx=0 → away pitchers (faced by home batters)
+    #                              idx=1 → home pitchers (faced by away batters)
+    #   - idx=0: pitcher_side=away, batter_side=home
     #     → home["実分"] += away pitcher ER  (earned runs home scored vs away pitching)
     #     → away["失分"] += away pitcher R   (total runs home scored vs away pitching)
+    #   - idx=1: pitcher_side=home, batter_side=away
+    #     → away["実分"] += home pitcher ER  (earned runs away scored vs home pitching)
+    #     → home["失分"] += home pitcher R   (total runs away scored vs home pitching)
     for idx, score_tbl in enumerate(soup.find_all(class_="bb-scoreTable")):
-        batter_key = away_name if idx == 0 else home_name
-        pitcher_key = home_name if idx == 0 else away_name
+        batter_key = home_name if idx == 0 else away_name
+        pitcher_key = away_name if idx == 0 else home_name
         rows = score_tbl.find_all(class_="bb-scoreTable__row")
         for row_idx, row in enumerate(rows):
             if row_idx == 0:
@@ -400,7 +384,7 @@ async def get_next_matchups(
 ) -> list[tuple[str, str]]:
     """
     Returns up to 3 (away_key, home_key) pairs for the next game day in the league.
-    Home/away is determined by matching venue to VENUE_HOME_TEAM.
+    Home/away is determined by the team order in the game page HTML ([0]=home, [1]=away).
     Falls back to alphabetical pairing if schedule cannot be determined.
     """
     league_teams = {k: v for k, v in NPB_TEAMS.items() if v["league"] == league}
@@ -435,31 +419,38 @@ async def get_next_matchups(
 
     seen: dict[str, tuple[str, str]] = {}  # game_id -> (away_key, home_key)
 
-    # For teams that have a real game ID, fetch the game page to get teams + venue
+    # For teams that have a real game ID, fetch the game page to get teams + venue.
+    # /top works for finished games; for upcoming games /top has no team/venue data,
+    # but /stats does — so always try /stats as fallback when parsing fails.
     known_ids = {gid for gid in day_games.values() if gid is not None}
     for game_id in dict.fromkeys(known_ids):
-        html = await _fetch(session, f"{BASE_URL}game/{game_id}/top")
-        if not html:
-            html = await _fetch(session, f"{BASE_URL}game/{game_id}/stats")
-        if not html:
+        soup = None
+        for path in ("stats", "top"):
+            html = await _fetch(session, f"{BASE_URL}game/{game_id}/{path}")
+            if not html:
+                continue
+            candidate = bs(html, "html.parser")
+            if len(candidate.find_all(class_="bb-gameScoreTable__team")) >= 2:
+                soup = candidate
+                break
+        if soup is None:
             continue
 
-        soup = bs(html, "html.parser")
         teams_els = soup.find_all(class_="bb-gameScoreTable__team")
-        venue_el = soup.find(class_="bb-gameRound--stadium")
-        if len(teams_els) < 2 or not venue_el:
+        if len(teams_els) < 2:
             continue
 
         t0 = teams_els[0].text.strip()
         t1 = teams_els[1].text.strip()
-        venue_raw = venue_el.text.strip()
 
         if t0 not in league_teams or t1 not in league_teams:
+            # Cross-league game: skip pairing here. The league team has a gid so it
+            # won't appear in no_id_teams, but it will be caught by the unmatched pad
+            # below and paired with another same-league team. This keeps sheets pure.
             continue
 
-        home_key = VENUE_HOME_TEAM.get(venue_raw, t0)
-        away_key = t1 if home_key == t0 else t0
-        seen[game_id] = (away_key, home_key)
+        # Page order: [0] = away, [1] = home — same convention as get_game_info
+        seen[game_id] = (t0, t1)  # (away_key, home_key)
 
     matchups = list(seen.values())
 
