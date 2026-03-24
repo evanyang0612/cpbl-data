@@ -44,19 +44,19 @@ jobs:
           echo "Connected to: $SERVER_NAME"
           curl -s https://ifconfig.me
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: uv sync
 
       - name: Run CPBL updater
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SPREADSHEET_KEY: ${{ secrets.SPREADSHEET_KEY }}
-        run: python cpbl.py
+        run: uv run python cpbl.py
 
       - name: Send failure Telegram message
         if: failure()
