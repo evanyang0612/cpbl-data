@@ -1,0 +1,16 @@
+[project]
+name = "cpbl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "dotenv>=0.9.9",
+    "google-auth>=2.49.1",
+    "gspread>=6.2.1",
+    "pdf2image>=1.17.0",
+    "pillow>=12.1.1",
+    "requests>=2.32.5",
+    "aiohttp>=3.9.0",
+]
