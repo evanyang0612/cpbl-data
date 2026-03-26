@@ -174,6 +174,76 @@ def get_pitching_habit(acnt_id, session):
     return ""
 
 
+def _get_pitching_stats(pitching, ptype, is_starter=False):
+    """從 PitchingJson 計算單邊（客/主）投球統計。回傳 (stats[13], name, acnt)。"""
+    stats = [0] * 13
+    target_pitchers = [
+        p
+        for p in pitching
+        if str(p.get("VisitingHomeType")) == str(ptype)
+        and (not is_starter or p.get("RoleType") == "先發")
+    ]
+    name = (
+        target_pitchers[0].get("PitcherName", "")
+        if is_starter and target_pitchers
+        else ""
+    )
+    acnt = (
+        target_pitchers[0].get("PitcherAcnt", "")
+        if is_starter and target_pitchers
+        else ""
+    )
+    total_outs = 0
+    for p in target_pitchers:
+        total_outs += int(p.get("InningPitchedCnt", 0)) * 3 + int(
+            p.get("InningPitchedDiv3Cnt", 0)
+        )
+        stats[1] += int(p.get("PlateAppearances", 0))
+        stats[2] += int(p.get("PitchCnt", 0))
+        stats[3] += int(p.get("StrikeCnt", 0))
+        stats[4] += int(p.get("HittingCnt", 0))
+        stats[5] += int(p.get("HomeRunCnt", 0))
+        stats[6] += int(p.get("BasesONBallsCnt", 0))
+        stats[7] += int(p.get("HitBYPitchCnt", 0))
+        stats[8] += int(p.get("StrikeOutCnt", 0))
+        stats[9] += int(p.get("WildPitchCnt", 0))
+        stats[10] += int(p.get("BalkCnt", 0))
+        stats[11] += int(p.get("RunCnt", 0))
+        stats[12] += int(p.get("EarnedRunCnt", 0))
+    stats[0] = total_outs // 3 if total_outs % 3 == 0 else round(total_outs / 3, 3)
+    return stats, name, acnt
+
+
+def _get_batting_stats(batting, pitching, ptype):
+    """從 BattingJson + PitchingJson 計算單邊（客/主）打擊統計。回傳 stats[16]。"""
+    stats = [0] * 16
+    target_batters = [
+        b for b in batting if str(b.get("VisitingHomeType")) == str(ptype)
+    ]
+    for b in target_batters:
+        stats[0] += int(b.get("HitCnt", 0))  # 打數 (AB)
+        stats[1] += int(b.get("ScoreCnt", 0))
+        stats[2] += int(b.get("HittingCnt", 0))  # 安打 (H)
+        stats[3] += int(b.get("RunBattedINCnt", 0))
+        stats[4] += int(b.get("TwoBaseHitCnt", 0))
+        stats[5] += int(b.get("ThreeBaseHitCnt", 0))
+        stats[6] += int(b.get("HomeRunCnt", 0))
+        stats[7] += int(b.get("DoublePlayBatCnt", 0))
+        stats[8] += int(b.get("BasesONBallsCnt", 0))
+        stats[9] += int(b.get("HitBYPitchCnt", 0))
+        stats[10] += int(b.get("StrikeOutCnt", 0))
+        stats[11] += int(b.get("SacrificeHitCnt", 0))
+        stats[12] += int(b.get("SacrificeFlyCnt", 0))
+        stats[13] += int(b.get("StealBaseOKCnt", 0))
+        stats[14] += int(b.get("StealBaseFailCnt", 0))
+        stats[15] += int(b.get("ErrorCnt", 0))
+    # 加上 PitchingJson 的失誤
+    for p in pitching:
+        if str(p.get("VisitingHomeType")) == str(ptype):
+            stats[15] += int(p.get("ErrorCnt", 0))
+    return stats
+
+
 def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     """解析比賽資料並寫入對應 worksheet。回傳 True 代表成功寫入。"""
     curt_game_detail = json.loads(data.get("CurtGameDetailJson", "{}"))
@@ -213,72 +283,6 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     pitching = json.loads(data.get("PitchingJson", "[]"))
     batting = json.loads(data.get("BattingJson", "[]"))
 
-    def get_pitching_stats(ptype, is_starter=False):
-        stats = [0] * 13
-        target_pitchers = [
-            p
-            for p in pitching
-            if str(p.get("VisitingHomeType")) == str(ptype)
-            and (not is_starter or p.get("RoleType") == "先發")
-        ]
-        name = (
-            target_pitchers[0].get("PitcherName", "")
-            if is_starter and target_pitchers
-            else ""
-        )
-        acnt = (
-            target_pitchers[0].get("PitcherAcnt", "")
-            if is_starter and target_pitchers
-            else ""
-        )
-        total_outs = 0
-        for p in target_pitchers:
-            total_outs += int(p.get("InningPitchedCnt", 0)) * 3 + int(
-                p.get("InningPitchedDiv3Cnt", 0)
-            )
-            stats[1] += int(p.get("PlateAppearances", 0))
-            stats[2] += int(p.get("PitchCnt", 0))
-            stats[3] += int(p.get("StrikeCnt", 0))
-            stats[4] += int(p.get("HittingCnt", 0))
-            stats[5] += int(p.get("HomeRunCnt", 0))
-            stats[6] += int(p.get("BasesONBallsCnt", 0))
-            stats[7] += int(p.get("HitBYPitchCnt", 0))
-            stats[8] += int(p.get("StrikeOutCnt", 0))
-            stats[9] += int(p.get("WildPitchCnt", 0))
-            stats[10] += int(p.get("BalkCnt", 0))
-            stats[11] += int(p.get("RunCnt", 0))
-            stats[12] += int(p.get("EarnedRunCnt", 0))
-        stats[0] = total_outs // 3 if total_outs % 3 == 0 else round(total_outs / 3, 3)
-        return stats, name, acnt
-
-    def get_batting_stats(ptype):
-        stats = [0] * 16
-        target_batters = [
-            b for b in batting if str(b.get("VisitingHomeType")) == str(ptype)
-        ]
-        for b in target_batters:
-            stats[0] += int(b.get("HitCnt", 0))  # 打數 (AB)
-            stats[1] += int(b.get("ScoreCnt", 0))
-            stats[2] += int(b.get("HittingCnt", 0))  # 安打 (H)
-            stats[3] += int(b.get("RunBattedINCnt", 0))
-            stats[4] += int(b.get("TwoBaseHitCnt", 0))
-            stats[5] += int(b.get("ThreeBaseHitCnt", 0))
-            stats[6] += int(b.get("HomeRunCnt", 0))
-            stats[7] += int(b.get("DoublePlayBatCnt", 0))
-            stats[8] += int(b.get("BasesONBallsCnt", 0))
-            stats[9] += int(b.get("HitBYPitchCnt", 0))
-            stats[10] += int(b.get("StrikeOutCnt", 0))
-            stats[11] += int(b.get("SacrificeHitCnt", 0))
-            stats[12] += int(b.get("SacrificeFlyCnt", 0))
-            stats[13] += int(b.get("StealBaseOKCnt", 0))
-            stats[14] += int(b.get("StealBaseFailCnt", 0))
-            stats[15] += int(b.get("ErrorCnt", 0))
-        # 加上 PitchingJson 的失誤
-        for p in pitching:
-            if str(p.get("VisitingHomeType")) == str(ptype):
-                stats[15] += int(p.get("ErrorCnt", 0))
-        return stats
-
     # --- 決定目標列 ---
     col_b_values = sheet.col_values(2)
     target_row = len(col_b_values) + 1
@@ -307,7 +311,7 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
             if 1 <= inning <= 12:
                 update_values[9 + inning - 1] = int(float(score.get("ScoreCnt", 0)))
 
-    v_batting = get_batting_stats(1)
+    v_batting = _get_batting_stats(batting, pitching, 1)
     update_values[21] = game_detail.get("VisitingTotalScore", 0)
     update_values[22] = v_batting[2]
     update_values[23] = v_batting[15]
@@ -338,27 +342,27 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
                             score_val = "X"
                 update_values[24 + inning - 1] = score_val
 
-    h_batting = get_batting_stats(2)
+    h_batting = _get_batting_stats(batting, pitching, 2)
     update_values[36] = game_detail.get("HomeTotalScore", 0)
     update_values[37] = h_batting[2]
     update_values[38] = h_batting[15]
 
     # 投球資料
-    v_starter_stats, v_starter_name, v_starter_acnt = get_pitching_stats(1, True)
+    v_starter_stats, v_starter_name, v_starter_acnt = _get_pitching_stats(pitching, 1, True)
     update_values[4] = v_starter_name
     for i in range(13):
         update_values[39 + i] = v_starter_stats[i]
 
-    v_total_pitch, _, _ = get_pitching_stats(1, False)
+    v_total_pitch, _, _ = _get_pitching_stats(pitching, 1, False)
     for i in range(13):
         update_values[52 + i] = v_total_pitch[i]
 
-    h_starter_stats, h_starter_name, h_starter_acnt = get_pitching_stats(2, True)
+    h_starter_stats, h_starter_name, h_starter_acnt = _get_pitching_stats(pitching, 2, True)
     update_values[6] = h_starter_name
     for i in range(13):
         update_values[65 + i] = h_starter_stats[i]
 
-    h_total_pitch, _, _ = get_pitching_stats(2, False)
+    h_total_pitch, _, _ = _get_pitching_stats(pitching, 2, False)
     for i in range(13):
         update_values[78 + i] = h_total_pitch[i]
 
@@ -495,7 +499,9 @@ def run_once(year: str = None, kind_codes=None):
                 data = fetch_game_data(game_sno, year, kind_code, session)
                 if not data:
                     continue
-                process_and_update_sheet(data, game_sno, year, kind_code, session, sheet)
+                process_and_update_sheet(
+                    data, game_sno, year, kind_code, session, sheet
+                )
             except Exception as e:
                 errors.append(f"game {game_sno} ({kind_code}): {e}")
                 continue
@@ -537,7 +543,7 @@ def main(game_sno: str, year: str, kind_code="A"):
 
 if __name__ == "__main__":
     # GitHub Actions cron 觸發時執行此入口
-    run_once(year=str(datetime.now().year), kind_codes=["G"])
+    run_once(year=str(datetime.now().year), kind_codes=["A"])
 
     # 手動跑單場範例（本地測試用）：
     # main(game_sno="1", year="2025", kind_code="G")  # 熱身賽
