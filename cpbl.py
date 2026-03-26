@@ -495,7 +495,9 @@ def run_once(year: str = None, kind_codes=None):
                 data = fetch_game_data(game_sno, year, kind_code, session)
                 if not data:
                     continue
-                process_and_update_sheet(data, game_sno, year, kind_code, session, sheet)
+                process_and_update_sheet(
+                    data, game_sno, year, kind_code, session, sheet
+                )
             except Exception as e:
                 errors.append(f"game {game_sno} ({kind_code}): {e}")
                 continue
@@ -537,7 +539,7 @@ def main(game_sno: str, year: str, kind_code="A"):
 
 if __name__ == "__main__":
     # GitHub Actions cron 觸發時執行此入口
-    run_once(year=str(datetime.now().year), kind_codes=["G"])
+    run_once(year=str(datetime.now().year), kind_codes=["A"])
 
     # 手動跑單場範例（本地測試用）：
     # main(game_sno="1", year="2025", kind_code="G")  # 熱身賽
