@@ -26,18 +26,90 @@ GAMES_COUNT = 10
 MAX_CONCURRENT = 5
 
 NPB_TEAMS = {
-    "巨人":        {"id": 1,   "name": "巨 人", "fill": "ff6600", "font": "000000", "league": "央盟"},
-    "ヤクルト":    {"id": 2,   "name": "燕 子", "fill": "00009a", "font": "ffffff", "league": "央盟"},
-    "DeNA":        {"id": 3,   "name": "橫 濱", "fill": "003366", "font": "b6dde8", "league": "央盟"},
-    "中日":        {"id": 4,   "name": "中 日", "fill": "002774", "font": "ffffff", "league": "央盟"},
-    "阪神":        {"id": 5,   "name": "阪 神", "fill": "fcf600", "font": "000000", "league": "央盟"},
-    "広島":        {"id": 6,   "name": "廣 島", "fill": "ea0000", "font": "ffffff", "league": "央盟"},
-    "西武":        {"id": 7,   "name": "西 武", "fill": "99ccff", "font": "17365d", "league": "洋盟"},
-    "日本ハム":    {"id": 8,   "name": "火 腿", "fill": "2b67af", "font": "ffffff", "league": "洋盟"},
-    "ロッテ":      {"id": 9,   "name": "羅 德", "fill": "808080", "font": "ffffff", "league": "洋盟"},
-    "オリックス":  {"id": 11,  "name": "歐 牛", "fill": "002060", "font": "c4bf00", "league": "洋盟"},
-    "ソフトバンク":{"id": 12,  "name": "軟 銀", "fill": "ffcc00", "font": "000000", "league": "洋盟"},
-    "楽天":        {"id": 376, "name": "樂 天", "fill": "800000", "font": "ffffff", "league": "洋盟"},
+    "巨人": {
+        "id": 1,
+        "name": "巨 人",
+        "fill": "ff6600",
+        "font": "000000",
+        "league": "央盟",
+    },
+    "ヤクルト": {
+        "id": 2,
+        "name": "燕 子",
+        "fill": "00009a",
+        "font": "ffffff",
+        "league": "央盟",
+    },
+    "DeNA": {
+        "id": 3,
+        "name": "橫 濱",
+        "fill": "003366",
+        "font": "b6dde8",
+        "league": "央盟",
+    },
+    "中日": {
+        "id": 4,
+        "name": "中 日",
+        "fill": "002774",
+        "font": "ffffff",
+        "league": "央盟",
+    },
+    "阪神": {
+        "id": 5,
+        "name": "阪 神",
+        "fill": "fcf600",
+        "font": "000000",
+        "league": "央盟",
+    },
+    "広島": {
+        "id": 6,
+        "name": "廣 島",
+        "fill": "ea0000",
+        "font": "ffffff",
+        "league": "央盟",
+    },
+    "西武": {
+        "id": 7,
+        "name": "西 武",
+        "fill": "99ccff",
+        "font": "17365d",
+        "league": "洋盟",
+    },
+    "日本ハム": {
+        "id": 8,
+        "name": "火 腿",
+        "fill": "2b67af",
+        "font": "ffffff",
+        "league": "洋盟",
+    },
+    "ロッテ": {
+        "id": 9,
+        "name": "羅 德",
+        "fill": "808080",
+        "font": "ffffff",
+        "league": "洋盟",
+    },
+    "オリックス": {
+        "id": 11,
+        "name": "歐 牛",
+        "fill": "002060",
+        "font": "c4bf00",
+        "league": "洋盟",
+    },
+    "ソフトバンク": {
+        "id": 12,
+        "name": "軟 銀",
+        "fill": "ffcc00",
+        "font": "000000",
+        "league": "洋盟",
+    },
+    "楽天": {
+        "id": 376,
+        "name": "樂 天",
+        "fill": "800000",
+        "font": "ffffff",
+        "league": "洋盟",
+    },
 }
 
 NPB_FIELDS = {
@@ -88,9 +160,9 @@ def hex_to_rgb(hex_color: str) -> dict:
     """Convert a 6-char hex color string to a Sheets API RGB dict (0.0–1.0 floats)."""
     h = hex_color.lstrip("#")
     return {
-        "red":   int(h[0:2], 16) / 255,
+        "red": int(h[0:2], 16) / 255,
         "green": int(h[2:4], 16) / 255,
-        "blue":  int(h[4:6], 16) / 255,
+        "blue": int(h[4:6], 16) / 255,
     }
 
 
@@ -384,7 +456,9 @@ async def get_next_matchups(
 ) -> list[tuple[str, str]]:
     """
     Returns up to 3 (away_key, home_key) pairs for the next game day in the league.
-    Home/away is determined by the team order in the game page HTML ([0]=home, [1]=away).
+    Home/away is determined by the team order in the game page HTML ([0]=away, [1]=home).
+    During inter-league (交流戦) games, records each same-league team's home/away role
+    and pairs them with another same-league team in the same role split.
     Falls back to alphabetical pairing if schedule cannot be determined.
     """
     league_teams = {k: v for k, v in NPB_TEAMS.items() if v["league"] == league}
@@ -397,9 +471,7 @@ async def get_next_matchups(
     resolved = await asyncio.gather(*tasks.values())
     # Include teams where a date was found, even if game_id is None (pre-season / no page yet)
     team_next: dict[str, tuple[Optional[str], str]] = {
-        key: (gid, d)
-        for key, (gid, d) in zip(tasks.keys(), resolved)
-        if d is not None
+        key: (gid, d) for key, (gid, d) in zip(tasks.keys(), resolved) if d is not None
     }
 
     if not team_next:
@@ -418,6 +490,9 @@ async def get_next_matchups(
     print(f"[{league}] Next game day: {next_date}, games: {day_games}")
 
     seen: dict[str, tuple[str, str]] = {}  # game_id -> (away_key, home_key)
+    cross_roles: dict[str, str] = (
+        {}
+    )  # team_key -> 'away' | 'home' for inter-league teams
 
     # For teams that have a real game ID, fetch the game page to get teams + venue.
     # /top works for finished games; for upcoming games /top has no team/venue data,
@@ -440,23 +515,30 @@ async def get_next_matchups(
         if len(teams_els) < 2:
             continue
 
-        t0 = teams_els[0].text.strip()
-        t1 = teams_els[1].text.strip()
+        t0 = teams_els[0].text.strip()  # away
+        t1 = teams_els[1].text.strip()  # home
 
-        if t0 not in league_teams or t1 not in league_teams:
-            # Cross-league game: skip pairing here. The league team has a gid so it
-            # won't appear in no_id_teams, but it will be caught by the unmatched pad
-            # below and paired with another same-league team. This keeps sheets pure.
-            continue
+        t0_in = t0 in league_teams
+        t1_in = t1 in league_teams
 
-        # Page order: [0] = away, [1] = home — same convention as get_game_info
-        seen[game_id] = (t0, t1)  # (away_key, home_key)
+        if t0_in and t1_in:
+            # Same-league game — page order: [0]=away, [1]=home
+            seen[game_id] = (t0, t1)
+        elif t0_in:
+            # Inter-league: t0 is our team and is playing away
+            cross_roles[t0] = "away"
+        elif t1_in:
+            # Inter-league: t1 is our team and is playing home
+            cross_roles[t1] = "home"
 
     matchups = list(seen.values())
+    matched = {t for pair in matchups for t in pair}
+    matched.update(cross_roles.keys())
 
     # For teams still unmatched (no game ID yet), try reading opponent from schedule page
-    matched = {t for pair in matchups for t in pair}
-    no_id_teams = [k for k, gid in day_games.items() if gid is None and k not in matched]
+    no_id_teams = [
+        k for k, gid in day_games.items() if gid is None and k not in matched
+    ]
 
     if no_id_teams:
         opp_tasks = {
@@ -471,8 +553,8 @@ async def get_next_matchups(
             if key in paired or key in matched:
                 continue
             opp = opponents.get(key)
-            if opp and opp in no_id_teams and opp not in paired:
-                # No venue data available; use lower NPB ID as home (arbitrary but stable)
+            if opp and opp in league_teams and opp in no_id_teams and opp not in paired:
+                # Same-league game, no ID yet; use lower NPB ID as home (arbitrary but stable)
                 if NPB_TEAMS[key]["id"] < NPB_TEAMS[opp]["id"]:
                     home_key, away_key = key, opp
                 else:
@@ -480,13 +562,33 @@ async def get_next_matchups(
                 matchups.append((away_key, home_key))
                 paired.update([key, opp])
                 matched.update([key, opp])
+            elif opp and opp not in league_teams:
+                # Inter-league game, no ID yet — can't determine home/away without game page;
+                # default to 'away' so the team lands on top rather than being dropped
+                cross_roles[key] = "away"
+                matched.add(key)
 
-    # Pad to 3 if still fewer than 3 matchups
-    unmatched = [k for k in league_teams if k not in matched]
-    for i in range(0, len(unmatched) - 1, 2):
-        matchups.append((unmatched[i], unmatched[i + 1]))
+    # Pair inter-league teams: match away with home where possible
+    away_cross = [k for k, r in cross_roles.items() if r == "away"]
+    home_cross = [k for k, r in cross_roles.items() if r == "home"]
+
+    while away_cross and home_cross and len(matchups) < 3:
+        matchups.append((away_cross.pop(0), home_cross.pop(0)))
+
+    # If roles are unbalanced (e.g. all-away day), pair same-role teams together
+    remaining_cross = away_cross + home_cross
+    for i in range(0, len(remaining_cross) - 1, 2):
         if len(matchups) >= 3:
             break
+        matchups.append((remaining_cross[i], remaining_cross[i + 1]))
+
+    # Pad to 3 if still fewer than 3 matchups (e.g. rest days)
+    matched = {t for pair in matchups for t in pair}
+    unmatched = [k for k in league_teams if k not in matched]
+    for i in range(0, len(unmatched) - 1, 2):
+        if len(matchups) >= 3:
+            break
+        matchups.append((unmatched[i], unmatched[i + 1]))
 
     # Sort columns by away team's NPB ID for a consistent, predictable left-to-right order
     matchups.sort(key=lambda pair: NPB_TEAMS[pair[0]]["id"])
@@ -589,10 +691,10 @@ def _pitcher_font_size(name: str) -> int:
     """12pt (default) for ≤5 chars; shrink only when name exceeds 5 chars."""
     n = len(name.replace(" ", ""))
     if n > 7:
-        return 9
+        return 6
     if n > 5:
-        return 10
-    return 12
+        return 8
+    return 10
 
 
 def _pitcher_font_requests(
@@ -613,23 +715,25 @@ def _pitcher_font_requests(
     for i in range(GAMES_COUNT):
         name = sorted_games[i].get("對戰先發", "") if i < len(sorted_games) else ""
         row_0idx = game_start_row - 1 + i
-        requests.append({
-            "repeatCell": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "startRowIndex": row_0idx,
-                    "endRowIndex": row_0idx + 1,
-                    "startColumnIndex": pitcher_col,
-                    "endColumnIndex": pitcher_col + 1,
-                },
-                "cell": {
-                    "userEnteredFormat": {
-                        "textFormat": {"fontSize": _pitcher_font_size(name)}
-                    }
-                },
-                "fields": "userEnteredFormat.textFormat.fontSize",
+        requests.append(
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row_0idx,
+                        "endRowIndex": row_0idx + 1,
+                        "startColumnIndex": pitcher_col,
+                        "endColumnIndex": pitcher_col + 1,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "textFormat": {"fontSize": _pitcher_font_size(name)}
+                        }
+                    },
+                    "fields": "userEnteredFormat.textFormat.fontSize",
+                }
             }
-        })
+        )
 
     return requests
 
@@ -643,9 +747,9 @@ def _header_format_request(
         "repeatCell": {
             "range": {
                 "sheetId": sheet_id,
-                "startRowIndex": header_row - 1,   # 0-indexed, inclusive
-                "endRowIndex": header_row,          # exclusive
-                "startColumnIndex": col_start - 1, # 0-indexed, inclusive
+                "startRowIndex": header_row - 1,  # 0-indexed, inclusive
+                "endRowIndex": header_row,  # exclusive
+                "startColumnIndex": col_start - 1,  # 0-indexed, inclusive
                 "endColumnIndex": col_start + 11,  # exclusive (12 cols)
             },
             "cell": {
@@ -684,10 +788,12 @@ def update_league_sheet(
         # Top block (away team)
         away_games = all_games.get(away_key, [])
         top_values = build_block_values(away_key, away_games)
-        value_updates.append({
-            "range": f"{col_start_l}{TOP_HEADER_ROW}:{col_end_l}{TOP_AVG5_ROW}",
-            "values": top_values,
-        })
+        value_updates.append(
+            {
+                "range": f"{col_start_l}{TOP_HEADER_ROW}:{col_end_l}{TOP_AVG5_ROW}",
+                "values": top_values,
+            }
+        )
         format_requests.append(
             _header_format_request(sheet.id, away_key, TOP_HEADER_ROW, col_start)
         )
@@ -698,10 +804,12 @@ def update_league_sheet(
         # Bottom block (home team)
         home_games = all_games.get(home_key, [])
         bottom_values = build_block_values(home_key, home_games)
-        value_updates.append({
-            "range": f"{col_start_l}{BOTTOM_HEADER_ROW}:{col_end_l}{BOTTOM_AVG5_ROW}",
-            "values": bottom_values,
-        })
+        value_updates.append(
+            {
+                "range": f"{col_start_l}{BOTTOM_HEADER_ROW}:{col_end_l}{BOTTOM_AVG5_ROW}",
+                "values": bottom_values,
+            }
+        )
         format_requests.append(
             _header_format_request(sheet.id, home_key, BOTTOM_HEADER_ROW, col_start)
         )
