@@ -112,6 +112,9 @@ NPB_TEAMS = {
     },
 }
 
+SAILU_SPREADSHEET_KEY = "1bDBg86YndwzE4e5r9rkj9KIudnJOgKI4IM1nfJoSl-o"
+SAILU_SHEET_NAME = "賽錄"
+
 NPB_FIELDS = {
     "東京ドーム": "東 京",
     "バンテリンドーム": "名古屋",
@@ -175,7 +178,7 @@ def col_to_letter(col: int) -> str:
     return result
 
 
-def get_worksheet(sheet_name: str):
+def get_worksheet(sheet_name: str, spreadsheet_key: str = NPB_SPREADSHEET_KEY):
     scope = ["https://www.googleapis.com/auth/spreadsheets"]
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     if creds_json:
@@ -185,7 +188,7 @@ def get_worksheet(sheet_name: str):
     else:
         creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
     client = gspread.authorize(creds)
-    return client.open_by_key(NPB_SPREADSHEET_KEY).worksheet(sheet_name)
+    return client.open_by_key(spreadsheet_key).worksheet(sheet_name)
 
 
 # --- Scraping ---
@@ -595,6 +598,325 @@ async def get_next_matchups(
     return matchups[:3]
 
 
+# --- 賽錄 scraping & update ---
+
+
+async def get_sailu_game_data(game_id: str, session: aiohttp.ClientSession) -> Optional[dict]:
+    """
+    Scrape a finished game's full box score from Yahoo Baseball and return a
+    dict whose keys map directly to 賽錄 columns.  Returns None on any failure.
+    """
+    # Fetch both /stats and /top pages concurrently
+    stats_html, top_html = await asyncio.gather(
+        _fetch(session, f"{BASE_URL}game/{game_id}/stats"),
+        _fetch(session, f"{BASE_URL}game/{game_id}/top"),
+    )
+    if not stats_html:
+        return None
+    soup = bs(stats_html, "html.parser")
+    top_soup = bs(top_html, "html.parser") if top_html else None
+
+    # ── Teams ──────────────────────────────────────────────────────────────
+    teams_els = soup.find_all(class_="bb-gameScoreTable__team")
+    if len(teams_els) < 2:
+        return None
+    away_raw = teams_els[0].text.strip()
+    home_raw = teams_els[1].text.strip()
+    if away_raw not in NPB_TEAMS or home_raw not in NPB_TEAMS:
+        return None
+
+    # ── Date ───────────────────────────────────────────────────────────────
+    title = soup.find("title")
+    if not title:
+        return None
+    m = re.search(r"(\d+年\d{1,2}月\d{1,2}日)", title.text)
+    if not m:
+        return None
+    date_str = datetime.strptime(m.group(1), "%Y年%m月%d日").strftime("%Y-%m-%d")
+
+    # ── Venue ──────────────────────────────────────────────────────────────
+    venue_el = soup.find(class_="bb-gameRound--stadium")
+    venue = venue_el.text.strip() if venue_el else ""
+
+    # ── Game time (from /top page) ─────────────────────────────────────────
+    game_time = ""
+    if top_soup:
+        for txt_node in top_soup.find_all(string=re.compile(r"\d{1,2}:\d{2}")):
+            stripped = txt_node.strip()
+            if re.match(r"^\d{1,2}:\d{2}$", stripped):
+                game_time = stripped
+                break
+
+    # ── Umpire / 球審 (from /top page) ────────────────────────────────────
+    umpire = ""
+    if top_soup:
+        judge_el = top_soup.find(class_="bb-tableLeft__head--judge")
+        if judge_el:
+            tr = judge_el.find_parent("tr")
+            if tr:
+                data_el = tr.find(class_="bb-tableLeft__data")
+                if data_el:
+                    umpire = data_el.text.strip()
+
+    # ── Per-inning scores, R / H / E ───────────────────────────────────────
+    away_innings: list = [""] * 12
+    home_innings: list = [""] * 12
+    away_r = away_h = away_e = 0
+    home_r = home_h = home_e = 0
+
+    score_table = soup.find(class_="bb-gameScoreTable")
+    if score_table:
+        score_rows = score_table.find_all(class_="bb-gameScoreTable__row")
+        for row_idx, row in enumerate(score_rows[:2]):
+            innings = away_innings if row_idx == 0 else home_innings
+            # Per-inning scores are on <a> tags with class bb-gameScoreTable__score
+            inning_cells = row.find_all(class_="bb-gameScoreTable__score")
+            for i, cell in enumerate(inning_cells[:12]):
+                txt = cell.text.strip()
+                innings[i] = txt if txt not in ("", "-", "×") else ""
+            # R total
+            total_el = row.find(class_="bb-gameScoreTable__total")
+            # H total
+            hits_el = row.find(class_="bb-gameScoreTable__data--hits")
+            # E total
+            error_el = row.find(class_="bb-gameScoreTable__data--loss")
+            try:
+                r_val = int(total_el.text.strip()) if total_el else 0
+            except ValueError:
+                r_val = 0
+            try:
+                h_val = int(hits_el.text.strip()) if hits_el else 0
+            except ValueError:
+                h_val = 0
+            try:
+                e_val = int(error_el.text.strip()) if error_el else 0
+            except ValueError:
+                e_val = 0
+            if row_idx == 0:
+                away_r, away_h, away_e = r_val, h_val, e_val
+            else:
+                home_r, home_h, home_e = r_val, h_val, e_val
+
+    # ── Starting pitcher stats (from /stats page) ──────────────────────────
+    # pitch_tables[0] = away pitchers, pitch_tables[1] = home pitchers
+    away_starter = home_starter = ""
+    away_ip = home_ip = ""
+    away_er = home_er = 0
+    away_qs = home_qs = 0
+
+    for p_idx, ptbl in enumerate(soup.find_all(class_="bb-scoreTable")[:2]):
+        rows = ptbl.find_all(class_="bb-scoreTable__row")
+        if not rows:
+            continue
+        row = rows[0]  # starter is always first row
+
+        # Name — strip any (右)/(左) suffix that may appear
+        name_el = row.find(class_="bb-scoreTable__data--player")
+        raw_name = name_el.text.strip() if name_el else ""
+        name = re.sub(r"\s*[（(][右左][）)]\s*", "", raw_name).strip()
+
+        # score cells: [ERA, IP, BF, H, HR, BB, HBP, SO, R, ER]
+        # [0]=ERA, [1]=IP, [-2]=R, [-1]=ER
+        score_cells = row.find_all(class_="bb-scoreTable__data--score")
+        ip = score_cells[1].text.strip() if len(score_cells) > 1 else ""
+        try:
+            er = int(score_cells[-1].text) if score_cells else 0
+        except ValueError:
+            er = 0
+
+        # QS: starter pitched ≥ 6 full innings AND allowed ≤ 3 ER
+        ip_full = int(str(ip).split(".")[0]) if ip and str(ip)[0].isdigit() else 0
+        qs = 1 if ip_full >= 6 and er <= 3 else 0
+
+        if p_idx == 0:
+            away_starter, away_ip, away_er, away_qs = name, ip, er, qs
+        else:
+            home_starter, home_ip, home_er, home_qs = name, ip, er, qs
+
+    # ── Pitcher handedness (from /top page bb-splitsTable) ─────────────────
+    away_hand = home_hand = ""
+    if top_soup:
+        for splits_tbl in top_soup.find_all(class_="bb-splitsTable"):
+            for row in splits_tbl.find_all(class_="bb-splitsTable__row"):
+                cells = row.find_all(["th", "td"])
+                if len(cells) < 4:
+                    continue
+                if cells[0].text.strip() == "先発" and cells[1].text.strip() == "投":
+                    pitcher_name = cells[2].text.strip()
+                    handedness = cells[3].text.strip()
+                    # Match to away or home starter by name
+                    if away_starter and pitcher_name in away_starter or away_starter in pitcher_name:
+                        away_hand = handedness
+                    elif home_starter and pitcher_name in home_starter or home_starter in pitcher_name:
+                        home_hand = handedness
+
+    return {
+        "賽事編號": game_id,
+        "客場隊伍": away_raw,
+        "客場先發": away_starter,
+        "主場隊伍": home_raw,
+        "主場先發": home_starter,
+        "時間": game_time,
+        "球場": venue,
+        "主審": umpire,
+        "away_innings": away_innings,
+        "home_innings": home_innings,
+        "客總分": away_r,
+        "客安打": away_h,
+        "客失誤": away_e,
+        "主總": home_r,
+        "主安打": home_h,
+        "主失誤": home_e,
+        "賽事狀態": "正常",
+        "日期": date_str,
+        "客隊代號": NPB_TEAMS[away_raw]["id"],
+        "主隊代號": NPB_TEAMS[home_raw]["id"],
+        "客投別": away_hand,
+        "主投別": home_hand,
+        "客投局": away_ip,
+        "主投局": home_ip,
+        "客責失": away_er,
+        "客QS": away_qs,
+        "主責失": home_er,
+        "主QS": home_qs,
+    }
+
+
+def _sailu_row(seq: int, data: dict) -> list:
+    """
+    Convert a game data dict to a 賽錄 sheet row covering columns A–AY (51 values).
+    Columns AZ onwards are all formula-driven in the sheet and are left untouched.
+    """
+    ai = data["away_innings"]
+    hi = data["home_innings"]
+    return [
+        seq,                                            # A   編號
+        data["賽事編號"],                                # B   賽事編號
+        data["客場隊伍"],                                # C   客場隊伍
+        data["客場先發"],                                # D   客場先發
+        data["主場隊伍"],                                # E   主場隊伍
+        data["主場先發"],                                # F   主場先發
+        data["時間"],                                    # G   時間
+        data["球場"],                                    # H   球場
+        data["主審"],                                    # I   主審
+        ai[0],  ai[1],  ai[2],  ai[3],                 # J–M  客1–4
+        ai[4],  ai[5],  ai[6],  ai[7],                 # N–Q  客5–8
+        ai[8],  ai[9],  ai[10], ai[11],                 # R–U  客9–12
+        data["客總分"],                                  # V   客總分
+        data["客安打"],                                  # W   客安打
+        data["客失誤"],                                  # X   客失誤
+        hi[0],  hi[1],  hi[2],  hi[3],                 # Y–AB 主1–4
+        hi[4],  hi[5],  hi[6],  hi[7],                 # AC–AF 主5–8
+        hi[8],  hi[9],  hi[10], hi[11],                 # AG–AJ 主9–12
+        data["主總"],                                    # AK  主總
+        data["主安打"],                                  # AL  主安打
+        data["主失誤"],                                  # AM  主失誤
+        data["賽事狀態"],                                # AN  賽事狀態
+        data["日期"],                                    # AO  日期
+        data["客隊代號"],                                # AP  客隊代號
+        data["主隊代號"],                                # AQ  主隊代號
+        data["客投別"],                                  # AR  客投別
+        data["主投別"],                                  # AS  主投別
+        data["客投局"],                                  # AT  客投局
+        data["主投局"],                                  # AU  主投局
+        data["客責失"],                                  # AV  客責失
+        data["客QS"],                                    # AW  客QS
+        data["主責失"],                                  # AX  主責失
+        data["主QS"],                                    # AY  主QS
+    ]
+
+
+async def update_sailu_sheet(session: aiohttp.ClientSession):
+    """
+    Fill finished games into 賽錄's pre-populated placeholder rows.
+
+    The sheet pre-builds rows with formulas in columns AZ onwards and leaves
+    columns B–AY blank as placeholders (column A / 編號 is already set).
+    This function detects those placeholders and writes only B–AY into them,
+    letting the existing formulas handle everything from AZ onwards.
+    """
+    print("\n=== 賽錄 update ===")
+    sheet = get_worksheet(SAILU_SHEET_NAME, SAILU_SPREADSHEET_KEY)
+
+    # Read columns A (編號) and B (賽事編號), skip header
+    col_a = sheet.col_values(1)[1:]
+    col_b = sheet.col_values(2)[1:]
+
+    # Games already recorded
+    existing_ids = set(v for v in col_b if v)
+
+    # Placeholder rows: 編號 is set but 賽事編號 is still empty.
+    # Sheets rows are 1-based; data starts at row 2.
+    placeholder_rows: list[int] = [
+        i + 2
+        for i, (a, b) in enumerate(zip(col_a, col_b))
+        if a and not b
+    ]
+    print(f"[sailu] {len(placeholder_rows)} placeholder row(s) available.")
+
+    # Collect recently finished game IDs across all teams (last 3 per team)
+    all_ids: set[str] = set()
+    tasks = {
+        key: get_last_n_game_ids(info["id"], 3, session)
+        for key, info in NPB_TEAMS.items()
+    }
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    for key, result in zip(tasks.keys(), results):
+        if isinstance(result, Exception):
+            print(f"  [sailu] get_last_n_game_ids({key}): {result}")
+        else:
+            all_ids.update(result)
+
+    new_ids = sorted(gid for gid in all_ids if gid not in existing_ids)
+    if not new_ids:
+        print("[sailu] No new games to add.")
+        return
+
+    print(f"[sailu] {len(new_ids)} new game(s): {new_ids}")
+
+    # Scrape full box score for each new game
+    new_games: list[tuple[str, dict]] = []
+    for i in range(0, len(new_ids), MAX_CONCURRENT):
+        batch = new_ids[i: i + MAX_CONCURRENT]
+        scraped = await asyncio.gather(
+            *[get_sailu_game_data(gid, session) for gid in batch],
+            return_exceptions=True,
+        )
+        for gid, data in zip(batch, scraped):
+            if isinstance(data, Exception):
+                print(f"  [sailu] get_sailu_game_data({gid}): {data}")
+            elif data:
+                new_games.append((gid, data))
+            else:
+                print(f"  [sailu] No data for {gid} (game may not be finished yet)")
+        if i + MAX_CONCURRENT < len(new_ids):
+            await asyncio.sleep(2)
+
+    if not new_games:
+        print("[sailu] Nothing to write.")
+        return
+
+    new_games.sort(key=lambda x: x[0])  # sort by game ID (encodes date + sequence)
+
+    # Write B–AY into each placeholder row; AZ onwards are formula-driven
+    filled = 0
+    for (gid, data), row_num in zip(new_games, placeholder_rows):
+        row_values = _sailu_row(0, data)[1:]  # drop index 0 (編號 already in col A)
+        sheet.update(f"B{row_num}:AY{row_num}", [row_values], value_input_option="USER_ENTERED")
+        print(f"  [sailu] Row {row_num} ← {gid}")
+        filled += 1
+
+    overflow = new_games[len(placeholder_rows):]
+    if overflow:
+        print(
+            f"[sailu] WARNING: {len(overflow)} game(s) skipped — no placeholder rows left: "
+            + str([gid for gid, _ in overflow])
+            + "\n  → Add more pre-populated formula rows to 賽錄 and re-run."
+        )
+
+    print(f"[sailu] Done. Filled {filled} row(s).")
+
+
 # --- Sheet building ---
 
 
@@ -900,6 +1222,12 @@ async def run_once():
                 update_league_sheet(sheet_name, matchups, all_games)
             except Exception as e:
                 errors.append(f"update_league_sheet({sheet_name}): {e}")
+
+        # Update 賽錄 in the analysis spreadsheet
+        try:
+            await update_sailu_sheet(session)
+        except Exception as e:
+            errors.append(f"update_sailu_sheet: {e}")
 
     if errors:
         print(f"\n[ERROR] {len(errors)} failure(s):")
