@@ -113,6 +113,7 @@ NPB_TEAMS = {
 }
 
 SAILU_SPREADSHEET_KEY = "1qPdgcy_4s4Dj2xKo0QJawxPRaB6u9sGM3D4avkAjJUw"
+SAILU_TARGET_SPREADSHEET_KEY = "1bDBg86YndwzE4e5r9rkj9KIudnJOgKI4IM1nfJoSl-o"
 SAILU_SHEET_NAME = "賽錄"
 EXHIBITION_SHEET_NAME = "熱身賽紀錄"
 
@@ -1247,6 +1248,121 @@ def _sailu_row(seq: int, data: dict) -> list:
     ]
 
 
+def _sailu_formula_row(row_num: int) -> list[str]:
+    """Build AZ:BT formula cells for one 賽錄 row."""
+    return [
+        f"=SUM(J{row_num}:L{row_num})",
+        f"=SUM(Y{row_num}:AA{row_num})",
+        f"=SUM(J{row_num}:N{row_num})",
+        f"=SUM(Y{row_num}:AC{row_num})",
+        f"=SUM(J{row_num}:O{row_num})",
+        f"=SUM(Y{row_num}:AD{row_num})",
+        f"=SUM(J{row_num}:P{row_num})",
+        f"=SUM(Y{row_num}:AE{row_num})",
+        '=IF(客總分="","",IF(客總分=主總分,"平",IF(客總分>主總分,"勝","敗")))',
+        '=IF(BH{0}="","",IF(BH{0}="平","平",IF(BH{0}="勝","敗","勝")))'.format(row_num),
+        '=IF(BH{0}="勝",客總分-主總分,IF(BH{0}="敗",主總分-客總分,0))'.format(row_num),
+        '=IF(MOD(AT{0},1)=0,AT{0},IF(RIGHT(AT{0},1)="1",(AT{0}-0.1)+1/3,(AT{0}-0.2)+2/3))'.format(
+            row_num
+        ),
+        '=IF(MOD(AU{0},1)=0,AU{0},IF(RIGHT(AU{0},1)="1",(AU{0}-0.1)+1/3,(AU{0}-0.2)+2/3))'.format(
+            row_num
+        ),
+        '=IF(客總分="","",客總5+主總5)',
+        '=IF(客總分="","",客總分+主總分)',
+        f'=IF(J{row_num}="","",SUM(J{row_num}:R{row_num}))',
+        f'=IF(J{row_num}="","",SUM(Y{row_num}:AG{row_num}))',
+        f'=IF(S{row_num}="","",SUM(S{row_num}:U{row_num}))',
+        f'=IF(AH{row_num}="","",SUM(AH{row_num}:AJ{row_num}))',
+        '=IF(AO{0}="","",IF(AND(客先局>=5,主總7<=3,主總6<=2,主總5<=1),1,IF(AND(客先局>=5,主總6<=2,主總5<=1),1,IF(AND(客先局>=5,主總5<=1),1,""))))'.format(
+            row_num
+        ),
+        '=IF(AO{0}="","",IF(AND(主先局>=5,客總7<=3,客總6<=2,客總5<=1),1,IF(AND(主先局>=5,客總6<=2,客總5<=1),1,IF(AND(主先局>=5,客總5<=1),1,""))))'.format(
+            row_num
+        ),
+    ]
+
+
+def _chunked(seq: list, size: int):
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+
+
+def _placeholder_rows(sheet) -> list[int]:
+    col_a = sheet.col_values(1)[1:]
+    col_b = sheet.col_values(2)[1:]
+    return [
+        i + 2
+        for i, a in enumerate(col_a)
+        if a and not (col_b[i] if i < len(col_b) else "")
+    ]
+
+
+def _ensure_target_sailu_capacity(sheet, needed_rows: int) -> list[int]:
+    """Extend target 賽錄 with numbered placeholder rows and formulas if needed."""
+    placeholder_rows = _placeholder_rows(sheet)
+    if len(placeholder_rows) >= needed_rows:
+        return placeholder_rows
+
+    missing = needed_rows - len(placeholder_rows)
+    start_row = sheet.row_count + 1
+    sheet.add_rows(missing)
+
+    prev_seq = int(sheet.acell(f"A{start_row - 1}").value)
+    seq_values = [[prev_seq + offset + 1] for offset in range(missing)]
+    formula_values = [
+        _sailu_formula_row(row_num) for row_num in range(start_row, start_row + missing)
+    ]
+
+    for offset, chunk in enumerate(_chunked(seq_values, 200)):
+        chunk_start = start_row + offset * 200
+        chunk_end = chunk_start + len(chunk) - 1
+        sheet.update(
+            f"A{chunk_start}:A{chunk_end}",
+            chunk,
+            value_input_option="USER_ENTERED",
+        )
+
+    for offset, chunk in enumerate(_chunked(formula_values, 200)):
+        chunk_start = start_row + offset * 200
+        chunk_end = chunk_start + len(chunk) - 1
+        sheet.update(
+            f"AZ{chunk_start}:BT{chunk_end}",
+            chunk,
+            value_input_option="USER_ENTERED",
+        )
+
+    return _placeholder_rows(sheet)
+
+
+def _write_regular_sailu_games(
+    sheet,
+    games: list[tuple[str, dict]],
+    *,
+    auto_extend_target: bool = False,
+):
+    """Write regular-season 賽錄 rows into placeholder rows, optionally extending them."""
+    if not games:
+        return 0, []
+
+    placeholder_rows = (
+        _ensure_target_sailu_capacity(sheet, len(games))
+        if auto_extend_target
+        else _placeholder_rows(sheet)
+    )
+
+    filled = 0
+    for (gid, data), row_num in zip(games, placeholder_rows):
+        row_values = _sailu_row(0, data)[1:]  # drop col A; keep existing sequence
+        sheet.update(
+            f"B{row_num}:AY{row_num}", [row_values], value_input_option="USER_ENTERED"
+        )
+        print(f"  [sailu] Row {row_num} ← {gid}")
+        filled += 1
+
+    return filled, games[len(placeholder_rows) :]
+
+
 def _exhibition_row(data: dict) -> list[str]:
     """Convert scraped game data into 熱身賽紀錄's compact 28-column layout."""
     away_score = int(data["客總分"])
@@ -1320,24 +1436,19 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
     """
     print("\n=== 賽錄 update ===")
     sheet = get_worksheet(SAILU_SHEET_NAME, SAILU_SPREADSHEET_KEY)
+    target_sheet = get_worksheet(SAILU_SHEET_NAME, SAILU_TARGET_SPREADSHEET_KEY)
     exhibition_sheet = get_worksheet(EXHIBITION_SHEET_NAME, SAILU_SPREADSHEET_KEY)
 
-    # Read columns A (編號) and B (賽事編號), skip header
-    col_a = sheet.col_values(1)[1:]
-    col_b = sheet.col_values(2)[1:]
-
     # Games already recorded
-    existing_ids = set(v for v in col_b if v)
+    existing_ids = set(v for v in sheet.col_values(2)[1:] if v)
+    target_existing_ids = set(v for v in target_sheet.col_values(2)[1:] if v)
     existing_exhibition = _existing_exhibition_identities(exhibition_sheet)
-
-    # Placeholder rows: 編號 is set but 賽事編號 is still empty.
-    # Sheets rows are 1-based; data starts at row 2.
-    placeholder_rows: list[int] = [
-        i + 2
-        for i, a in enumerate(col_a)
-        if a and not (col_b[i] if i < len(col_b) else "")
-    ]
-    print(f"[sailu] {len(placeholder_rows)} placeholder row(s) available.")
+    print(
+        f"[sailu] {len(_placeholder_rows(sheet))} source placeholder row(s) available."
+    )
+    print(
+        f"[sailu] {len(_placeholder_rows(target_sheet))} target placeholder row(s) available."
+    )
 
     # Collect recently finished game IDs across all teams (last 3 per team)
     all_ids: set[str] = set()
@@ -1390,22 +1501,30 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
         (gid, data) for gid, data in new_games if is_exhibition_game_id(gid)
     ]
 
-    # Write B–AY into each placeholder row; AZ onwards are formula-driven
-    filled = 0
-    for (gid, data), row_num in zip(regular_games, placeholder_rows):
-        row_values = _sailu_row(0, data)[1:]  # drop index 0 (編號 already in col A)
-        sheet.update(
-            f"B{row_num}:AY{row_num}", [row_values], value_input_option="USER_ENTERED"
-        )
-        print(f"  [sailu] Row {row_num} ← {gid}")
-        filled += 1
+    source_regular_games = [
+        (gid, data) for gid, data in regular_games if gid not in existing_ids
+    ]
+    target_regular_games = [
+        (gid, data) for gid, data in regular_games if gid not in target_existing_ids
+    ]
 
-    overflow = regular_games[len(placeholder_rows) :]
+    filled, overflow = _write_regular_sailu_games(sheet, source_regular_games)
     if overflow:
         print(
-            f"[sailu] WARNING: {len(overflow)} game(s) skipped — no placeholder rows left: "
+            f"[sailu] WARNING: {len(overflow)} source game(s) skipped — no placeholder rows left: "
             + str([gid for gid, _ in overflow])
             + "\n  → Add more pre-populated formula rows to 賽錄 and re-run."
+        )
+
+    target_filled, target_overflow = _write_regular_sailu_games(
+        target_sheet,
+        target_regular_games,
+        auto_extend_target=True,
+    )
+    if target_overflow:
+        print(
+            f"[sailu-target] WARNING: {len(target_overflow)} game(s) skipped: "
+            + str([gid for gid, _ in target_overflow])
         )
 
     exhibition_rows = []
@@ -1431,7 +1550,9 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
     else:
         print("[exhibition] No new games to add.")
 
-    print(f"[sailu] Done. Filled {filled} regular-season row(s).")
+    print(
+        f"[sailu] Done. Filled {filled} source row(s) and {target_filled} target row(s)."
+    )
 
 
 # --- Sheet building ---
