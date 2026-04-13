@@ -9,6 +9,7 @@ regular-season row block already written into 賽錄, backfilling:
 
 The row block is intentionally narrow to reduce Google Sheets read pressure.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +19,7 @@ import aiohttp
 import gspread
 
 from npb import get_worksheet
-from populate_2025_sailu import (
+from migration.populate_2025_sailu import (
     BASE_URL,
     YEAR,
     _fetch,
@@ -67,7 +68,10 @@ async def main():
         for i in range(0, len(gids), 5):
             batch = gids[i : i + 5]
             html_results = await asyncio.gather(
-                *[_fetch(session, f"{BASE_URL}/bis/{YEAR}/games/{gid}.html") for gid in batch]
+                *[
+                    _fetch(session, f"{BASE_URL}/bis/{YEAR}/games/{gid}.html")
+                    for gid in batch
+                ]
             )
             for gid, html in zip(batch, html_results):
                 if not html:
