@@ -472,36 +472,45 @@ def run_once(year: str = None, kind_codes=None):
 
         sheet = get_worksheet(kind_code)
 
+        # 一次性讀取已記錄的場次編號
+        col_b_cache = sheet.col_values(2)
+        col_c_cache = sheet.col_values(3)
+        existing_snos = {
+            str(sno)
+            for sno, date_val in zip(col_b_cache, col_c_cache)
+            if sno and str(year) in str(date_val)
+        }
+
+        # 過濾出「過去且未記錄」的候選場次（仿照 NPB 的 new_ids 邏輯）
+        candidates = []
         for game in games:
-            print(f"Processing GameSno {game.get('GameSno')} ({kind_code})...")
             game_sno = str(game.get("GameSno"))
             game_date_str = game.get("GameDate", "").split("T")[0]
-
             try:
                 game_date = datetime.strptime(game_date_str, "%Y-%m-%d")
             except ValueError:
                 continue
-
-            # 未到比賽日，跳過
             if game_date.date() > now.date():
-                print(
-                    f"Game {game_sno} is scheduled for {game_date_str}, which is in the future. Skipping."
-                )
                 continue
-
-            # 已記錄，跳過
-            if is_game_recorded(game_sno, year, sheet):
-                print(f"Game {game_sno} ({year}) already recorded. Skipping.")
+            if game_sno in existing_snos:
                 continue
+            candidates.append(game)
 
-            # 抓 box score，確認是否結束並寫入
+        print(f"[{kind_code}] {len(candidates)} unrecorded past game(s) to check.")
+
+        # 只對候選場次發 HTTP 請求
+        for game in candidates:
+            game_sno = str(game.get("GameSno"))
+            print(f"Processing GameSno {game_sno} ({kind_code})...")
             try:
                 data = fetch_game_data(game_sno, year, kind_code, session)
                 if not data:
                     continue
-                process_and_update_sheet(
+                written = process_and_update_sheet(
                     data, game_sno, year, kind_code, session, sheet
                 )
+                if written:
+                    existing_snos.add(game_sno)
             except Exception as e:
                 errors.append(f"game {game_sno} ({kind_code}): {e}")
                 continue
