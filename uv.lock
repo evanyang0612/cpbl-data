@@ -441,6 +441,7 @@ dependencies = [
     { name = "gspread" },
     { name = "pdf2image" },
     { name = "pillow" },
+    { name = "python-dotenv" },
     { name = "requests" },
 ]
 
@@ -459,6 +460,7 @@ requires-dist = [
     { name = "gspread", specifier = ">=6.2.1" },
     { name = "pdf2image", specifier = ">=1.17.0" },
     { name = "pillow", specifier = ">=12.1.1" },
+    { name = "python-dotenv", specifier = ">=0.19.2" },
     { name = "requests", specifier = ">=2.32.5" },
 ]
 
