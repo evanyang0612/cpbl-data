@@ -14,19 +14,73 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup WireGuard + NordVPN (Taiwan)
+      - name: Setup WireGuard + NordVPN
+        env:
+          NORDVPN_COUNTRY_ID: ${{ vars.NORDVPN_COUNTRY_ID }}
+          NORDVPN_STATION_ALLOWLIST: ${{ vars.NORDVPN_STATION_ALLOWLIST }}
+          NORDVPN_STATION_PREFIX_ALLOWLIST: ${{ vars.NORDVPN_STATION_PREFIX_ALLOWLIST }}
+          NORDVPN_HOSTNAME_ALLOWLIST: ${{ vars.NORDVPN_HOSTNAME_ALLOWLIST }}
         run: |
+          set -euo pipefail
+
+          sudo apt-get update
           sudo apt-get install -y wireguard curl jq
 
-          PRIVATE_KEY=$(curl -s -u token:${{ secrets.NORDVPN_TOKEN }} \
+          PRIVATE_KEY=$(curl -fsSL -u token:${{ secrets.NORDVPN_TOKEN }} \
             https://api.nordvpn.com/v1/users/services/credentials | \
             jq -r '.nordlynx_private_key')
 
-          API_RESP=$(curl -s "https://api.nordvpn.com/v1/servers/recommendations?filters\[servers_technologies\]\[identifier\]=wireguard_udp&filters\[country_id\]=211&limit=1")
+          COUNTRY_ID="${NORDVPN_COUNTRY_ID:-108}"
+          ALL_SERVERS_URL="https://api.nordvpn.com/v1/servers?filters[servers_technologies][identifier]=wireguard_udp&filters[servers_groups][identifier]=legacy_p2p&limit=16384"
+          RECOMMENDATIONS_URL="https://api.nordvpn.com/v1/servers/recommendations?filters[servers_technologies][identifier]=wireguard_udp&filters[servers_groups][identifier]=legacy_p2p&filters[country_id]=${COUNTRY_ID}&limit=10"
 
-          SERVER_PUBLIC_KEY=$(echo $API_RESP | jq -r '.[0].technologies[] | select(.identifier=="wireguard_udp") | .metadata[] | select(.name=="public_key") | .value')
-          SERVER_IP=$(echo $API_RESP | jq -r '.[0].station')
-          SERVER_NAME=$(echo $API_RESP | jq -r '.[0].hostname')
+          # NordVPN's filter syntax uses literal brackets in the query string.
+          API_RESP=$(curl -fsSLg "$RECOMMENDATIONS_URL")
+          SELECTED_SERVER=$(echo "$API_RESP" | jq -c '.[0]')
+          SERVER_SOURCE="country recommendation"
+
+          if [ -n "${NORDVPN_STATION_ALLOWLIST:-}" ] || [ -n "${NORDVPN_STATION_PREFIX_ALLOWLIST:-}" ] || [ -n "${NORDVPN_HOSTNAME_ALLOWLIST:-}" ]; then
+            ALL_SERVERS=$(curl -fsSLg "$ALL_SERVERS_URL")
+            FILTERED_SERVER=$(echo "$ALL_SERVERS" | jq -c \
+              --arg ip_allowlist "${NORDVPN_STATION_ALLOWLIST:-}" \
+              --arg ip_prefix_allowlist "${NORDVPN_STATION_PREFIX_ALLOWLIST:-}" \
+              --arg host_allowlist "${NORDVPN_HOSTNAME_ALLOWLIST:-}" '
+                def allowlist($raw):
+                  $raw
+                  | split(",")
+                  | map(gsub("^\\s+|\\s+$"; ""))
+                  | map(select(length > 0));
+                (allowlist($ip_allowlist)) as $ips |
+                (allowlist($ip_prefix_allowlist)) as $prefixes |
+                (allowlist($host_allowlist)) as $hosts |
+                map(
+                  select(
+                    . as $server |
+                    (($ips | length) == 0 or ($ips | index($server.station))) and
+                    (($prefixes | length) == 0 or any($prefixes[]; . as $prefix | $server.station | startswith($prefix))) and
+                    (($hosts | length) == 0 or ($hosts | index($server.hostname)))
+                  )
+                )
+                | sort_by(.load)
+                | .[0] // empty
+              ')
+
+            if [ -n "$FILTERED_SERVER" ] && [ "$FILTERED_SERVER" != "null" ]; then
+              SELECTED_SERVER="$FILTERED_SERVER"
+              SERVER_SOURCE="allowlist"
+            fi
+          fi
+
+          if [ -z "$SELECTED_SERVER" ] || [ "$SELECTED_SERVER" = "null" ]; then
+            echo "No NordVPN server matched the current selection."
+            exit 1
+          fi
+
+          SERVER_PUBLIC_KEY=$(echo "$SELECTED_SERVER" | jq -r '.technologies[] | select(.identifier=="wireguard_udp") | .metadata[] | select(.name=="public_key") | .value')
+          SERVER_IP=$(echo "$SELECTED_SERVER" | jq -r '.station')
+          SERVER_NAME=$(echo "$SELECTED_SERVER" | jq -r '.hostname')
+          SERVER_COUNTRY=$(echo "$SELECTED_SERVER" | jq -r '.locations[0].country.name // "unknown"')
+          SERVER_CITY=$(echo "$SELECTED_SERVER" | jq -r '.locations[0].country.city.name // "unknown"')
 
           sudo bash -c "cat > /etc/wireguard/wg0.conf << EOF
           [Interface]
@@ -43,7 +97,8 @@ jobs:
           EOF"
 
           sudo wg-quick up wg0
-          echo "Connected to: $SERVER_NAME"
+          echo "Connected to: $SERVER_NAME ($SERVER_IP) via $SERVER_SOURCE"
+          echo "Reported location: $SERVER_CITY, $SERVER_COUNTRY"
           curl -s https://ifconfig.me
 
       - name: Set up uv

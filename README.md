@@ -14,7 +14,7 @@ Automated scrapers that pull game results from CPBL and NPB, then write stats to
 ├── lastTenGames.gs                  # Google Apps Script for CPBL 近十場 sheet
 ├── lastTenGamesPreseason.gs         # Google Apps Script for CPBL 熱身賽 近十場 sheet
 └── .github/workflows/
-    ├── cpbl_scheduler.yml           # Cron: every 30 min, 07:00–16:00 UTC (via Taiwan VPN)
+    ├── cpbl_scheduler.yml           # Cron: every 30 min, 07:00–16:00 UTC (via Japan VPN)
     └── npb_scheduler.yml            # Cron: every 30 min, 08:00–14:00 UTC
 ```
 
@@ -41,7 +41,9 @@ Scrapes [cpbl.com.tw](https://www.cpbl.com.tw) for regular season (`A`) and pres
 
 ### Scheduler
 
-Runs every 30 minutes between **07:00–16:00 UTC** (15:00–00:00 Taiwan time) via a Taiwan NordVPN WireGuard tunnel (required to access cpbl.com.tw from GitHub Actions).
+Runs every 30 minutes between **07:00–16:00 UTC** (15:00–00:00 Taiwan time) via a NordVPN WireGuard tunnel (required to access cpbl.com.tw from GitHub Actions).
+
+The workflow defaults to NordVPN `country_id=108` for recommendations, but it can prefer a known-good server IP or hostname first. If CPBL allows a specific Nord `station` IP such as `94.156.205.102`, set `NORDVPN_STATION_ALLOWLIST=94.156.205.102`. If the acceptable servers all share a prefix, such as `94.156.205.*`, set `NORDVPN_STATION_PREFIX_ALLOWLIST=94.156.205.` and the workflow will pick the lowest-load matching server when it is available.
 
 ### Manual run (single game)
 
@@ -83,9 +85,20 @@ Runs every 30 minutes between **08:00–14:00 UTC** (17:00–23:00 JST), coverin
 |-------------------------|----------------|------------------------------------------|
 | `GOOGLE_CREDENTIALS`    | CPBL, NPB      | Google service account JSON (full body)  |
 | `SPREADSHEET_KEY`       | CPBL           | Google Sheets spreadsheet ID for CPBL    |
-| `NORDVPN_TOKEN`         | CPBL           | NordVPN token for Taiwan WireGuard tunnel|
+| `NORDVPN_TOKEN`         | CPBL           | NordVPN token for WireGuard tunnel       |
 | `TELEGRAM_BOT_TOKEN`    | CPBL, NPB      | Telegram bot token for failure alerts    |
 | `TELEGRAM_CHAT_ID`      | CPBL, NPB      | Telegram chat ID for failure alerts      |
+
+## GitHub Variables
+
+Optional repository variables used by `.github/workflows/cpbl_scheduler.yml`:
+
+| Variable                    | Default | Description |
+|----------------------------|---------|-------------|
+| `NORDVPN_COUNTRY_ID`       | `108`   | Country filter for the fallback Nord recommendation query |
+| `NORDVPN_STATION_ALLOWLIST`| —       | Comma-separated Nord `station` IPs to prefer before fallback |
+| `NORDVPN_STATION_PREFIX_ALLOWLIST` | — | Comma-separated IP prefixes to prefer before fallback, for example `94.156.205.` |
+| `NORDVPN_HOSTNAME_ALLOWLIST` | —     | Comma-separated Nord hostnames to prefer before fallback |
 
 ## Local Development
 
