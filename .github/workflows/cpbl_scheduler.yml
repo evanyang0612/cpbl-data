@@ -29,14 +29,14 @@ jobs:
             SERVER_IP=$(echo $API_RESP | jq -r ".[$i].station")
             SERVER_NAME=$(echo $API_RESP | jq -r ".[$i].hostname")
 
-            printf '[Interface]\nPrivateKey = %s\nAddress = 10.5.0.2/32\nDNS = 103.86.96.100\nMTU = 1380\n\n[Peer]\nPublicKey = %s\nEndpoint = %s:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25\n' \
+            printf '[Interface]\nPrivateKey = %s\nAddress = 10.5.0.2/32\nMTU = 1380\n\n[Peer]\nPublicKey = %s\nEndpoint = %s:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25\n' \
               "$PRIVATE_KEY" "$SERVER_PUBLIC_KEY" "$SERVER_IP" \
               | sudo tee /etc/wireguard/wg0.conf > /dev/null
 
             sudo wg-quick down wg0 2>/dev/null || true
             sudo wg-quick up wg0
 
-            echo "Trying: $SERVER_NAME ($(curl -s https://ifconfig.me))"
+            echo "Trying: $SERVER_NAME ($(curl -s --max-time 10 https://ifconfig.me))"
 
             STATUS=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" https://www.cpbl.com.tw)
             if [ "$STATUS" = "200" ]; then
