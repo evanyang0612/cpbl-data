@@ -38,7 +38,18 @@ jobs:
 
             echo "Trying: $SERVER_NAME ($(curl -s --max-time 10 https://ifconfig.me))"
 
-            STATUS=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" https://www.cpbl.com.tw)
+            # 先拿 token
+            SCHEDULE_RESP=$(curl -s --max-time 10 https://www.cpbl.com.tw/schedule)
+            TOKEN=$(echo "$SCHEDULE_RESP" | grep -o "RequestVerificationToken: '[^']*'" | grep -o "'[^']*'" | tr -d "'")
+
+            # 測試 getgamedatas
+            STATUS=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" \
+              -X POST https://www.cpbl.com.tw/schedule/getgamedatas \
+              -H "RequestVerificationToken: $TOKEN" \
+              -H "X-Requested-With: XMLHttpRequest" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              --data "calendar=$(date +%Y/%m)/01&location=&kindCode=A")
+
             if [ "$STATUS" = "200" ]; then
               echo "✅ Connected via $SERVER_NAME"
               break
