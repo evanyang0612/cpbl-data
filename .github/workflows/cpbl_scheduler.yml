@@ -22,29 +22,46 @@ jobs:
             https://api.nordvpn.com/v1/users/services/credentials | \
             jq -r '.nordlynx_private_key')
 
-          API_RESP=$(curl -s "https://api.nordvpn.com/v1/servers/recommendations?filters\[servers_technologies\]\[identifier\]=wireguard_udp&filters\[country_id\]=211&limit=1")
+          API_RESP=$(curl -s "https://api.nordvpn.com/v1/servers/recommendations?filters\[servers_technologies\]\[identifier\]=wireguard_udp&filters\[country_id\]=211&limit=10")
 
-          SERVER_PUBLIC_KEY=$(echo $API_RESP | jq -r '.[0].technologies[] | select(.identifier=="wireguard_udp") | .metadata[] | select(.name=="public_key") | .value')
-          SERVER_IP=$(echo $API_RESP | jq -r '.[0].station')
-          SERVER_NAME=$(echo $API_RESP | jq -r '.[0].hostname')
+          for i in 0 1 2 3 4 5 6 7 8 9; do
+            SERVER_PUBLIC_KEY=$(echo $API_RESP | jq -r ".[$i].technologies[] | select(.identifier==\"wireguard_udp\") | .metadata[] | select(.name==\"public_key\") | .value")
+            SERVER_IP=$(echo $API_RESP | jq -r ".[$i].station")
+            SERVER_NAME=$(echo $API_RESP | jq -r ".[$i].hostname")
 
-          sudo bash -c "cat > /etc/wireguard/wg0.conf << EOF
-          [Interface]
-          PrivateKey = $PRIVATE_KEY
-          Address = 10.5.0.2/32
-          DNS = 103.86.96.100
-          MTU = 1380
+            cat > /tmp/wg0.conf << EOF
+            [Interface]
+            PrivateKey = $PRIVATE_KEY
+            Address = 10.5.0.2/32
+            DNS = 103.86.96.100
+            MTU = 1380
 
-          [Peer]
-          PublicKey = $SERVER_PUBLIC_KEY
-          Endpoint = $SERVER_IP:51820
-          AllowedIPs = 0.0.0.0/0
-          PersistentKeepalive = 25
-          EOF"
+            [Peer]
+            PublicKey = $SERVER_PUBLIC_KEY
+            Endpoint = $SERVER_IP:51820
+            AllowedIPs = 0.0.0.0/0
+            PersistentKeepalive = 25
+            EOF
 
-          sudo wg-quick up wg0
-          echo "Connected to: $SERVER_NAME"
-          curl -s https://ifconfig.me
+            sudo mv /tmp/wg0.conf /etc/wireguard/wg0.conf
+            sudo wg-quick down wg0 2>/dev/null || true
+            sudo wg-quick up wg0
+
+            echo "Trying: $SERVER_NAME ($(curl -s https://ifconfig.me))"
+
+            STATUS=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" https://www.cpbl.com.tw)
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Connected via $SERVER_NAME"
+              break
+            else
+              echo "❌ $SERVER_NAME blocked (HTTP $STATUS), trying next..."
+            fi
+
+            if [ $i -eq 9 ]; then
+              echo "All servers blocked"
+              exit 1
+            fi
+          done
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
