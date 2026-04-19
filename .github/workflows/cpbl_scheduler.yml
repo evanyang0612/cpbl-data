@@ -29,21 +29,10 @@ jobs:
             SERVER_IP=$(echo $API_RESP | jq -r ".[$i].station")
             SERVER_NAME=$(echo $API_RESP | jq -r ".[$i].hostname")
 
-            cat > /tmp/wg0.conf << EOF
-[Interface]
-PrivateKey = $PRIVATE_KEY
-Address = 10.5.0.2/32
-DNS = 103.86.96.100
-MTU = 1380
+            printf '[Interface]\nPrivateKey = %s\nAddress = 10.5.0.2/32\nDNS = 103.86.96.100\nMTU = 1380\n\n[Peer]\nPublicKey = %s\nEndpoint = %s:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25\n' \
+              "$PRIVATE_KEY" "$SERVER_PUBLIC_KEY" "$SERVER_IP" \
+              | sudo tee /etc/wireguard/wg0.conf > /dev/null
 
-[Peer]
-PublicKey = $SERVER_PUBLIC_KEY
-Endpoint = $SERVER_IP:51820
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
-EOF
-
-            sudo mv /tmp/wg0.conf /etc/wireguard/wg0.conf
             sudo wg-quick down wg0 2>/dev/null || true
             sudo wg-quick up wg0
 
