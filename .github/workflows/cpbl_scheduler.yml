@@ -36,10 +36,10 @@ jobs:
             sudo wg-quick down wg0 2>/dev/null || true
             sudo wg-quick up wg0
 
-            echo "Trying: $SERVER_NAME ($(curl -s --max-time 10 https://ifconfig.me))"
+            echo "Trying: $SERVER_NAME ($(curl -s --max-time 10 https://ifconfig.me || true))"
 
             # 先拿 token
-            SCHEDULE_RESP=$(curl -s --max-time 10 https://www.cpbl.com.tw/schedule)
+            SCHEDULE_RESP=$(curl -s --max-time 10 https://www.cpbl.com.tw/schedule || true)
             TOKEN=$(echo "$SCHEDULE_RESP" | grep -o "RequestVerificationToken: '[^']*'" | grep -o "'[^']*'" | tr -d "'")
 
             # 測試 getgamedatas
@@ -48,7 +48,7 @@ jobs:
               -H "RequestVerificationToken: $TOKEN" \
               -H "X-Requested-With: XMLHttpRequest" \
               -H "Content-Type: application/x-www-form-urlencoded" \
-              --data "calendar=$(date +%Y/%m)/01&location=&kindCode=A")
+              --data "calendar=$(date +%Y/%m)/01&location=&kindCode=A" || echo "000")
 
             if [ "$STATUS" = "200" ]; then
               echo "✅ Connected via $SERVER_NAME"
