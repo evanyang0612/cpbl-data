@@ -33,6 +33,7 @@ jobs:
           PrivateKey = $PRIVATE_KEY
           Address = 10.5.0.2/32
           DNS = 103.86.96.100
+          MTU = 1380
 
           [Peer]
           PublicKey = $SERVER_PUBLIC_KEY
