@@ -40,7 +40,7 @@ jobs:
 
             # 先拿 token
             SCHEDULE_RESP=$(curl -s --max-time 10 https://www.cpbl.com.tw/schedule || true)
-            TOKEN=$(echo "$SCHEDULE_RESP" | grep -oP "RequestVerificationToken:\s*'\K[^']+" || true)
+            TOKEN=$(echo "$SCHEDULE_RESP" | grep -oP "RequestVerificationToken:\s*'\K[^']+(?=')" || true)
             echo "Token: $TOKEN"
 
             # 測試 getgamedatas
