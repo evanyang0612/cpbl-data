@@ -34,12 +34,13 @@ jobs:
           ALL_SERVERS_URL="https://api.nordvpn.com/v1/servers?filters[servers_technologies][identifier]=wireguard_udp&filters[servers_groups][identifier]=legacy_p2p&limit=16384"
           RECOMMENDATIONS_URL="https://api.nordvpn.com/v1/servers/recommendations?filters[servers_technologies][identifier]=wireguard_udp&filters[servers_groups][identifier]=legacy_p2p&filters[country_id]=${COUNTRY_ID}&limit=10"
 
-          API_RESP=$(curl -fsSL "$RECOMMENDATIONS_URL")
+          # NordVPN's filter syntax uses literal brackets in the query string.
+          API_RESP=$(curl -fsSLg "$RECOMMENDATIONS_URL")
           SELECTED_SERVER=$(echo "$API_RESP" | jq -c '.[0]')
           SERVER_SOURCE="country recommendation"
 
           if [ -n "${NORDVPN_STATION_ALLOWLIST:-}" ] || [ -n "${NORDVPN_STATION_PREFIX_ALLOWLIST:-}" ] || [ -n "${NORDVPN_HOSTNAME_ALLOWLIST:-}" ]; then
-            ALL_SERVERS=$(curl -fsSL "$ALL_SERVERS_URL")
+            ALL_SERVERS=$(curl -fsSLg "$ALL_SERVERS_URL")
             FILTERED_SERVER=$(echo "$ALL_SERVERS" | jq -c \
               --arg ip_allowlist "${NORDVPN_STATION_ALLOWLIST:-}" \
               --arg ip_prefix_allowlist "${NORDVPN_STATION_PREFIX_ALLOWLIST:-}" \
