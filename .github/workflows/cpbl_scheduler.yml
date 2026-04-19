@@ -16,13 +16,14 @@ jobs:
 
       - name: Setup WireGuard + NordVPN (Taiwan)
         run: |
+          set -x
           sudo apt-get install -y wireguard curl jq
 
-          PRIVATE_KEY=$(curl -s -u token:${{ secrets.NORDVPN_TOKEN }} \
+          PRIVATE_KEY=$(curl -s --max-time 15 -u token:${{ secrets.NORDVPN_TOKEN }} \
             https://api.nordvpn.com/v1/users/services/credentials | \
             jq -r '.nordlynx_private_key')
 
-          API_RESP=$(curl -s "https://api.nordvpn.com/v1/servers/recommendations?filters\[servers_technologies\]\[identifier\]=wireguard_udp&filters\[country_id\]=211&limit=10")
+          API_RESP=$(curl -s --max-time 15 "https://api.nordvpn.com/v1/servers/recommendations?filters\[servers_technologies\]\[identifier\]=wireguard_udp&filters\[country_id\]=211&limit=10")
 
           for i in 0 1 2 3 4 5 6 7 8 9; do
             SERVER_PUBLIC_KEY=$(echo $API_RESP | jq -r ".[$i].technologies[] | select(.identifier==\"wireguard_udp\") | .metadata[] | select(.name==\"public_key\") | .value")
@@ -34,7 +35,7 @@ jobs:
               | sudo tee /etc/wireguard/wg0.conf > /dev/null
 
             sudo wg-quick down wg0 2>/dev/null || true
-            sudo wg-quick up wg0
+            sudo timeout 20 wg-quick up wg0 || { echo "wg-quick up timed out on $SERVER_NAME"; continue; }
 
             echo "Trying: $SERVER_NAME ($(curl -s --max-time 10 https://ifconfig.me || true))"
 
