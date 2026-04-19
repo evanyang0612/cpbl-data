@@ -57,7 +57,7 @@ jobs:
                   select(
                     . as $server |
                     (($ips | length) == 0 or ($ips | index($server.station))) and
-                    (($prefixes | length) == 0 or any($prefixes[]; $server.station | startswith(.))) and
+                    (($prefixes | length) == 0 or any($prefixes[]; . as $prefix | $server.station | startswith($prefix))) and
                     (($hosts | length) == 0 or ($hosts | index($server.hostname)))
                   )
                 )
