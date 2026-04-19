@@ -14,7 +14,7 @@ Automated scrapers that pull game results from CPBL and NPB, then write stats to
 ├── lastTenGames.gs                  # Google Apps Script for CPBL 近十場 sheet
 ├── lastTenGamesPreseason.gs         # Google Apps Script for CPBL 熱身賽 近十場 sheet
 └── .github/workflows/
-    ├── cpbl_scheduler.yml           # Cron: every 30 min, 07:00–16:00 UTC (via Taiwan VPN)
+    ├── cpbl_scheduler.yml           # Cron: every 30 min, 07:00–16:00 UTC (via Japan VPN)
     └── npb_scheduler.yml            # Cron: every 30 min, 08:00–14:00 UTC
 ```
 
@@ -41,7 +41,7 @@ Scrapes [cpbl.com.tw](https://www.cpbl.com.tw) for regular season (`A`) and pres
 
 ### Scheduler
 
-Runs every 30 minutes between **07:00–16:00 UTC** (15:00–00:00 Taiwan time) via a Taiwan NordVPN WireGuard tunnel (required to access cpbl.com.tw from GitHub Actions).
+Runs every 30 minutes between **07:00–16:00 UTC** (15:00–00:00 Taiwan time) via a Japan NordVPN WireGuard tunnel (required to access cpbl.com.tw from GitHub Actions).
 
 ### Manual run (single game)
 
@@ -83,7 +83,7 @@ Runs every 30 minutes between **08:00–14:00 UTC** (17:00–23:00 JST), coverin
 |-------------------------|----------------|------------------------------------------|
 | `GOOGLE_CREDENTIALS`    | CPBL, NPB      | Google service account JSON (full body)  |
 | `SPREADSHEET_KEY`       | CPBL           | Google Sheets spreadsheet ID for CPBL    |
-| `NORDVPN_TOKEN`         | CPBL           | NordVPN token for Taiwan WireGuard tunnel|
+| `NORDVPN_TOKEN`         | CPBL           | NordVPN token for Japan WireGuard tunnel |
 | `TELEGRAM_BOT_TOKEN`    | CPBL, NPB      | Telegram bot token for failure alerts    |
 | `TELEGRAM_CHAT_ID`      | CPBL, NPB      | Telegram chat ID for failure alerts      |
 

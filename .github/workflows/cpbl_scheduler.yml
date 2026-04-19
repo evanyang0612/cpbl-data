@@ -14,7 +14,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup WireGuard + NordVPN (Taiwan)
+      - name: Setup WireGuard + NordVPN (Japan)
         run: |
           sudo apt-get install -y wireguard curl jq
 
@@ -22,7 +22,7 @@ jobs:
             https://api.nordvpn.com/v1/users/services/credentials | \
             jq -r '.nordlynx_private_key')
 
-          API_RESP=$(curl -s "https://api.nordvpn.com/v1/servers/recommendations?filters\[servers_technologies\]\[identifier\]=wireguard_udp&filters\[country_id\]=211&limit=1")
+          API_RESP=$(curl -s "https://api.nordvpn.com/v1/servers/recommendations?filters\[servers_technologies\]\[identifier\]=wireguard_udp&filters\[country_id\]=108&limit=1")
 
           SERVER_PUBLIC_KEY=$(echo $API_RESP | jq -r '.[0].technologies[] | select(.identifier=="wireguard_udp") | .metadata[] | select(.name=="public_key") | .value')
           SERVER_IP=$(echo $API_RESP | jq -r '.[0].station')
