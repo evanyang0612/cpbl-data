@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import requests
 from bs4 import BeautifulSoup
 import gspread
@@ -9,7 +8,11 @@ import time
 from datetime import datetime
 from dotenv import load_dotenv
 
-load_dotenv()
+from utils import send_telegram
+
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path="/Users/evansmac/cpbl/.env")
 # --- Configuration ---
 SPREADSHEET_KEY = os.getenv("SPREADSHEET_KEY")
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
@@ -348,7 +351,9 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     update_values[38] = h_batting[15]
 
     # 投球資料
-    v_starter_stats, v_starter_name, v_starter_acnt = _get_pitching_stats(pitching, 1, True)
+    v_starter_stats, v_starter_name, v_starter_acnt = _get_pitching_stats(
+        pitching, 1, True
+    )
     update_values[4] = v_starter_name
     for i in range(13):
         update_values[39 + i] = v_starter_stats[i]
@@ -357,7 +362,9 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     for i in range(13):
         update_values[52 + i] = v_total_pitch[i]
 
-    h_starter_stats, h_starter_name, h_starter_acnt = _get_pitching_stats(pitching, 2, True)
+    h_starter_stats, h_starter_name, h_starter_acnt = _get_pitching_stats(
+        pitching, 2, True
+    )
     update_values[6] = h_starter_name
     for i in range(13):
         update_values[65 + i] = h_starter_stats[i]
@@ -528,7 +535,7 @@ def run_once(year: str = None, kind_codes=None):
         print(f"\n[ERROR] {len(errors)} failure(s) occurred:")
         for err in errors:
             print(f"  - {err}")
-        sys.exit(1)
+        raise RuntimeError("; ".join(errors))
 
 
 def main(game_sno: str, year: str, kind_code="A"):
@@ -552,7 +559,12 @@ def main(game_sno: str, year: str, kind_code="A"):
 
 if __name__ == "__main__":
     # GitHub Actions cron 觸發時執行此入口
-    run_once(year=str(datetime.now().year), kind_codes=["A"])
+    try:
+        run_once(year=str(datetime.now().year), kind_codes=["A"])
+        send_telegram("CPBL schedule update completed successfully.")
+    except Exception as e:
+        send_telegram(f"CPBL schedule update failed: {e}")
+        raise
 
     # 手動跑單場範例（本地測試用）：
     # main(game_sno="1", year="2025", kind_code="G")  # 熱身賽
