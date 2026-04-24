@@ -116,6 +116,9 @@ SAILU_SPREADSHEET_KEY = "1qPdgcy_4s4Dj2xKo0QJawxPRaB6u9sGM3D4avkAjJUw"
 SAILU_TARGET_SPREADSHEET_KEY = "1XBATQ-ZQVE7saISTw_EYEXg3qFFAn5aeLDPdGI1_8Rg"
 SAILU_SHEET_NAME = "賽錄"
 EXHIBITION_SHEET_NAME = "熱身賽紀錄"
+ANALYSIS_SHEET_NAME = "分析表紀錄"
+HUIZI_SHEET_NAME = "彙資"
+ANALYSIS_SEASON = 2026
 
 NPB_FIELDS = {
     "東京ドーム": "東 京",
@@ -130,6 +133,33 @@ NPB_FIELDS = {
     "京セラD大阪": "京大阪",
     "エスコンF": "エスコン",
     "楽天モバイル": "宮 城",
+}
+
+ANALYSIS_FIELDS = {
+    "エスコンF": "エスコンF",
+    "東京ドーム": "東京ドーム",
+    "神宮": "明治神宮",
+    "明治神宮": "明治神宮",
+    "横浜": "横浜",
+    "甲子園": "甲子園",
+    "マツダスタジアム": "マツダ",
+    "マツダ": "マツダ",
+    "バンテリンドーム": "ナゴヤドーム",
+    "ナゴヤドーム": "ナゴヤドーム",
+    "ZOZOマリン": "QVCマリン",
+    "QVCマリン": "QVCマリン",
+    "みずほPayPay": "ヤフードーム",
+    "ヤフードーム": "ヤフードーム",
+    "ベルーナドーム": "西武ドーム",
+    "西武ドーム": "西武ドーム",
+    "楽天モバイル": "Ｋスタ宮城",
+    "Ｋスタ宮城": "Ｋスタ宮城",
+    "京セラD大阪": "京セラドーム",
+    "京セラドーム": "京セラドーム",
+    "京セラD": "京セラドーム",
+    "ほっと神戸": "スカイマーク",
+    "ほっともっと神戸": "スカイマーク",
+    "スカイマーク": "スカイマーク",
 }
 
 
@@ -1095,10 +1125,13 @@ async def get_schedule_game_data(
     return {
         "賽事編號": game_id,
         "日期": date_str,
+        "客隊原名": away_raw,
         "客隊": away_name,
         "客隊先發": away_starter,
+        "主隊原名": home_raw,
         "主隊": home_name,
         "主隊先發": home_starter,
+        "球場原名": venue_raw,
         "球場": field,
         "主審": umpire,
         "時間": game_time,
@@ -1184,6 +1217,157 @@ def _schedule_row(seq: int, data: dict) -> list:
         *ab,  # CP–DE 客打擊 (16)
         *hb,  # DF–DU 主打擊 (16)
     ]  # 125 values total — DV onwards are formula columns, left untouched
+
+
+def _analysis_date(date_str: str) -> str:
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    return f"{dt.year}/{dt.month}/{dt.day}"
+
+
+def _analysis_game_type(data: dict) -> str:
+    away = data.get("客隊原名", "")
+    home = data.get("主隊原名", "")
+    if not away or not home:
+        return "例行賽"
+    return (
+        "交流賽" if NPB_TEAMS[away]["league"] != NPB_TEAMS[home]["league"] else "例行賽"
+    )
+
+
+def _analysis_day_night(game_time: str) -> str:
+    m = re.match(r"^(\d{1,2}):(\d{2})$", str(game_time or ""))
+    if not m:
+        return ""
+    return "夜" if int(m.group(1)) >= 17 else "日"
+
+
+def _analysis_team_name(team_name: str) -> str:
+    return display_team_name(team_name)
+
+
+def _analysis_field(data: dict) -> str:
+    raw = data.get("球場原名") or data.get("球場") or ""
+    return ANALYSIS_FIELDS.get(raw, "地方球場" if raw else "")
+
+
+def _analysis_hand(hand: str) -> str:
+    if not hand:
+        return ""
+    return hand if hand.endswith("投") else f"{hand}投"
+
+
+def _analysis_marks(away_score: int, home_score: int) -> tuple[str, str]:
+    if away_score > home_score:
+        return "○", "●"
+    if away_score < home_score:
+        return "●", "○"
+    return "△", "△"
+
+
+def _analysis_innings(vals: list) -> tuple[list, str]:
+    innings = ["" if str(v) in ("", "×") else v for v in vals[:9]]
+    extras = []
+    for v in vals[9:12]:
+        if str(v).isdigit():
+            extras.append(int(v))
+    return innings, (sum(extras) if extras else "")
+
+
+def _analysis_total_bases(batting: list) -> int:
+    hits = int(batting[2] or 0)
+    doubles = int(batting[4] or 0)
+    triples = int(batting[5] or 0)
+    homers = int(batting[6] or 0)
+    return hits + doubles + triples * 2 + homers * 3
+
+
+def _analysis_long_hits(batting: list) -> int:
+    return int(batting[4] or 0) + int(batting[5] or 0) + int(batting[6] or 0)
+
+
+def _analysis_starter_block(starter_pitch: list) -> list:
+    return [
+        starter_pitch[0],  # 局數
+        starter_pitch[1],  # 打數 / faced batters
+        starter_pitch[4],  # 安打
+        starter_pitch[5],  # HR
+        starter_pitch[6] + starter_pitch[7],  # 四球 + 死球
+        starter_pitch[11],  # 失点
+        starter_pitch[12],  # 責失
+        starter_pitch[4] + starter_pitch[5] * 3,  # 被壘打, minimum from H/HR
+        "x",  # 勝敗 is not exposed by Yahoo's current box-score table.
+    ]
+
+
+def _analysis_team_total_block(
+    opposing_pitch: list,
+    batting: list,
+    score: int,
+    earned_runs: int,
+    errors: int,
+) -> list:
+    return [
+        opposing_pitch[0],  # 局数
+        opposing_pitch[2],  # 用球数
+        batting[0],  # 打 数
+        batting[2],  # 安打
+        batting[6],  # HR
+        batting[10],  # 三振
+        batting[8] + batting[9],  # 四死
+        score,  # 失点 / 得点 from this team's view
+        earned_runs,
+        errors,
+        batting[7],  # 併打
+        batting[13],  # 盜壘
+        batting[14],  # 盜壘刺
+        _analysis_total_bases(batting),
+        _analysis_long_hits(batting),
+    ]
+
+
+def _analysis_row(seq: int, data: dict) -> list:
+    away_score = int(data["客總分"])
+    home_score = int(data["主總分"])
+    away_mark, home_mark = _analysis_marks(away_score, home_score)
+    away_innings, away_ot = _analysis_innings(data["away_innings"])
+    home_innings, home_ot = _analysis_innings(data["home_innings"])
+
+    away_bat = data["客打擊"]
+    home_bat = data["主打擊"]
+    away_starter_view = _analysis_starter_block(data["主先發投球"])
+    home_starter_view = _analysis_starter_block(data["客先發投球"])
+    away_total_view = _analysis_team_total_block(
+        data["主總投球"], away_bat, away_score, data["主總投球"][12], data["客總失誤"]
+    )
+    home_total_view = _analysis_team_total_block(
+        data["客總投球"], home_bat, home_score, data["客總投球"][12], data["主總失誤"]
+    )
+
+    return [
+        seq,
+        _analysis_date(data["日期"]),
+        _analysis_day_night(data.get("時間", "")),
+        _analysis_game_type(data),
+        data["主審"],
+        _analysis_hand(data["客投別"]),
+        _analysis_hand(data["主投別"]),
+        away_mark,
+        _analysis_team_name(data.get("客隊原名", data["客隊"])),
+        away_score,
+        home_score,
+        _analysis_team_name(data.get("主隊原名", data["主隊"])),
+        home_mark,
+        _analysis_field(data),
+        *away_innings,
+        away_ot,
+        *home_innings,
+        home_ot,
+        *away_starter_view,
+        *away_total_view,
+        "",
+        *home_starter_view,
+        *home_total_view,
+    ]
 
 
 def _sailu_row(seq: int, data: dict) -> list:
@@ -1555,6 +1739,186 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
     )
 
 
+def _analysis_identity(data: dict) -> tuple[str, str, str]:
+    return (
+        _analysis_date(data["日期"]),
+        _analysis_team_name(data.get("客隊原名", data["客隊"])),
+        _analysis_team_name(data.get("主隊原名", data["主隊"])),
+    )
+
+
+def _analysis_identity_from_row(row: list[str]) -> tuple[str, str, str] | None:
+    if len(row) < 12 or not row[1] or not row[8] or not row[11]:
+        return None
+    return (row[1], row[8], row[11])
+
+
+def _analysis_row_year(row: list[str]) -> int | None:
+    if len(row) < 2 or not row[1]:
+        return None
+    try:
+        return datetime.strptime(row[1], "%Y/%m/%d").year
+    except ValueError:
+        return None
+
+
+def _last_analysis_seq(rows: list[list[str]]) -> int:
+    last_seq = 0
+    for row in rows[2:]:
+        if not row:
+            continue
+        try:
+            last_seq = max(last_seq, int(row[0]))
+        except (TypeError, ValueError):
+            continue
+    return last_seq
+
+
+def _season_months(year: int) -> list[str]:
+    today = datetime.now()
+    end_month = today.month if today.year == year else 12
+    return [f"{year}-{month:02d}" for month in range(1, end_month + 1)]
+
+
+async def get_finished_game_ids_for_month(
+    team_id: int, month: str, session: aiohttp.ClientSession
+) -> set[str]:
+    ids: set[str] = set()
+    html = await _fetch(session, f"{BASE_URL}teams/{team_id}/schedule?month={month}")
+    if not html:
+        return ids
+    soup = bs(html, "html.parser")
+    for entry in soup.find_all(class_="bb-calendarTable__data"):
+        status = entry.find(class_="bb-calendarTable__status")
+        if not status or status.text.strip() != "試合終了":
+            continue
+        m = re.search(r"npb/game/([^/]+)", status.get("href", ""))
+        if m:
+            ids.add(m.group(1))
+    return ids
+
+
+async def get_finished_game_ids_for_season(
+    year: int, session: aiohttp.ClientSession
+) -> set[str]:
+    all_ids: set[str] = set()
+    months = _season_months(year)
+    for month in months:
+        tasks = [
+            get_finished_game_ids_for_month(info["id"], month, session)
+            for info in NPB_TEAMS.values()
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"  [analysis] schedule scan {month}: {result}")
+            else:
+                all_ids.update(result)
+        await asyncio.sleep(0.5)
+    return all_ids
+
+
+async def update_analysis_sheet(
+    session: aiohttp.ClientSession, year: int = ANALYSIS_SEASON
+):
+    """
+    Append missing finished games for the season into 分析表紀錄.
+
+    The sheet does not store Yahoo game IDs, so duplicate detection uses
+    (date, away team, home team), which is stable for NPB regular-season games.
+    """
+    print(f"\n=== {ANALYSIS_SHEET_NAME} update ({year}) ===")
+    sheet = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
+    rows = sheet.get_all_values()
+    season_rows = [row for row in rows[2:] if _analysis_row_year(row) == year]
+    existing = {
+        ident for row in season_rows if (ident := _analysis_identity_from_row(row))
+    }
+    last_seq = _last_analysis_seq(rows)
+
+    all_ids = sorted(await get_finished_game_ids_for_season(year, session))
+    if not all_ids:
+        print("[analysis] No finished games found.")
+        return 0
+
+    print(f"[analysis] {len(all_ids)} finished game ID(s) found for {year}.")
+    if len(existing) >= len(all_ids):
+        print(
+            "[analysis] Sheet already has all finished games by count; "
+            "skipping box-score scrape."
+        )
+        return 0
+
+    new_games: list[tuple[str, dict]] = []
+    for i in range(0, len(all_ids), MAX_CONCURRENT):
+        batch = all_ids[i : i + MAX_CONCURRENT]
+        scraped = await asyncio.gather(
+            *[get_schedule_game_data(gid, session) for gid in batch],
+            return_exceptions=True,
+        )
+        for gid, data in zip(batch, scraped):
+            if isinstance(data, Exception):
+                print(f"  [analysis] get_schedule_game_data({gid}): {data}")
+            elif data:
+                ident = _analysis_identity(data)
+                if ident not in existing:
+                    new_games.append((gid, data))
+                    existing.add(ident)
+            else:
+                print(f"  [analysis] No data for {gid}")
+        if i + MAX_CONCURRENT < len(all_ids):
+            await asyncio.sleep(2)
+
+    if not new_games:
+        print("[analysis] No new games to append.")
+        return 0
+
+    new_games.sort(key=lambda x: (x[1]["日期"], x[0]))
+    append_rows = [
+        _analysis_row(last_seq + i + 1, data) for i, (_, data) in enumerate(new_games)
+    ]
+    sheet.append_rows(append_rows, value_input_option="USER_ENTERED")
+    print(f"[analysis] Appended {len(append_rows)} row(s) to {ANALYSIS_SHEET_NAME}.")
+    return len(append_rows)
+
+
+def update_huizi_sheet(today: datetime | None = None):
+    """
+    Refresh 彙資 with today's finished games from 分析表紀錄.
+
+    彙資 keeps the same 83-column shape and reserves rows 3-8 for today's six
+    possible NPB games.
+    """
+    today = today or datetime.now()
+    today_str = f"{today.year}/{today.month}/{today.day}"
+    print(f"\n=== {HUIZI_SHEET_NAME} update ({today_str}) ===")
+
+    analysis = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
+    huizi = get_worksheet(HUIZI_SHEET_NAME, NPB_SPREADSHEET_KEY)
+    rows = analysis.get_all_values()
+    today_rows = [row[:83] for row in rows[2:] if len(row) > 1 and row[1] == today_str]
+
+    huizi.batch_clear(["A3:CE8"])
+    if not today_rows:
+        print("[huizi] No finished games for today; cleared stale rows.")
+        return 0
+
+    values = []
+    for seq, row in enumerate(today_rows[:6], start=1):
+        padded = row + [""] * (83 - len(row))
+        padded[0] = seq
+        values.append(padded[:83])
+
+    end_row = 2 + len(values)
+    huizi.update(
+        range_name=f"A3:CE{end_row}",
+        values=values,
+        value_input_option="USER_ENTERED",
+    )
+    print(f"[huizi] Updated {len(values)} today game row(s).")
+    return len(values)
+
+
 # --- Sheet building ---
 
 
@@ -1866,6 +2230,17 @@ async def run_once():
             await update_sailu_sheet(session)
         except Exception as e:
             errors.append(f"update_sailu_sheet: {e}")
+
+        # Update all 2026 games in 分析表紀錄, then refresh 彙資 for today.
+        try:
+            await update_analysis_sheet(session)
+        except Exception as e:
+            errors.append(f"update_analysis_sheet: {e}")
+
+        try:
+            update_huizi_sheet()
+        except Exception as e:
+            errors.append(f"update_huizi_sheet: {e}")
 
     if errors:
         print(f"\n[ERROR] {len(errors)} failure(s):")
