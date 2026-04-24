@@ -102,7 +102,7 @@ jobs:
           curl -s https://ifconfig.me
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.11"
 
