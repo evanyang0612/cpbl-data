@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 from utils import send_telegram
@@ -403,10 +403,12 @@ def update_huizi(year: str = None):
     找出今天的比賽資料（來自 賽程 或 熱身賽賽程），
     清除 彙資 B4:DU6 後貼上最多 3 場比賽（對應 VS1/VS2/VS3）。
     """
+    # 比賽常會跑到凌晨，凌晨 6 點前都算前一天的比賽日
+    effective_now = datetime.now() - timedelta(hours=6)
     if year is None:
-        year = str(datetime.now().year)
+        year = str(effective_now.year)
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = effective_now.strftime("%Y-%m-%d")
     print(f"Updating 彙資 for {today_str}...")
 
     scope = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -461,13 +463,14 @@ def run_once(year: str = None, kind_codes=None):
         year: 賽季年份，預設為今年
         kind_codes: 要監控的賽事種類列表，預設 ["A", "G"]（正式賽 + 熱身賽）
     """
+    # 比賽常會跑到凌晨，凌晨 6 點前都算前一天的比賽日
+    now = datetime.now() - timedelta(hours=6)
     if year is None:
-        year = str(datetime.now().year)
+        year = str(now.year)
     if kind_codes is None:
         kind_codes = ["A", "G"]
 
     session = get_session()
-    now = datetime.now()
     current_month = str(now.month)
     errors = []
     print(
@@ -566,7 +569,7 @@ def main(game_sno: str, year: str, kind_code="A"):
 if __name__ == "__main__":
     # GitHub Actions cron 觸發時執行此入口
     try:
-        run_once(year=str(datetime.now().year), kind_codes=["A"])
+        run_once(kind_codes=["A"])
         send_telegram("CPBL schedule update completed successfully.")
     except Exception as e:
         send_telegram(f"CPBL schedule update failed: {e}")
