@@ -28,6 +28,9 @@ TEAM_MAP = {
     "台鋼雄鷹": "台鋼",
 }
 
+# (connect, read) — 走 VPN 時 cpbl.com.tw 偶爾會被擋，連線階段需要快速失敗
+REQUEST_TIMEOUT = (10, 30)
+
 
 def get_session():
     session = requests.Session()
@@ -63,7 +66,9 @@ def get_worksheet(kind_code):
 
 def fetch_schedule(year, month, kind_code, session):
     try:
-        response = session.get("https://www.cpbl.com.tw/schedule")
+        response = session.get(
+            "https://www.cpbl.com.tw/schedule", timeout=REQUEST_TIMEOUT
+        )
         soup = BeautifulSoup(response.text, "html.parser")
 
         # 從頁面 HTML 抓 hardcoded 的 token（格式是 token1:token2）
@@ -92,6 +97,7 @@ def fetch_schedule(year, month, kind_code, session):
             "https://www.cpbl.com.tw/schedule/getgamedatas",
             data=payload,
             headers=headers,
+            timeout=REQUEST_TIMEOUT,
         )
         print(f"[status] {post_response.status_code}")
         print(f"[response] {post_response.text[:300]}")
@@ -120,7 +126,7 @@ def fetch_game_data(game_sno, year, kind_code, session):
     """從 box/getlive 抓取比賽的詳細資料，回傳 JSON dict 或 None。"""
     url = f"https://www.cpbl.com.tw/box/index?gameSno={game_sno}&year={year}&kindCode={kind_code}"
     try:
-        response = session.get(url)
+        response = session.get(url, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
             print(f"[box] HTTP {response.status_code} for game {game_sno}")
             return None
@@ -142,7 +148,7 @@ def fetch_game_data(game_sno, year, kind_code, session):
             "SelectMonth": str(datetime.now().month),
         }
         post_response = session.post(
-            "https://www.cpbl.com.tw/box/getlive", data=payload
+            "https://www.cpbl.com.tw/box/getlive", data=payload, timeout=REQUEST_TIMEOUT
         )
         if post_response.status_code != 200:
             print(f"[getlive] HTTP {post_response.status_code} for game {game_sno}")
@@ -159,7 +165,7 @@ def get_pitching_habit(acnt_id, session):
         return ""
     try:
         url = f"https://www.cpbl.com.tw/team/person?acnt={acnt_id}"
-        response = session.get(url)
+        response = session.get(url, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             bt_dd = soup.find("dd", class_="b_t")
@@ -348,7 +354,9 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     update_values[38] = h_batting[15]
 
     # 投球資料
-    v_starter_stats, v_starter_name, v_starter_acnt = _get_pitching_stats(pitching, 1, True)
+    v_starter_stats, v_starter_name, v_starter_acnt = _get_pitching_stats(
+        pitching, 1, True
+    )
     update_values[4] = v_starter_name
     for i in range(13):
         update_values[39 + i] = v_starter_stats[i]
@@ -357,7 +365,9 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     for i in range(13):
         update_values[52 + i] = v_total_pitch[i]
 
-    h_starter_stats, h_starter_name, h_starter_acnt = _get_pitching_stats(pitching, 2, True)
+    h_starter_stats, h_starter_name, h_starter_acnt = _get_pitching_stats(
+        pitching, 2, True
+    )
     update_values[6] = h_starter_name
     for i in range(13):
         update_values[65 + i] = h_starter_stats[i]
