@@ -249,6 +249,16 @@ async def _fetch(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     return None
 
 
+async def _fetch_once(session: aiohttp.ClientSession, url: str) -> Optional[str]:
+    try:
+        async with session.get(url) as res:
+            if res.status == 200:
+                return await res.text()
+    except Exception:
+        pass
+    return None
+
+
 async def get_game_info(game_id: str, session: aiohttp.ClientSession) -> Optional[dict]:
     """
     Fetch box score for a finished game. Returns a dict keyed by team display name,
@@ -852,16 +862,17 @@ async def get_sailu_game_data(
 
 
 async def get_schedule_game_data(
-    game_id: str, session: aiohttp.ClientSession
+    game_id: str, session: aiohttp.ClientSession, *, retry: bool = True
 ) -> Optional[dict]:
     """
     Scrape a finished game's full box score for the 賽程 sheet.
     Extends get_sailu_game_data with full pitching stats (starter + total) and
     full batting stats per team.  Returns None on any failure.
     """
+    fetch = _fetch if retry else _fetch_once
     stats_html, top_html = await asyncio.gather(
-        _fetch(session, f"{BASE_URL}game/{game_id}/stats"),
-        _fetch(session, f"{BASE_URL}game/{game_id}/top"),
+        fetch(session, f"{BASE_URL}game/{game_id}/stats"),
+        fetch(session, f"{BASE_URL}game/{game_id}/top"),
     )
     if not stats_html:
         return None
@@ -1285,6 +1296,36 @@ def _analysis_long_hits(batting: list) -> int:
     return int(batting[4] or 0) + int(batting[5] or 0) + int(batting[6] or 0)
 
 
+def _analysis_qs(starter_pitch: list):
+    ip_raw = str(starter_pitch[0] or "")
+    try:
+        parts = ip_raw.split(".")
+        partial = 0
+        if len(parts) > 1:
+            frac = parts[1]
+            if frac.startswith("3333"):
+                partial = 1
+            elif frac.startswith("6667"):
+                partial = 2
+            else:
+                partial = int(frac[:1] or 0)
+        outs = int(parts[0]) * 3 + partial
+    except (TypeError, ValueError):
+        outs = 0
+    try:
+        earned_runs = int(starter_pitch[12] or 0)
+    except (TypeError, ValueError):
+        earned_runs = 0
+
+    if outs >= 21 and earned_runs <= 3:
+        return "QS"
+    if outs >= 18 and earned_runs <= 2:
+        return "QS"
+    if outs >= 15 and earned_runs <= 1:
+        return "QS"
+    return "x"
+
+
 def _analysis_starter_block(starter_pitch: list) -> list:
     return [
         starter_pitch[0],  # 局數
@@ -1295,7 +1336,7 @@ def _analysis_starter_block(starter_pitch: list) -> list:
         starter_pitch[11],  # 失点
         starter_pitch[12],  # 責失
         starter_pitch[4] + starter_pitch[5] * 3,  # 被壘打, minimum from H/HR
-        "x",  # 勝敗 is not exposed by Yahoo's current box-score table.
+        _analysis_qs(starter_pitch),  # QS
     ]
 
 
@@ -1650,7 +1691,7 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
     new_ids = sorted(gid for gid in all_ids if gid not in existing_ids)
     if not new_ids:
         print("[sailu] No new games to add.")
-        return
+        return []
 
     print(f"[sailu] {len(new_ids)} new game(s): {new_ids}")
 
@@ -1674,7 +1715,7 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
 
     if not new_games:
         print("[sailu] Nothing to write.")
-        return
+        return []
 
     new_games.sort(key=lambda x: x[0])  # sort by game ID (encodes date + sequence)
 
@@ -1737,6 +1778,7 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
     print(
         f"[sailu] Done. Filled {filled} source row(s) and {target_filled} target row(s)."
     )
+    return [gid for gid, _ in target_regular_games]
 
 
 def _analysis_identity(data: dict) -> tuple[str, str, str]:
@@ -1762,6 +1804,15 @@ def _analysis_row_year(row: list[str]) -> int | None:
         return None
 
 
+def _analysis_row_date(row: list[str]) -> datetime | None:
+    if len(row) < 2 or not row[1]:
+        return None
+    try:
+        return datetime.strptime(row[1], "%Y/%m/%d")
+    except ValueError:
+        return None
+
+
 def _last_analysis_seq(rows: list[list[str]]) -> int:
     last_seq = 0
     for row in rows[2:]:
@@ -1772,6 +1823,22 @@ def _last_analysis_seq(rows: list[list[str]]) -> int:
         except (TypeError, ValueError):
             continue
     return last_seq
+
+
+def _analysis_insert_index(rows: list[list[str]], date_str: str) -> int:
+    """
+    Return the 1-based worksheet row where a new analysis row should be inserted.
+    Rows 1-2 are headers; data stays sorted by game date.
+    """
+    game_date = datetime.strptime(date_str, "%Y-%m-%d")
+    insert_at = len(rows) + 1
+    for row_num, row in enumerate(rows[2:], start=3):
+        row_date = _analysis_row_date(row)
+        if row_date and row_date > game_date:
+            return row_num
+        if row_date:
+            insert_at = row_num + 1
+    return insert_at
 
 
 def _season_months(year: int) -> list[str]:
@@ -1818,14 +1885,52 @@ async def get_finished_game_ids_for_season(
     return all_ids
 
 
+async def get_recent_finished_game_ids(
+    session: aiohttp.ClientSession, games_per_team: int = 3
+) -> set[str]:
+    all_ids: set[str] = set()
+    tasks = {
+        key: get_last_n_game_ids(info["id"], games_per_team, session)
+        for key, info in NPB_TEAMS.items()
+    }
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    for key, result in zip(tasks.keys(), results):
+        if isinstance(result, Exception):
+            print(f"  [analysis] get_last_n_game_ids({key}): {result}")
+        else:
+            all_ids.update(result)
+    return all_ids
+
+
+def _today_sailu_game_ids(today: datetime | None = None) -> list[str]:
+    today = today or datetime.now()
+    today_key = today.strftime("%Y-%m-%d")
+    sheet = get_worksheet(SAILU_SHEET_NAME, SAILU_TARGET_SPREADSHEET_KEY)
+    rows = sheet.get_all_values()
+    ids: list[str] = []
+    for row in rows[1:]:
+        if len(row) <= 40 or row[40] != today_key:
+            continue
+        gid = row[1] if len(row) > 1 else ""
+        if gid and gid not in ids:
+            ids.append(gid)
+    return ids
+
+
 async def update_analysis_sheet(
-    session: aiohttp.ClientSession, year: int = ANALYSIS_SEASON
+    session: aiohttp.ClientSession,
+    year: int = ANALYSIS_SEASON,
+    *,
+    game_ids: list[str] | None = None,
+    full_season: bool = False,
 ):
     """
-    Append missing finished games for the season into 分析表紀錄.
+    Insert missing finished games into 分析表紀錄.
 
     The sheet does not store Yahoo game IDs, so duplicate detection uses
     (date, away team, home team), which is stable for NPB regular-season games.
+    Daily runs use game IDs already written to today's 賽錄 rows; full_season=True
+    is only for manual historical repair/backfill.
     """
     print(f"\n=== {ANALYSIS_SHEET_NAME} update ({year}) ===")
     sheet = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
@@ -1836,13 +1941,26 @@ async def update_analysis_sheet(
     }
     last_seq = _last_analysis_seq(rows)
 
-    all_ids = sorted(await get_finished_game_ids_for_season(year, session))
-    if not all_ids:
-        print("[analysis] No finished games found.")
+    if full_season:
+        candidate_ids = list(
+            reversed(sorted(await get_finished_game_ids_for_season(year, session)))
+        )
+        print(
+            f"[analysis] Full-season scan found {len(candidate_ids)} finished game ID(s)."
+        )
+    else:
+        source_ids = game_ids if game_ids is not None else _today_sailu_game_ids()
+        candidate_ids = []
+        for gid in source_ids:
+            if gid and gid not in candidate_ids:
+                candidate_ids.append(gid)
+        print(f"[analysis] Today 賽錄 has {len(candidate_ids)} candidate game ID(s).")
+
+    if not candidate_ids:
+        print("[analysis] No candidate games found.")
         return 0
 
-    print(f"[analysis] {len(all_ids)} finished game ID(s) found for {year}.")
-    if len(existing) >= len(all_ids):
+    if full_season and len(existing) >= len(candidate_ids):
         print(
             "[analysis] Sheet already has all finished games by count; "
             "skipping box-score scrape."
@@ -1850,23 +1968,28 @@ async def update_analysis_sheet(
         return 0
 
     new_games: list[tuple[str, dict]] = []
-    for i in range(0, len(all_ids), MAX_CONCURRENT):
-        batch = all_ids[i : i + MAX_CONCURRENT]
+    for i in range(0, len(candidate_ids), MAX_CONCURRENT):
+        batch = candidate_ids[i : i + MAX_CONCURRENT]
         scraped = await asyncio.gather(
-            *[get_schedule_game_data(gid, session) for gid in batch],
+            *[get_schedule_game_data(gid, session, retry=full_season) for gid in batch],
             return_exceptions=True,
         )
         for gid, data in zip(batch, scraped):
             if isinstance(data, Exception):
                 print(f"  [analysis] get_schedule_game_data({gid}): {data}")
             elif data:
+                if not full_season and data["日期"] != datetime.now().strftime(
+                    "%Y-%m-%d"
+                ):
+                    continue
                 ident = _analysis_identity(data)
                 if ident not in existing:
                     new_games.append((gid, data))
                     existing.add(ident)
+                    print(f"  [analysis] missing ← {gid} {ident}")
             else:
                 print(f"  [analysis] No data for {gid}")
-        if i + MAX_CONCURRENT < len(all_ids):
+        if i + MAX_CONCURRENT < len(candidate_ids):
             await asyncio.sleep(2)
 
     if not new_games:
@@ -1874,12 +1997,23 @@ async def update_analysis_sheet(
         return 0
 
     new_games.sort(key=lambda x: (x[1]["日期"], x[0]))
-    append_rows = [
-        _analysis_row(last_seq + i + 1, data) for i, (_, data) in enumerate(new_games)
-    ]
-    sheet.append_rows(append_rows, value_input_option="USER_ENTERED")
-    print(f"[analysis] Appended {len(append_rows)} row(s) to {ANALYSIS_SHEET_NAME}.")
-    return len(append_rows)
+    inserted = 0
+    for gid, data in new_games:
+        row_values = _analysis_row(last_seq + inserted + 1, data)
+        insert_at = _analysis_insert_index(rows, data["日期"])
+        sheet.insert_row(
+            row_values,
+            index=insert_at,
+            value_input_option="USER_ENTERED",
+            inherit_from_before=True,
+        )
+        rows.insert(insert_at - 1, [str(v) for v in row_values])
+        inserted += 1
+        print(f"  [analysis] inserted row {insert_at} ← {gid}")
+        await asyncio.sleep(1)
+
+    print(f"[analysis] Inserted {inserted} row(s) into {ANALYSIS_SHEET_NAME}.")
+    return inserted
 
 
 def update_huizi_sheet(today: datetime | None = None):
@@ -1898,20 +2032,19 @@ def update_huizi_sheet(today: datetime | None = None):
     rows = analysis.get_all_values()
     today_rows = [row[:83] for row in rows[2:] if len(row) > 1 and row[1] == today_str]
 
-    huizi.batch_clear(["A3:CE8"])
+    huizi.batch_clear(["B3:CE8"])
     if not today_rows:
         print("[huizi] No finished games for today; cleared stale rows.")
         return 0
 
     values = []
-    for seq, row in enumerate(today_rows[:6], start=1):
+    for row in today_rows[:6]:
         padded = row + [""] * (83 - len(row))
-        padded[0] = seq
-        values.append(padded[:83])
+        values.append(padded[1:83])
 
     end_row = 2 + len(values)
     huizi.update(
-        range_name=f"A3:CE{end_row}",
+        range_name=f"B3:CE{end_row}",
         values=values,
         value_input_option="USER_ENTERED",
     )
@@ -2226,14 +2359,15 @@ async def run_once():
                 errors.append(f"update_league_sheet({sheet_name}): {e}")
 
         # Update 賽錄 in the analysis spreadsheet
+        new_sailu_ids = []
         try:
-            await update_sailu_sheet(session)
+            new_sailu_ids = await update_sailu_sheet(session)
         except Exception as e:
             errors.append(f"update_sailu_sheet: {e}")
 
-        # Update all 2026 games in 分析表紀錄, then refresh 彙資 for today.
+        # Update today's finished games in 分析表紀錄, then refresh 彙資.
         try:
-            await update_analysis_sheet(session)
+            await update_analysis_sheet(session, game_ids=new_sailu_ids)
         except Exception as e:
             errors.append(f"update_analysis_sheet: {e}")
 
