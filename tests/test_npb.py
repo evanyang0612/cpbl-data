@@ -12,6 +12,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from npb import (
+    DEFAULT_FONT,
+    HITS_10_PLUS_FONT,
+    SCORE_LOSS_FONT,
+    SCORE_TIE_FONT,
+    SCORE_WIN_FONT,
+    _game_font_color_requests,
     _get_schedule_opponent,
     _header_format_request,
     _pitcher_font_requests,
@@ -446,6 +452,61 @@ class TestHeaderFormatRequest:
             req["repeatCell"]["fields"]
             == "userEnteredFormat(backgroundColor,textFormat)"
         )
+
+
+# ---------------------------------------------------------------------------
+# _game_font_color_requests
+# ---------------------------------------------------------------------------
+
+
+class TestGameFontColorRequests:
+    def _foreground_hex(self, request):
+        color = request["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"][
+            "foregroundColor"
+        ]
+
+        def channel(name):
+            return round(color.get(name, 0) * 255)
+
+        return f"{channel('red'):02x}{channel('green'):02x}{channel('blue'):02x}"
+
+    def test_runs_more_than_allowed_colours_runs_red(self):
+        game = _make_game(
+            "2025/04/01", "燕 子", "投手", "東 京", 0, 5, 3, 0, 9, 0, 0, 0, 0
+        )
+        reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
+        assert self._foreground_hex(reqs[0]) == SCORE_WIN_FONT
+        assert self._foreground_hex(reqs[1]) == DEFAULT_FONT
+
+    def test_allowed_more_than_runs_colours_allowed_green(self):
+        game = _make_game(
+            "2025/04/01", "燕 子", "投手", "東 京", 0, 2, 6, 0, 9, 0, 0, 0, 0
+        )
+        reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
+        assert self._foreground_hex(reqs[0]) == DEFAULT_FONT
+        assert self._foreground_hex(reqs[1]) == SCORE_LOSS_FONT
+
+    def test_tie_colours_both_score_cells_blue(self):
+        game = _make_game(
+            "2025/04/01", "燕 子", "投手", "東 京", 0, 4, 4, 0, 9, 0, 0, 0, 0
+        )
+        reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
+        assert self._foreground_hex(reqs[0]) == SCORE_TIE_FONT
+        assert self._foreground_hex(reqs[1]) == SCORE_TIE_FONT
+
+    def test_hits_10_or_more_colours_hits_orange_brown(self):
+        game = _make_game(
+            "2025/04/01", "燕 子", "投手", "東 京", 0, 4, 4, 0, 10, 0, 0, 0, 0
+        )
+        reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
+        assert self._foreground_hex(reqs[2]) == HITS_10_PLUS_FONT
+
+    def test_hits_under_10_reset_to_default(self):
+        game = _make_game(
+            "2025/04/01", "燕 子", "投手", "東 京", 0, 4, 4, 0, 9, 0, 0, 0, 0
+        )
+        reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
+        assert self._foreground_hex(reqs[2]) == DEFAULT_FONT
 
 
 # ---------------------------------------------------------------------------
