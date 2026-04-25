@@ -25,6 +25,12 @@ MAX_RETRY = 3
 GAMES_COUNT = 10
 MAX_CONCURRENT = 5
 
+SCORE_WIN_FONT = "ff0000"
+SCORE_LOSS_FONT = "38761d"
+SCORE_TIE_FONT = "0000ff"
+HITS_10_PLUS_FONT = "e26b0a"
+DEFAULT_FONT = "000000"
+
 NPB_TEAMS = {
     "巨人": {
         "id": 1,
@@ -2240,6 +2246,83 @@ def _pitcher_font_requests(
     return requests
 
 
+def _to_number(value) -> Optional[float]:
+    if value in ("", None):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _font_color_request(
+    sheet_id: int, row_0idx: int, col_0idx: int, hex_color: str
+) -> dict:
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": row_0idx,
+                "endRowIndex": row_0idx + 1,
+                "startColumnIndex": col_0idx,
+                "endColumnIndex": col_0idx + 1,
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "textFormat": {"foregroundColor": hex_to_rgb(hex_color)}
+                }
+            },
+            "fields": "userEnteredFormat.textFormat.foregroundColor",
+        }
+    }
+
+
+def _game_font_color_requests(
+    sheet_id: int, games: list[dict], game_start_row: int, col_start: int
+) -> list[dict]:
+    """Colour game-row score and hit cells to match the CPBL 近十場 rules."""
+    sorted_games = sorted(
+        games, key=lambda g: datetime.strptime(g["日期"], "%Y/%m/%d")
+    )[-GAMES_COUNT:]
+
+    runs_col = col_start + 4  # 0-indexed 得点; col_start is 1-indexed
+    allowed_col = col_start + 5  # 0-indexed 失点
+    hits_col = col_start + 7  # 0-indexed 安打
+    requests = []
+
+    for i in range(GAMES_COUNT):
+        row_0idx = game_start_row - 1 + i
+        runs_color = DEFAULT_FONT
+        allowed_color = DEFAULT_FONT
+        hits_color = DEFAULT_FONT
+
+        if i < len(sorted_games):
+            game = sorted_games[i]
+            runs = _to_number(game.get("得分"))
+            allowed = _to_number(game.get("失分"))
+            hits = _to_number(game.get("安打"))
+
+            if runs is not None and allowed is not None:
+                if runs > allowed:
+                    runs_color = SCORE_WIN_FONT
+                elif allowed > runs:
+                    allowed_color = SCORE_LOSS_FONT
+                else:
+                    runs_color = SCORE_TIE_FONT
+                    allowed_color = SCORE_TIE_FONT
+
+            if hits is not None and hits >= 10:
+                hits_color = HITS_10_PLUS_FONT
+
+        requests.append(_font_color_request(sheet_id, row_0idx, runs_col, runs_color))
+        requests.append(
+            _font_color_request(sheet_id, row_0idx, allowed_col, allowed_color)
+        )
+        requests.append(_font_color_request(sheet_id, row_0idx, hits_col, hits_color))
+
+    return requests
+
+
 def _header_format_request(
     sheet_id: int, team_key: str, header_row: int, col_start: int
 ) -> dict:
@@ -2302,6 +2385,9 @@ def update_league_sheet(
         format_requests.extend(
             _pitcher_font_requests(sheet.id, away_games, TOP_GAME_START, col_start)
         )
+        format_requests.extend(
+            _game_font_color_requests(sheet.id, away_games, TOP_GAME_START, col_start)
+        )
 
         # Bottom block (home team)
         home_games = all_games.get(home_key, [])
@@ -2317,6 +2403,11 @@ def update_league_sheet(
         )
         format_requests.extend(
             _pitcher_font_requests(sheet.id, home_games, BOTTOM_GAME_START, col_start)
+        )
+        format_requests.extend(
+            _game_font_color_requests(
+                sheet.id, home_games, BOTTOM_GAME_START, col_start
+            )
         )
 
     # Write values first, then apply formatting in one batch API call
