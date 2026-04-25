@@ -135,6 +135,13 @@ NPB_FIELDS = {
     "楽天モバイル": "宮 城",
 }
 
+
+def _display_field_name(venue: str) -> str:
+    """Format venue names for compact NPB display sheets."""
+    field = NPB_FIELDS.get(venue, venue)
+    return f"{field[0]} {field[1]}" if len(field) == 2 else field
+
+
 ANALYSIS_FIELDS = {
     "エスコンF": "エスコンF",
     "東京ドーム": "東京ドーム",
@@ -297,7 +304,7 @@ async def get_game_info(game_id: str, session: aiohttp.ClientSession) -> Optiona
     if not venue_el:
         return None
     venue_raw = venue_el.text.strip()
-    field = NPB_FIELDS.get(venue_raw, venue_raw)
+    field = _display_field_name(venue_raw)
 
     game_template = {
         "日期": date,
@@ -903,7 +910,7 @@ async def get_schedule_game_data(
     # ── Venue ──────────────────────────────────────────────────────────────
     venue_el = soup.find(class_="bb-gameRound--stadium")
     venue_raw = venue_el.text.strip() if venue_el else ""
-    field = NPB_FIELDS.get(venue_raw, venue_raw)
+    field = _display_field_name(venue_raw)
 
     # ── Game time ──────────────────────────────────────────────────────────
     game_time = ""
@@ -2139,7 +2146,7 @@ def build_block_values(team_key: str, games: list[dict]) -> list[list]:
                 date_str,
                 g.get("對戰球隊", ""),
                 g.get("對戰先發", ""),
-                g.get("球場", ""),
+                _display_field_name(g.get("球場", "")),
                 g.get("実分", 0),
                 g.get("得分", 0),
                 g.get("失分", 0),

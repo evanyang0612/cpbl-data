@@ -188,6 +188,27 @@ class TestBuildBlockValues:
         rows = build_block_values("巨人", SAMPLE_GAMES)
         assert rows[1][10] == 3  # bb+hbp
 
+    def test_two_character_local_field_gets_spaced(self):
+        games = [
+            _make_game(
+                "2025/04/03",
+                "燕 子",
+                "山本",
+                "長野",
+                0,
+                1,
+                2,
+                2,
+                5,
+                6,
+                1,
+                0,
+                0,
+            )
+        ]
+        rows = build_block_values("巨人", games)
+        assert rows[1][3] == "長 野"
+
     def test_avg10_row(self):
         # Row index 11 = 近十場 average (only 5 games available)
         rows = build_block_values("巨人", SAMPLE_GAMES)
