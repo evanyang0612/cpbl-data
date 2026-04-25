@@ -90,26 +90,26 @@ class TestColToLetter:
 
 class TestPitcherFontSize:
     def test_short_name_default(self):
-        assert _pitcher_font_size("田中") == 12  # 2 chars
-        assert _pitcher_font_size("山本由伸") == 12  # 4 chars
-        assert _pitcher_font_size("大谷翔平") == 12  # 4 chars
+        assert _pitcher_font_size("田中") == 10  # 2 chars
+        assert _pitcher_font_size("山本由伸") == 10  # 4 chars
+        assert _pitcher_font_size("大谷翔平") == 10  # 4 chars
 
     def test_medium_name(self):
-        assert _pitcher_font_size("バウアー") == 12  # 4 chars → 12pt
+        assert _pitcher_font_size("バウアー") == 10  # 4 chars -> 10pt
         assert (
-            _pitcher_font_size("グラスナー") == 12
-        )  # 5 chars → still 12pt (threshold is >5)
-        assert _pitcher_font_size("マルティネス") == 10  # 6 chars → 10pt
+            _pitcher_font_size("グラスナー") == 10
+        )  # 5 chars -> still 10pt (threshold is >5)
+        assert _pitcher_font_size("マルティネス") == 8  # 6 chars -> 8pt
 
     def test_long_name(self):
-        assert _pitcher_font_size("バルガスジュニア") == 9  # 8 chars → 9pt
+        assert _pitcher_font_size("バルガスジュニア") == 6  # 8 chars -> 6pt
 
     def test_spaces_ignored(self):
-        # "田 中" stripped = "田中" = 2 chars → 12pt
-        assert _pitcher_font_size("田 中") == 12
+        # "田 中" stripped = "田中" = 2 chars -> 10pt
+        assert _pitcher_font_size("田 中") == 10
 
     def test_empty_string(self):
-        assert _pitcher_font_size("") == 12
+        assert _pitcher_font_size("") == 10
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +187,27 @@ class TestBuildBlockValues:
         # Game at index 1 (2025/03/28): bb=3, hbp=0 → col index 10 = 3
         rows = build_block_values("巨人", SAMPLE_GAMES)
         assert rows[1][10] == 3  # bb+hbp
+
+    def test_two_character_local_field_gets_spaced(self):
+        games = [
+            _make_game(
+                "2025/04/03",
+                "燕 子",
+                "山本",
+                "長野",
+                0,
+                1,
+                2,
+                2,
+                5,
+                6,
+                1,
+                0,
+                0,
+            )
+        ]
+        rows = build_block_values("巨人", games)
+        assert rows[1][3] == "長 野"
 
     def test_avg10_row(self):
         # Row index 11 = 近十場 average (only 5 games available)
@@ -315,11 +336,11 @@ class TestPitcherFontRequests:
         for req in reqs:
             assert (
                 req["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["fontSize"]
-                == 12
+                == 10
             )
 
     def test_long_pitcher_name_gets_smaller_font(self):
-        # "マルティネス" = 6 chars → 10pt
+        # "マルティネス" = 6 chars -> 8pt
         game = _make_game(
             "2025/03/28", "橫 濱", "マルティネス", "横 浜", 0, 0, 0, 0, 0, 0, 0, 0, 0
         )
@@ -328,7 +349,7 @@ class TestPitcherFontRequests:
         )
         assert (
             reqs[0]["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["fontSize"]
-            == 10
+            == 8
         )
 
     def test_short_pitcher_name_gets_default_font(self):
@@ -340,7 +361,7 @@ class TestPitcherFontRequests:
         )
         assert (
             reqs[0]["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["fontSize"]
-            == 12
+            == 10
         )
 
 
