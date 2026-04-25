@@ -1902,14 +1902,21 @@ async def get_recent_finished_game_ids(
     return all_ids
 
 
-def _today_sailu_game_ids(today: datetime | None = None) -> list[str]:
-    today = today or datetime.now()
-    today_key = today.strftime("%Y-%m-%d")
+def _date_key(date_value: datetime | str | None = None) -> str:
+    if date_value is None:
+        return datetime.now().strftime("%Y-%m-%d")
+    if isinstance(date_value, datetime):
+        return date_value.strftime("%Y-%m-%d")
+    return date_value
+
+
+def _sailu_game_ids_for_date(date_value: datetime | str | None = None) -> list[str]:
+    target_key = _date_key(date_value)
     sheet = get_worksheet(SAILU_SHEET_NAME, SAILU_TARGET_SPREADSHEET_KEY)
     rows = sheet.get_all_values()
     ids: list[str] = []
     for row in rows[1:]:
-        if len(row) <= 40 or row[40] != today_key:
+        if len(row) <= 40 or row[40] != target_key:
             continue
         gid = row[1] if len(row) > 1 else ""
         if gid and gid not in ids:
@@ -1917,11 +1924,31 @@ def _today_sailu_game_ids(today: datetime | None = None) -> list[str]:
     return ids
 
 
+def _today_sailu_game_ids(today: datetime | None = None) -> list[str]:
+    return _sailu_game_ids_for_date(today)
+
+
+def _sailu_dates_for_game_ids(game_ids: list[str]) -> list[str]:
+    if not game_ids:
+        return []
+    wanted = set(game_ids)
+    sheet = get_worksheet(SAILU_SHEET_NAME, SAILU_TARGET_SPREADSHEET_KEY)
+    rows = sheet.get_all_values()
+    dates: list[str] = []
+    for row in rows[1:]:
+        if len(row) <= 40 or row[1] not in wanted or not row[40]:
+            continue
+        if row[40] not in dates:
+            dates.append(row[40])
+    return sorted(dates)
+
+
 async def update_analysis_sheet(
     session: aiohttp.ClientSession,
     year: int = ANALYSIS_SEASON,
     *,
     game_ids: list[str] | None = None,
+    target_date: datetime | str | None = None,
     full_season: bool = False,
 ):
     """
@@ -1929,8 +1956,8 @@ async def update_analysis_sheet(
 
     The sheet does not store Yahoo game IDs, so duplicate detection uses
     (date, away team, home team), which is stable for NPB regular-season games.
-    Daily runs use game IDs already written to today's 賽錄 rows; full_season=True
-    is only for manual historical repair/backfill.
+    Daily runs use game IDs already written to the target date's 賽錄 rows;
+    full_season=True is only for manual historical repair/backfill.
     """
     print(f"\n=== {ANALYSIS_SHEET_NAME} update ({year}) ===")
     sheet = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
@@ -1949,12 +1976,22 @@ async def update_analysis_sheet(
             f"[analysis] Full-season scan found {len(candidate_ids)} finished game ID(s)."
         )
     else:
-        source_ids = game_ids if game_ids is not None else _today_sailu_game_ids()
+        source_ids = (
+            game_ids
+            if game_ids is not None
+            else _sailu_game_ids_for_date(target_date)
+        )
         candidate_ids = []
         for gid in source_ids:
             if gid and gid not in candidate_ids:
                 candidate_ids.append(gid)
-        print(f"[analysis] Today 賽錄 has {len(candidate_ids)} candidate game ID(s).")
+        if game_ids is not None:
+            target_label = "provided game IDs"
+        else:
+            target_label = _date_key(target_date)
+        print(
+            f"[analysis] {target_label} has {len(candidate_ids)} candidate game ID(s)."
+        )
 
     if not candidate_ids:
         print("[analysis] No candidate games found.")
@@ -1978,9 +2015,7 @@ async def update_analysis_sheet(
             if isinstance(data, Exception):
                 print(f"  [analysis] get_schedule_game_data({gid}): {data}")
             elif data:
-                if not full_season and data["日期"] != datetime.now().strftime(
-                    "%Y-%m-%d"
-                ):
+                if target_date and data["日期"] != _date_key(target_date):
                     continue
                 ident = _analysis_identity(data)
                 if ident not in existing:
@@ -2016,14 +2051,17 @@ async def update_analysis_sheet(
     return inserted
 
 
-def update_huizi_sheet(today: datetime | None = None):
+def update_huizi_sheet(today: datetime | str | None = None):
     """
-    Refresh 彙資 with today's finished games from 分析表紀錄.
+    Refresh 彙資 with a target date's finished games from 分析表紀錄.
 
-    彙資 keeps the same 83-column shape and reserves rows 3-8 for today's six
+    彙資 keeps the same 83-column shape and reserves rows 3-8 for the date's six
     possible NPB games.
     """
-    today = today or datetime.now()
+    if isinstance(today, str):
+        today = datetime.strptime(today, "%Y-%m-%d")
+    else:
+        today = today or datetime.now()
     today_str = f"{today.year}/{today.month}/{today.day}"
     print(f"\n=== {HUIZI_SHEET_NAME} update ({today_str}) ===")
 
@@ -2032,11 +2070,11 @@ def update_huizi_sheet(today: datetime | None = None):
     rows = analysis.get_all_values()
     today_rows = [row[:83] for row in rows[2:] if len(row) > 1 and row[1] == today_str]
 
-    huizi.batch_clear(["B3:CE8"])
     if not today_rows:
-        print("[huizi] No finished games for today; cleared stale rows.")
+        print(f"[huizi] No finished games for {today_str}; keeping existing data.")
         return 0
 
+    huizi.batch_clear(["B3:CE8"])
     values = []
     for row in today_rows[:6]:
         padded = row + [""] * (83 - len(row))
@@ -2145,7 +2183,7 @@ def build_block_values(team_key: str, games: list[dict]) -> list[list]:
 
 
 def _pitcher_font_size(name: str) -> int:
-    """12pt (default) for ≤5 chars; shrink only when name exceeds 5 chars."""
+    """10pt default; shrink longer pitcher names to fit the narrow column."""
     n = len(name.replace(" ", ""))
     if n > 7:
         return 6
@@ -2365,14 +2403,18 @@ async def run_once():
         except Exception as e:
             errors.append(f"update_sailu_sheet: {e}")
 
-        # Update today's finished games in 分析表紀錄, then refresh 彙資.
+        # Update the newly written finished games in 分析表紀錄, then refresh 彙資.
+        huizi_date = None
         try:
             await update_analysis_sheet(session, game_ids=new_sailu_ids)
+            sailu_dates = _sailu_dates_for_game_ids(new_sailu_ids)
+            if sailu_dates:
+                huizi_date = sailu_dates[-1]
         except Exception as e:
             errors.append(f"update_analysis_sheet: {e}")
 
         try:
-            update_huizi_sheet()
+            update_huizi_sheet(huizi_date)
         except Exception as e:
             errors.append(f"update_huizi_sheet: {e}")
 
