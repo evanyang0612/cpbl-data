@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup as bs
 from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import urljoin
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -21,6 +22,7 @@ NPB_SPREADSHEET_KEY = "1XBATQ-ZQVE7saISTw_EYEXg3qFFAn5aeLDPdGI1_8Rg"
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
 
 BASE_URL = "https://baseball.yahoo.co.jp/npb/"
+NPB_OFFICIAL_BASE_URL = "https://npb.jp"
 MAX_RETRY = 3
 GAMES_COUNT = 10
 MAX_CONCURRENT = 5
@@ -125,6 +127,45 @@ EXHIBITION_SHEET_NAME = "熱身賽紀錄"
 ANALYSIS_SHEET_NAME = "分析表紀錄"
 HUIZI_SHEET_NAME = "彙資"
 ANALYSIS_SEASON = 2026
+
+OFFICIAL_TEAM_NAME_MAP = {
+    "読売": "巨人",
+    "巨人": "巨人",
+    "東京ヤクルト": "ヤクルト",
+    "ヤクルト": "ヤクルト",
+    "横浜DeNA": "DeNA",
+    "DeNA": "DeNA",
+    "中日": "中日",
+    "阪神": "阪神",
+    "広島東洋": "広島",
+    "広島": "広島",
+    "埼玉西武": "西武",
+    "西武": "西武",
+    "北海道日本ハム": "日本ハム",
+    "日本ハム": "日本ハム",
+    "千葉ロッテ": "ロッテ",
+    "ロッテ": "ロッテ",
+    "オリックス": "オリックス",
+    "福岡ソフトバンク": "ソフトバンク",
+    "ソフトバンク": "ソフトバンク",
+    "東北楽天": "楽天",
+    "楽天": "楽天",
+}
+OFFICIAL_TEAM_CODE_MAP = {
+    "g": "巨人",
+    "t": "阪神",
+    "db": "横浜",
+    "s": "ヤクルト",
+    "d": "中日",
+    "c": "広島",
+    "l": "西武",
+    "f": "日本ハム",
+    "m": "ロッテ",
+    "b": "オリックス",
+    "h": "ソフトバンク",
+    "e": "楽天",
+}
+_OFFICIAL_PLAYBYPLAY_CACHE: dict[str, dict[tuple[str, str, str], str]] = {}
 
 NPB_FIELDS = {
     "東京ドーム": "東 京",
@@ -666,6 +707,210 @@ async def get_next_matchups(
 # --- 賽錄 scraping & update ---
 
 
+def _batting_event_counts(tbl) -> dict[str, int]:
+    """Count batting events that Yahoo does not expose in the team total row."""
+
+    def _normalized(text: str) -> str:
+        return (
+            text.replace("２", "2")
+            .replace("３", "3")
+            .replace("　", "")
+            .replace(" ", "")
+        )
+
+    counts = {"2B": 0, "3B": 0, "GIDP": 0, "SF": 0}
+    rows = tbl.find_all("tr") or tbl.find_all(class_="bb-statsTable__row")
+    for row in rows:
+        if row.find(class_="bb-statsTable__head--result"):
+            continue
+        for cell in row.find_all(class_="bb-statsTable__data--inning"):
+            text = _normalized(cell.get_text("", strip=True))
+            if not text:
+                continue
+            if "併打" in text or "併殺" in text:
+                counts["GIDP"] += 1
+            if "犠飛" in text:
+                counts["SF"] += 1
+            if "二塁打" in text or re.search(
+                r"(左中|右中|左線|右線|中越|左越|右越|左|中|右)2", text
+            ):
+                counts["2B"] += 1
+            if "三塁打" in text or re.search(
+                r"(左中|右中|左線|右線|中越|左越|右越|左|中|右)3", text
+            ):
+                counts["3B"] += 1
+    return counts
+
+
+def _parse_batting_table(tbl) -> list:
+    """
+    Parse Yahoo's batting table into:
+    [AB, R, H, RBI, 2B, 3B, HR, GIDP, BB, HBP, K, SH, SF, SB, CS, E].
+
+    Yahoo's current total row has no GIDP or CS. GIDP/SF/2B/3B are counted from
+    per-plate-appearance text, and CS is left as 0 because it is not exposed.
+    """
+
+    cells = tbl.find_all(class_="bb-statsTable__data--result")
+    events = _batting_event_counts(tbl)
+
+    def s(i):
+        try:
+            return int(cells[i].text.strip())
+        except Exception:
+            return 0
+
+    return [
+        s(1),  # AB (打數)
+        s(2),  # R (得分)
+        s(3),  # H (安打)
+        s(4),  # RBI (打點)
+        events["2B"],
+        events["3B"],
+        s(11),  # HR (全壘打)
+        events["GIDP"],
+        s(6),  # BB (四壞球)
+        s(7),  # HBP (死球)
+        s(5),  # K (被三振)
+        s(8),  # SH (犧牲短打)
+        events["SF"],
+        s(9),  # SB (盜壘)
+        0,  # CS is not exposed by Yahoo's batting table.
+        s(10),  # E (失誤)
+    ]
+
+
+def _parse_official_caught_stealing(html: str) -> dict[str, int]:
+    """
+    Count caught stealing from NPB.jp play-by-play text.
+
+    The official page marks half-innings as h5 text like "7回表（楽天の攻撃）".
+    We only count explicit caught-stealing keywords, avoiding baserunning outs
+    that do not clearly say a steal was attempted.
+    """
+
+    soup = bs(html, "html.parser")
+    progress = soup.find(id="progress")
+    if not progress:
+        return {"away": 0, "home": 0}
+
+    counts = {"away": 0, "home": 0}
+    side = None
+    for child in progress.children:
+        name = getattr(child, "name", None)
+        if not name:
+            continue
+        text = child.get_text("", strip=True)
+        if name == "h5":
+            if "回表" in text:
+                side = "away"
+            elif "回裏" in text:
+                side = "home"
+            else:
+                side = None
+            continue
+        if side and name == "table":
+            counts[side] += len(re.findall(r"盗塁(?:失敗|死)", text))
+    return counts
+
+
+def _official_display_team(name: str) -> str:
+    norm = re.sub(r"\s+", "", name)
+    for official, raw in OFFICIAL_TEAM_NAME_MAP.items():
+        if official in norm:
+            return display_team_name(raw)
+    raise ValueError(f"Unknown official team name: {name}")
+
+
+async def _official_playbyplay_map(
+    session: aiohttp.ClientSession, date_str: str
+) -> dict[tuple[str, str, str], str]:
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    month_key = f"{dt.year}-{dt.month:02d}"
+    if month_key in _OFFICIAL_PLAYBYPLAY_CACHE:
+        return _OFFICIAL_PLAYBYPLAY_CACHE[month_key]
+
+    paths = [
+        f"/games/{dt.year}/schedule_{dt.month:02d}_detail.html",
+        f"/interleague/{dt.year}/schedule_detail.html",
+        f"/climax/{dt.year}/schedule_detail.html",
+        f"/nippons/{dt.year}/schedule_detail.html",
+    ]
+    if dt.month <= 3:
+        paths.insert(0, f"/preseason/{dt.year}/schedule_detail.html")
+
+    mapping: dict[tuple[str, str, str], str] = {}
+    for path in paths:
+        html = await _fetch_once(session, urljoin(NPB_OFFICIAL_BASE_URL, path))
+        if not html:
+            continue
+        soup = bs(html, "html.parser")
+        current_date = ""
+        for tr in soup.find_all("tr"):
+            th = tr.find("th")
+            if th and re.search(r"\d+/\d+（", th.get_text(" ", strip=True)):
+                current_date = th.get_text(" ", strip=True)
+
+            score_link = tr.find(
+                "a", href=lambda h: h and f"/scores/{dt.year}/" in h
+            )
+            team1 = tr.find("div", class_="team1")
+            team2 = tr.find("div", class_="team2")
+            if not current_date or not score_link or not team1 or not team2:
+                continue
+            m = re.match(r"(\d{1,2})/(\d{1,2})", current_date)
+            if not m:
+                continue
+            try:
+                home = _official_display_team(team1.get_text(" ", strip=True))
+                away = _official_display_team(team2.get_text(" ", strip=True))
+            except ValueError:
+                continue
+            key = (f"{dt.year}/{int(m.group(1))}/{int(m.group(2))}", away, home)
+            score_url = urljoin(NPB_OFFICIAL_BASE_URL, score_link["href"])
+            mapping[key] = urljoin(score_url.rstrip("/") + "/", "playbyplay.html")
+
+        for a in soup.find_all(
+            "a", href=lambda h: h and f"/scores/{dt.year}/" in h
+        ):
+            href = a["href"]
+            m = re.search(
+                rf"/scores/{dt.year}/(\d{{2}})(\d{{2}})/([a-z]+)-([a-z]+)-\d+/",
+                href,
+            )
+            if not m:
+                continue
+            home = OFFICIAL_TEAM_CODE_MAP.get(m.group(3))
+            away = OFFICIAL_TEAM_CODE_MAP.get(m.group(4))
+            if not home or not away:
+                continue
+            key = (f"{dt.year}/{int(m.group(1))}/{int(m.group(2))}", away, home)
+            score_url = urljoin(NPB_OFFICIAL_BASE_URL, href)
+            mapping.setdefault(
+                key, urljoin(score_url.rstrip("/") + "/", "playbyplay.html")
+            )
+
+    _OFFICIAL_PLAYBYPLAY_CACHE[month_key] = mapping
+    return mapping
+
+
+async def _official_caught_stealing_for_game(
+    session: aiohttp.ClientSession, date_str: str, away_raw: str, home_raw: str
+) -> dict[str, int]:
+    mapping = await _official_playbyplay_map(session, date_str)
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    key = (
+        f"{dt.year}/{dt.month}/{dt.day}",
+        display_team_name(away_raw),
+        display_team_name(home_raw),
+    )
+    url = mapping.get(key)
+    if not url:
+        return {"away": 0, "home": 0}
+    html = await _fetch_once(session, url)
+    return _parse_official_caught_stealing(html or "")
+
+
 async def get_sailu_game_data(
     game_id: str, session: aiohttp.ClientSession
 ) -> Optional[dict]:
@@ -1106,45 +1351,17 @@ async def get_schedule_game_data(
 
     # ── Batting stats ──────────────────────────────────────────────────────
     # bb-statsTable[0]=away, [1]=home
-    # bb-statsTable__data--result cell order (deduced from known mappings):
-    # [0]=PA, [1]=AB, [2]=R, [3]=H, [4]=RBI, [5]=K, [6]=BB, [7]=HBP,
-    # [8]=SB, [9]=CS, [10]=2B, [11]=HR, [12]=3B, [13]=SH, [14]=SF, [15]=GIDP, [16]=E
-    # Output order for 賽程 (CP-DE): AB, R, H, RBI, 2B, 3B, HR, GIDP, BB, HBP, K, SH, SF, SB, CS, E
-    def _parse_bat_stats(tbl):
-        cells = tbl.find_all(class_="bb-statsTable__data--result")
-
-        def s(i):
-            try:
-                return int(cells[i].text.strip())
-            except Exception:
-                return 0
-
-        n = len(cells)
-        return [
-            s(1),  # AB (打數)
-            s(2),  # R (得分)
-            s(3),  # H (安打)
-            s(4),  # RBI (打點)
-            s(10) if n > 10 else 0,  # 2B (二壘打)
-            s(12) if n > 12 else 0,  # 3B (三壘打)
-            s(11) if n > 11 else 0,  # HR (全壘打)
-            s(15) if n > 15 else 0,  # GIDP (雙殺打)
-            s(6),  # BB (四壞球)
-            s(7),  # HBP (死球)
-            s(5),  # K (被三振)
-            s(13) if n > 13 else 0,  # SH (犧牲短打)
-            s(14) if n > 14 else 0,  # SF (犧牲飛球)
-            s(8),  # SB (盜壘)
-            s(9) if n > 9 else 0,  # CS (盜壘刺)
-            s(16) if n > 16 else 0,  # E (失誤)
-        ]
-
     bat_tables = soup.find_all(class_="bb-statsTable")
-    away_bat = _parse_bat_stats(bat_tables[0]) if len(bat_tables) > 0 else [0] * 16
-    home_bat = _parse_bat_stats(bat_tables[1]) if len(bat_tables) > 1 else [0] * 16
+    away_bat = _parse_batting_table(bat_tables[0]) if len(bat_tables) > 0 else [0] * 16
+    home_bat = _parse_batting_table(bat_tables[1]) if len(bat_tables) > 1 else [0] * 16
     # Batting table doesn't expose fielding errors; use scoreboard totals (same as col X/AM)
     away_bat[15] = away_e
     home_bat[15] = home_e
+    caught_stealing = await _official_caught_stealing_for_game(
+        session, date_str, away_raw, home_raw
+    )
+    away_bat[14] = caught_stealing["away"]
+    home_bat[14] = caught_stealing["home"]
 
     return {
         "賽事編號": game_id,
@@ -1355,7 +1572,8 @@ def _analysis_starter_block(starter_pitch: list) -> list:
 
 def _analysis_team_total_block(
     opposing_pitch: list,
-    batting: list,
+    opposing_batting: list,
+    own_batting: list,
     score: int,
     earned_runs: int,
     errors: int,
@@ -1363,19 +1581,19 @@ def _analysis_team_total_block(
     return [
         opposing_pitch[0],  # 局数
         opposing_pitch[2],  # 用球数
-        batting[0],  # 打 数
-        batting[2],  # 安打
-        batting[6],  # HR
-        batting[10],  # 三振
-        batting[8] + batting[9],  # 四死
+        opposing_batting[0],  # 打 数
+        opposing_batting[2],  # 安打
+        opposing_batting[6],  # HR
+        opposing_batting[10],  # 三振
+        opposing_batting[8] + opposing_batting[9],  # 四死
         score,  # 失点 / 得点 from this team's view
         earned_runs,
         errors,
-        batting[7],  # 併打
-        batting[13],  # 盜壘
-        batting[14],  # 盜壘刺
-        _analysis_total_bases(batting),
-        _analysis_long_hits(batting),
+        own_batting[7],  # 併打
+        own_batting[13],  # 盜壘
+        own_batting[14],  # 盜壘刺
+        _analysis_total_bases(own_batting),
+        _analysis_long_hits(own_batting),
     ]
 
 
@@ -1388,13 +1606,23 @@ def _analysis_row(seq: int, data: dict) -> list:
 
     away_bat = data["客打擊"]
     home_bat = data["主打擊"]
-    away_starter_view = _analysis_starter_block(data["主先發投球"])
-    home_starter_view = _analysis_starter_block(data["客先發投球"])
+    away_starter_view = _analysis_starter_block(data["客先發投球"])
+    home_starter_view = _analysis_starter_block(data["主先發投球"])
     away_total_view = _analysis_team_total_block(
-        data["主總投球"], away_bat, away_score, data["主總投球"][12], data["客總失誤"]
+        data["客總投球"],
+        home_bat,
+        away_bat,
+        home_score,
+        data["客總投球"][12],
+        data["客總失誤"],
     )
     home_total_view = _analysis_team_total_block(
-        data["客總投球"], home_bat, home_score, data["客總投球"][12], data["主總失誤"]
+        data["主總投球"],
+        away_bat,
+        home_bat,
+        away_score,
+        data["主總投球"][12],
+        data["主總失誤"],
     )
 
     return [
@@ -1791,7 +2019,9 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
     print(
         f"[sailu] Done. Filled {filled} source row(s) and {target_filled} target row(s)."
     )
-    return [gid for gid, _ in target_regular_games]
+    source_written_ids = [gid for gid, _ in source_regular_games[:filled]]
+    target_written_ids = [gid for gid, _ in target_regular_games[:target_filled]]
+    return list(dict.fromkeys(source_written_ids + target_written_ids))
 
 
 def _analysis_identity(data: dict) -> tuple[str, str, str]:
@@ -2504,8 +2734,11 @@ async def run_once():
         # Update the newly written finished games in 分析表紀錄, then refresh 彙資.
         huizi_date = None
         try:
-            await update_analysis_sheet(session, game_ids=new_sailu_ids)
+            analysis_game_ids = new_sailu_ids or _sailu_game_ids_for_date()
+            await update_analysis_sheet(session, game_ids=analysis_game_ids)
             sailu_dates = _sailu_dates_for_game_ids(new_sailu_ids)
+            if not sailu_dates and analysis_game_ids:
+                sailu_dates = _sailu_dates_for_game_ids(analysis_game_ids)
             if sailu_dates:
                 huizi_date = sailu_dates[-1]
         except Exception as e:

@@ -10,6 +10,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from bs4 import BeautifulSoup as bs
 
 from npb import (
     DEFAULT_FONT,
@@ -20,6 +21,9 @@ from npb import (
     _game_font_color_requests,
     _get_schedule_opponent,
     _header_format_request,
+    _analysis_row,
+    _parse_official_caught_stealing,
+    _parse_batting_table,
     _pitcher_font_requests,
     _pitcher_font_size,
     build_block_values,
@@ -288,6 +292,122 @@ class TestBuildBlockValues:
         # Only 10 game rows should be non-empty (rows 1-10)
         non_empty = sum(1 for r in rows[1:11] if r != [""] * 12)
         assert non_empty == 10
+
+
+# ---------------------------------------------------------------------------
+# _analysis_row
+# ---------------------------------------------------------------------------
+
+
+class TestAnalysisRow:
+    def test_pitching_blocks_use_same_side_pitchers(self):
+        data = {
+            "日期": "2026-03-27",
+            "時間": "18:00",
+            "主審": "市川貴",
+            "客投別": "右",
+            "主投別": "左",
+            "客隊原名": "阪神",
+            "客隊": "阪 神",
+            "主隊原名": "巨人",
+            "主隊": "巨 人",
+            "球場原名": "東京ドーム",
+            "球場": "東 京",
+            "客總分": 1,
+            "主總分": 3,
+            "客總失誤": 2,
+            "主總失誤": 4,
+            "away_innings": [0, 0, 0, 1, 0, 0, 0, 0, 0, "", "", ""],
+            "home_innings": [2, 0, 0, 1, 0, 0, 0, 0, "×", "", "", ""],
+            "客先發投球": ["6", 22, 101, 0, 3, 0, 2, 1, 6, 0, 0, 3, 2],
+            "客總投球": ["8", 31, 140, 0, 7, 1, 4, 1, 9, 0, 0, 3, 2],
+            "主先發投球": ["7", 24, 95, 0, 4, 1, 0, 0, 8, 0, 0, 1, 1],
+            "主總投球": ["9", 33, 128, 0, 5, 1, 1, 0, 10, 0, 0, 1, 1],
+            "客打擊": [33, 1, 5, 1, 1, 0, 1, 0, 1, 0, 10, 0, 0, 0, 0, 2],
+            "主打擊": [31, 3, 7, 3, 2, 0, 1, 0, 4, 1, 9, 0, 0, 1, 0, 4],
+        }
+
+        row = _analysis_row(1, data)
+
+        assert row[34:43] == ["6", 22, 3, 0, 3, 3, 2, 3, "QS"]
+        assert row[43:58] == ["8", 140, 31, 7, 1, 9, 5, 3, 2, 2, 0, 0, 0, 9, 2]
+        assert row[59:68] == ["7", 24, 4, 1, 0, 1, 1, 7, "QS"]
+        assert row[68:83] == ["9", 128, 33, 5, 1, 10, 1, 1, 1, 4, 0, 1, 0, 12, 3]
+
+
+# ---------------------------------------------------------------------------
+# _parse_batting_table
+# ---------------------------------------------------------------------------
+
+
+class TestParseBattingTable:
+    def test_yahoo_current_total_row_and_event_counts(self):
+        html = """
+        <table class="bb-statsTable">
+          <tr>
+            <td class="bb-statsTable__data--inning">右2</td>
+            <td class="bb-statsTable__data--inning">遊併打</td>
+            <td class="bb-statsTable__data--inning">中3</td>
+            <td class="bb-statsTable__data--inning">右犠飛</td>
+          </tr>
+          <tr>
+            <th class="bb-statsTable__head--result">合計</th>
+            <td class="bb-statsTable__data--result"></td>
+            <td class="bb-statsTable__data--result">32</td>
+            <td class="bb-statsTable__data--result">7</td>
+            <td class="bb-statsTable__data--result">9</td>
+            <td class="bb-statsTable__data--result">7</td>
+            <td class="bb-statsTable__data--result">10</td>
+            <td class="bb-statsTable__data--result">6</td>
+            <td class="bb-statsTable__data--result">0</td>
+            <td class="bb-statsTable__data--result">1</td>
+            <td class="bb-statsTable__data--result">1</td>
+            <td class="bb-statsTable__data--result">2</td>
+            <td class="bb-statsTable__data--result">3</td>
+            <td class="bb-statsTable__data--result"></td>
+          </tr>
+        </table>
+        """
+
+        stats = _parse_batting_table(bs(html, "html.parser").find("table"))
+
+        assert stats == [32, 7, 9, 7, 1, 1, 3, 1, 6, 0, 10, 1, 1, 1, 0, 2]
+
+
+# ---------------------------------------------------------------------------
+# _parse_official_caught_stealing
+# ---------------------------------------------------------------------------
+
+
+class TestParseOfficialCaughtStealing:
+    def test_counts_explicit_steal_failures_by_half_inning(self):
+        html = """
+        <div id="progress">
+          <h5>7回表（楽天の攻撃）</h5>
+          <table>
+            <tr>
+              <td>0アウト</td><td>1塁</td>
+              <td class="w2">（走者・山﨑）二塁盗塁失敗</td>
+            </tr>
+          </table>
+          <table><tr><td>牽制死</td></tr></table>
+          <h5>7回裏（日本ハムの攻撃）</h5>
+          <table><tr><td>（走者・五十幡）二塁盗塁死</td></tr></table>
+        </div>
+        """
+
+        assert _parse_official_caught_stealing(html) == {"away": 1, "home": 1}
+
+    def test_ignores_non_steal_baserunning_outs(self):
+        html = """
+        <div id="progress">
+          <h5>1回表（楽天の攻撃）</h5>
+          <table><tr><td>（走者・山﨑）牽制死</td></tr></table>
+          <table><tr><td>（走者・山﨑）本塁タッチアウト</td></tr></table>
+        </div>
+        """
+
+        assert _parse_official_caught_stealing(html) == {"away": 0, "home": 0}
 
 
 # ---------------------------------------------------------------------------
