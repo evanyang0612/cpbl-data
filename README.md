@@ -113,3 +113,60 @@ echo "SPREADSHEET_KEY=your_spreadsheet_id" >> .env
 python cpbl.py   # runs run_once() for current year
 python npb.py    # runs run_once() for all NPB teams
 ```
+
+## CPBL Betting Model Prototype
+
+`cpbl_betting_model.py` builds a local training CSV from the CPBL Google Sheet and
+runs a simple walk-forward logistic-regression backtest. It reads Google Sheets
+with a readonly scope and does not update the spreadsheet.
+
+```bash
+# Export 賽程 + 過盤紀錄 into a local dataset
+python cpbl_betting_model.py export --output data/cpbl_training_dataset.csv
+
+# Backtest one market
+python cpbl_betting_model.py backtest \
+  --input data/cpbl_training_dataset.csv \
+  --market full_total \
+  --threshold 0.56
+
+# Backtest a lower-side thesis for spread markets
+python cpbl_betting_model.py backtest \
+  --input data/cpbl_training_dataset.csv \
+  --market half_spread \
+  --threshold 0.60 \
+  --strategy lefty_lower
+
+# Score one historical or live date that already exists in the exported CSV
+python cpbl_betting_model.py predict \
+  --input data/cpbl_training_dataset.csv \
+  --date 2026-04-25 \
+  --market full_spread full_total half_spread half_total
+```
+
+Supported markets:
+
+```text
+three_spread, half_spread, seven_spread, full_spread
+three_total,  half_total,  seven_total,  full_total
+```
+
+The first version intentionally uses only Python standard-library modeling code
+so it can run without adding ML dependencies. Backtests print both `even_roi`
+and `water_roi`. `water_roi` treats the listed water as `abs(water)/100`; when
+the model bets the opposite side, it defaults to mirroring the listed water
+because the opposite side's water is not stored separately in the sheet. Use
+`--opposite-water-mode even` to price opposite-side bets at even money instead.
+
+The default feature set is `--feature-set lean`, which keeps the model close to
+the current betting thesis: starter recent ability, starter handedness,
+home/away through the listed spread side, line, and water. Use
+`--feature-set full` to add team, park, umpire, head-to-head, and team-form
+features for comparison.
+
+For spread markets, `--strategy` can restrict model-selected bets to lower-side
+theses:
+
+```text
+model, lower_only, home_lower, lefty_lower, home_or_lefty_lower, home_lefty_lower
+```
