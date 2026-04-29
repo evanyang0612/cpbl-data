@@ -28,8 +28,8 @@ function mapLatestGamesByDate() {
     var parkIndex = headers.indexOf("球場");
     var homeTeamEarnedRunIndex = headers.indexOf("主總自責分");
     var awayTeamEarnedRunIndex = headers.indexOf("客總自責分");
-    var homeTeamRunIndex = headers.indexOf("主得分");
-    var awayTeamRunIndex = headers.indexOf("客得分");
+    var homeTeamRunIndex = headers.indexOf("主總分");
+    var awayTeamRunIndex = headers.indexOf("客總分");
     var homeHitsIndex = headers.indexOf("主總安打");
     var awayHitsIndex = headers.indexOf("客總安打");
     var homeHomerunIndex = headers.indexOf("主全壘打");
@@ -49,7 +49,9 @@ function mapLatestGamesByDate() {
       dateIndex === -1 ||
       parkIndex === -1 ||
       homeTeamEarnedRunIndex === -1 ||
-      awayTeamEarnedRunIndex === -1
+      awayTeamEarnedRunIndex === -1 ||
+      homeTeamRunIndex === -1 ||
+      awayTeamRunIndex === -1
     ) {
       throw new Error(
         "One or more required headers not found in sheet: " + sheet.getName(),
