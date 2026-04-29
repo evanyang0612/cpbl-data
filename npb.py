@@ -7,7 +7,7 @@ import asyncio
 import aiohttp
 from bs4 import BeautifulSoup as bs
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -477,7 +477,9 @@ async def get_last_n_game_ids(
 
 
 async def get_next_scheduled_game(
-    team_id: int, session: aiohttp.ClientSession
+    team_id: int,
+    session: aiohttp.ClientSession,
+    start_date: Optional[date] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """
     Find the next upcoming (not yet finished) game for a team.
@@ -485,11 +487,13 @@ async def get_next_scheduled_game(
     game_id may be None when the game is scheduled but the page isn't live yet.
     """
     now = datetime.now()
+    start = start_date or now.date()
 
     for month_offset in range(3):
-        check_month = (now.replace(day=1) + timedelta(days=32 * month_offset)).replace(
-            day=1
-        )
+        month_base = datetime.combine(start, datetime.min.time())
+        check_month = (
+            month_base.replace(day=1) + timedelta(days=32 * month_offset)
+        ).replace(day=1)
         time_key = check_month.strftime("%Y-%m")
         html = await _fetch(
             session, f"{BASE_URL}teams/{team_id}/schedule?month={time_key}"
@@ -508,7 +512,7 @@ async def get_next_scheduled_game(
             except (ValueError, TypeError):
                 continue
 
-            if entry_date.date() < now.date():
+            if entry_date.date() < start:
                 continue
 
             status = data.find(class_="bb-calendarTable__status")
@@ -526,6 +530,123 @@ async def get_next_scheduled_game(
             return game_id, entry_date.strftime("%Y-%m-%d")
 
     return None, None
+
+
+def _official_team_key(name: str) -> str:
+    norm = re.sub(r"\s+", "", name)
+    for official, raw in OFFICIAL_TEAM_NAME_MAP.items():
+        if official in norm:
+            return raw
+    raise ValueError(f"Unknown official team name: {name}")
+
+
+async def _official_next_matchups(
+    league: str, session: aiohttp.ClientSession, start_date: date
+) -> list[tuple[str, str]]:
+    """
+    Read NPB.jp schedule rows in official display order and return matchups for
+    the first league game day on or after start_date.
+
+    Official rows render team1 as home and team2 as away. Using this as the
+    primary source keeps both column order and home/away correct when Yahoo's
+    per-team schedule is mixed by partially finished games.
+    """
+    league_teams = {k: v for k, v in NPB_TEAMS.items() if v["league"] == league}
+    by_date: dict[str, list[tuple[str, str]]] = {}
+
+    month_cursor = start_date.replace(day=1)
+    for month_offset in range(3):
+        dt = (
+            datetime.combine(month_cursor, datetime.min.time())
+            + timedelta(days=32 * month_offset)
+        ).replace(day=1)
+        paths = [
+            f"/games/{dt.year}/schedule_{dt.month:02d}_detail.html",
+            f"/interleague/{dt.year}/schedule_detail.html",
+            f"/climax/{dt.year}/schedule_detail.html",
+            f"/nippons/{dt.year}/schedule_detail.html",
+        ]
+        if dt.month <= 3:
+            paths.insert(0, f"/preseason/{dt.year}/schedule_detail.html")
+
+        for path in paths:
+            html = await _fetch_once(session, urljoin(NPB_OFFICIAL_BASE_URL, path))
+            if not html:
+                continue
+
+            soup = bs(html, "html.parser")
+            current_date = ""
+            for tr in soup.find_all("tr"):
+                th = tr.find("th")
+                if th and re.search(r"\d+/\d+（", th.get_text(" ", strip=True)):
+                    current_date = th.get_text(" ", strip=True)
+
+                team1 = tr.find("div", class_="team1")
+                team2 = tr.find("div", class_="team2")
+                if not current_date or not team1 or not team2:
+                    continue
+
+                m = re.match(r"(\d{1,2})/(\d{1,2})", current_date)
+                if not m:
+                    continue
+                game_date = datetime(dt.year, int(m.group(1)), int(m.group(2))).date()
+                if game_date < start_date:
+                    continue
+
+                try:
+                    home_key = _official_team_key(team1.get_text(" ", strip=True))
+                    away_key = _official_team_key(team2.get_text(" ", strip=True))
+                except ValueError:
+                    continue
+
+                if home_key not in NPB_TEAMS or away_key not in NPB_TEAMS:
+                    continue
+                if home_key not in league_teams and away_key not in league_teams:
+                    continue
+
+                date_key = game_date.strftime("%Y-%m-%d")
+                game = (away_key, home_key)
+                by_date.setdefault(date_key, [])
+                if game not in by_date[date_key]:
+                    by_date[date_key].append(game)
+
+    for date_key in sorted(by_date):
+        same_league: list[tuple[str, str]] = []
+        away_cross: list[str] = []
+        home_cross: list[str] = []
+
+        for away_key, home_key in by_date[date_key]:
+            away_in = away_key in league_teams
+            home_in = home_key in league_teams
+            if away_in and home_in:
+                same_league.append((away_key, home_key))
+            elif away_in:
+                away_cross.append(away_key)
+            elif home_in:
+                home_cross.append(home_key)
+
+        matchups = same_league[:]
+        while away_cross and home_cross and len(matchups) < 3:
+            matchups.append((away_cross.pop(0), home_cross.pop(0)))
+
+        remaining_cross = away_cross + home_cross
+        for i in range(0, len(remaining_cross) - 1, 2):
+            if len(matchups) >= 3:
+                break
+            matchups.append((remaining_cross[i], remaining_cross[i + 1]))
+
+        matched = {t for pair in matchups for t in pair}
+        unmatched = [k for k in league_teams if k not in matched]
+        for i in range(0, len(unmatched) - 1, 2):
+            if len(matchups) >= 3:
+                break
+            matchups.append((unmatched[i], unmatched[i + 1]))
+
+        if matchups:
+            print(f"[{league}] Official next game day: {date_key}, games: {matchups}")
+            return matchups[:3]
+
+    return []
 
 
 async def _get_schedule_opponent(
@@ -565,30 +686,42 @@ async def get_next_matchups(
 ) -> list[tuple[str, str]]:
     """
     Returns up to 3 (away_key, home_key) pairs for the next game day in the league.
-    Home/away is determined by the team order in the game page HTML ([0]=away, [1]=home).
-    During inter-league (交流戦) games, records each same-league team's home/away role
-    and pairs them with another same-league team in the same role split.
-    Falls back to alphabetical pairing if schedule cannot be determined.
+    The display is always based on tomorrow or the first later scheduled game day,
+    so partial results from games in progress today cannot affect the matchup order.
+    NPB.jp official schedule order is preferred; Yahoo team/game pages are fallback.
     """
     league_teams = {k: v for k, v in NPB_TEAMS.items() if v["league"] == league}
+    start = datetime.now().date() + timedelta(days=1)
 
-    # Get next game ID + date for each team concurrently
-    tasks = {
-        key: get_next_scheduled_game(info["id"], session)
-        for key, info in league_teams.items()
-    }
-    resolved = await asyncio.gather(*tasks.values())
-    # Include teams where a date was found, even if game_id is None (pre-season / no page yet)
-    team_next: dict[str, tuple[Optional[str], str]] = {
-        key: (gid, d) for key, (gid, d) in zip(tasks.keys(), resolved) if d is not None
-    }
+    official_matchups = await _official_next_matchups(league, session, start)
+    if official_matchups:
+        return official_matchups
+
+    async def _resolve_team_next(start: date) -> dict[str, tuple[Optional[str], str]]:
+        tasks = {
+            key: get_next_scheduled_game(info["id"], session, start)
+            for key, info in league_teams.items()
+        }
+        resolved = await asyncio.gather(*tasks.values())
+        # Include teams where a date was found, even if game_id is None
+        # (pre-season / no page yet).
+        return {
+            key: (gid, d)
+            for key, (gid, d) in zip(tasks.keys(), resolved)
+            if d is not None
+        }
+
+    team_next = await _resolve_team_next(start)
 
     if not team_next:
         print(f"[{league}] No upcoming games found, using alphabetical order.")
         teams = list(league_teams.keys())
         return [(teams[i * 2], teams[i * 2 + 1]) for i in range(3)]
 
-    # Find the nearest next game date
+    next_dates = sorted({d for _, d in team_next.values()})
+    start = datetime.strptime(next_dates[0], "%Y-%m-%d").date()
+
+    # Find the nearest next game date.
     next_date = min(d for _, d in team_next.values())
     day_games = {key: gid for key, (gid, d) in team_next.items() if d == next_date}
 
@@ -699,8 +832,6 @@ async def get_next_matchups(
             break
         matchups.append((unmatched[i], unmatched[i + 1]))
 
-    # Sort columns by away team's NPB ID for a consistent, predictable left-to-right order
-    matchups.sort(key=lambda pair: NPB_TEAMS[pair[0]]["id"])
     return matchups[:3]
 
 
@@ -851,9 +982,7 @@ async def _official_playbyplay_map(
             if th and re.search(r"\d+/\d+（", th.get_text(" ", strip=True)):
                 current_date = th.get_text(" ", strip=True)
 
-            score_link = tr.find(
-                "a", href=lambda h: h and f"/scores/{dt.year}/" in h
-            )
+            score_link = tr.find("a", href=lambda h: h and f"/scores/{dt.year}/" in h)
             team1 = tr.find("div", class_="team1")
             team2 = tr.find("div", class_="team2")
             if not current_date or not score_link or not team1 or not team2:
@@ -870,9 +999,7 @@ async def _official_playbyplay_map(
             score_url = urljoin(NPB_OFFICIAL_BASE_URL, score_link["href"])
             mapping[key] = urljoin(score_url.rstrip("/") + "/", "playbyplay.html")
 
-        for a in soup.find_all(
-            "a", href=lambda h: h and f"/scores/{dt.year}/" in h
-        ):
+        for a in soup.find_all("a", href=lambda h: h and f"/scores/{dt.year}/" in h):
             href = a["href"]
             m = re.search(
                 rf"/scores/{dt.year}/(\d{{2}})(\d{{2}})/([a-z]+)-([a-z]+)-\d+/",
@@ -2220,9 +2347,7 @@ async def update_analysis_sheet(
         )
     else:
         source_ids = (
-            game_ids
-            if game_ids is not None
-            else _sailu_game_ids_for_date(target_date)
+            game_ids if game_ids is not None else _sailu_game_ids_for_date(target_date)
         )
         candidate_ids = []
         for gid in source_ids:
