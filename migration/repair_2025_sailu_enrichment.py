@@ -29,7 +29,7 @@ from migration.populate_2025_sailu import (
     parse_official_game,
 )
 
-KEY = "1qPdgcy_4s4Dj2xKo0QJawxPRaB6u9sGM3D4avkAjJUw"
+KEY = "1X2oaXk6DJLkx1MPVjc0lgLNtqa88X5qdNdKuKyikrbg"
 SHEET_NAME = "賽錄"
 ROW_START = 10480
 ROW_END = 11355
