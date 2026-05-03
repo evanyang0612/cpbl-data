@@ -9,16 +9,22 @@ Columns A–AY are written; column AZ onwards are formula-driven and left untouc
 QS formula: ≥7IP & ≤3ER, or ≥6IP & ≤2ER, or ≥5IP & ≤1ER (handled in get_sailu_game_data).
 IP format: x.1 / x.2 as read directly from Yahoo Baseball (not decimal).
 """
+
 import asyncio
 import re
 import aiohttp
 from bs4 import BeautifulSoup as bs
 from npb import (
-    NPB_TEAMS, MAX_CONCURRENT, BASE_URL,
-    _fetch, get_sailu_game_data, _sailu_row, get_worksheet,
+    NPB_TEAMS,
+    MAX_CONCURRENT,
+    BASE_URL,
+    _fetch,
+    get_sailu_game_data,
+    _sailu_row,
+    get_worksheet,
 )
 
-TARGET_SPREADSHEET_KEY = "1qPdgcy_4s4Dj2xKo0QJawxPRaB6u9sGM3D4avkAjJUw"
+TARGET_SPREADSHEET_KEY = "1X2oaXk6DJLkx1MPVjc0lgLNtqa88X5qdNdKuKyikrbg"
 SHEET_NAME = "賽錄副本"
 MONTHS_2026 = ["2026-03", "2026-04"]
 
@@ -35,7 +41,9 @@ async def get_2026_game_ids(team_id: int, session: aiohttp.ClientSession) -> set
     """Scan MONTHS_2026 schedule pages and return all finished game IDs."""
     ids: set[str] = set()
     for month in MONTHS_2026:
-        html = await _fetch(session, f"{BASE_URL}teams/{team_id}/schedule?month={month}")
+        html = await _fetch(
+            session, f"{BASE_URL}teams/{team_id}/schedule?month={month}"
+        )
         if not html:
             continue
         soup = bs(html, "html.parser")
@@ -89,7 +97,7 @@ async def main():
         # ── Step 2: scrape box scores ─────────────────────────────────────
         scraped: list[tuple[str, dict]] = []
         for i in range(0, len(new_ids), MAX_CONCURRENT):
-            batch = new_ids[i: i + MAX_CONCURRENT]
+            batch = new_ids[i : i + MAX_CONCURRENT]
             results = await asyncio.gather(
                 *[get_sailu_game_data(gid, session) for gid in batch],
                 return_exceptions=True,
@@ -99,8 +107,10 @@ async def main():
                     print(f"  [error] {gid}: {data}")
                 elif data:
                     scraped.append((gid, data))
-                    print(f"  OK  {gid}  {data['日期']}  "
-                          f"{data['客場隊伍']} {data['客總分']}–{data['主總']} {data['主場隊伍']}")
+                    print(
+                        f"  OK  {gid}  {data['日期']}  "
+                        f"{data['客場隊伍']} {data['客總分']}–{data['主總']} {data['主場隊伍']}"
+                    )
                 else:
                     print(f"  [skip] {gid} — no data returned")
             if i + MAX_CONCURRENT < len(new_ids):
@@ -130,7 +140,7 @@ async def main():
             print(f"  wrote row {row_num} ← {gid}")
             await asyncio.sleep(1.5)
 
-        overflow = scraped[len(placeholder_rows):]
+        overflow = scraped[len(placeholder_rows) :]
         if overflow:
             print(
                 f"\nWARNING: skipped {len(overflow)} game(s) due to missing placeholder rows: "
