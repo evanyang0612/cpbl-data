@@ -8,6 +8,9 @@ from unittest.mock import MagicMock
 from cpbl import (
     _get_pitching_stats,
     _get_batting_stats,
+    _extract_stats_game,
+    _stats_game_to_legacy_payload,
+    get_stats_pitching_habit,
     process_and_update_sheet,
     is_game_recorded,
 )
@@ -104,6 +107,130 @@ BATTING = [
 ]
 
 
+def _stats_html(game):
+    payload = 'b:' + json.dumps(
+        [["$", "x", None, {"dehydratedState": {"queries": [{"state": {"data": {"data": {"game": game}}}}]}}]],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return (
+        "<html><body><script>"
+        f"self.__next_f.push([1,{json.dumps(payload, ensure_ascii=False)}])"
+        "</script></body></html>"
+    )
+
+
+STATS_GAME = {
+    "gameId": "2026-A-81",
+    "gameStatus": "FINISHED",
+    "gameSno": 81,
+    "preExeDate": "2026-05-05T18:35:00",
+    "field": {"abbe": "大巨蛋"},
+    "visiting": {
+        "team": {"name": "中信兄弟"},
+        "score": 3,
+        "hittingCnt": 11,
+        "errorCnt": 0,
+        "inningScore": [
+            {"seq": 1, "score": "1"},
+            {"seq": 2, "score": "0"},
+            {"seq": 9, "score": "2"},
+        ],
+        "hitters": [
+            {
+                "hitCnt": 6,
+                "scoreCnt": 1,
+                "hittingCnt": 3,
+                "runBattedInCnt": 1,
+                "twoBaseHitCnt": 0,
+                "threeBaseHitCnt": 0,
+                "homeRunCnt": 0,
+                "doublePlayBatCnt": 0,
+                "basesOnBallsCnt": 0,
+                "hitByPitchCnt": 0,
+                "strikeOutCnt": 1,
+                "sacrificeHitCnt": 0,
+                "sacrificeFlyCnt": 0,
+                "stealBaseOkCnt": 1,
+                "stealBaseFailCnt": 0,
+            }
+        ],
+        "pitchers": [
+            {
+                "roleType": "先發",
+                "pitcherName": "鄭浩均",
+                "pitcherAcnt": "0000002345",
+                "inningPitchedCnt": 6,
+                "inningPitchedDiv3Cnt": 0,
+                "plateAppearances": 24,
+                "pitchCnt": 101,
+                "strikeCnt": 65,
+                "hittingCnt": 5,
+                "homeRunCnt": 1,
+                "basesOnBallsCnt": 0,
+                "hitByPitchCnt": 2,
+                "strikeOutCnt": 5,
+                "wildPitchCnt": 0,
+                "balkCnt": 0,
+                "runCnt": 3,
+                "earnedRunCnt": 3,
+            }
+        ],
+    },
+    "home": {
+        "team": {"name": "味全龍"},
+        "score": 5,
+        "hittingCnt": 8,
+        "errorCnt": 1,
+        "inningScore": [
+            {"seq": 1, "score": "1"},
+            {"seq": 3, "score": "2"},
+            {"seq": 11, "score": "X"},
+        ],
+        "hitters": [
+            {
+                "hitCnt": 4,
+                "scoreCnt": 2,
+                "hittingCnt": 4,
+                "runBattedInCnt": 1,
+                "twoBaseHitCnt": 1,
+                "threeBaseHitCnt": 0,
+                "homeRunCnt": 1,
+                "doublePlayBatCnt": 0,
+                "basesOnBallsCnt": 1,
+                "hitByPitchCnt": 0,
+                "strikeOutCnt": 0,
+                "sacrificeHitCnt": 0,
+                "sacrificeFlyCnt": 0,
+                "stealBaseOkCnt": 0,
+                "stealBaseFailCnt": 0,
+            }
+        ],
+        "pitchers": [
+            {
+                "roleType": "先發",
+                "pitcherName": "蔣銲",
+                "pitcherAcnt": "0000005555",
+                "inningPitchedCnt": 6,
+                "inningPitchedDiv3Cnt": 0,
+                "plateAppearances": 22,
+                "pitchCnt": 94,
+                "strikeCnt": 60,
+                "hittingCnt": 5,
+                "homeRunCnt": 0,
+                "basesOnBallsCnt": 2,
+                "hitByPitchCnt": 0,
+                "strikeOutCnt": 4,
+                "wildPitchCnt": 0,
+                "balkCnt": 0,
+                "runCnt": 1,
+                "earnedRunCnt": 1,
+            }
+        ],
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # _get_pitching_stats
 # ---------------------------------------------------------------------------
@@ -175,6 +302,65 @@ class TestGetBattingStats:
         # Home pitcher (type=2) has ErrorCnt=1 → added to home batting stats[15]
         stats = _get_batting_stats(BATTING, PITCHING, 2)
         assert stats[15] == 1
+
+
+# ---------------------------------------------------------------------------
+# stats.cpbl.com.tw adapter
+# ---------------------------------------------------------------------------
+
+
+class TestStatsCpblAdapter:
+    def test_extracts_game_from_next_flight_payload(self):
+        html = _stats_html(STATS_GAME)
+        game = _extract_stats_game(html, "2026-A-81")
+        assert game["gameId"] == "2026-A-81"
+        assert game["visiting"]["team"]["name"] == "中信兄弟"
+
+    def test_converts_stats_game_to_legacy_payload(self):
+        payload = _stats_game_to_legacy_payload(STATS_GAME)
+        detail = json.loads(payload["GameDetailJson"])[0]
+        pitching = json.loads(payload["PitchingJson"])
+        batting = json.loads(payload["BattingJson"])
+
+        assert detail["GameSno"] == "81"
+        assert detail["GameStatusChi"] == "比賽結束"
+        assert detail["GameDate"] == "2026-05-05T18:35:00"
+        assert detail["FieldAbbe"] == "大巨蛋"
+        assert pitching[0]["PitcherName"] == "鄭浩均"
+        assert pitching[0]["HitBYPitchCnt"] == "2"
+        assert batting[0]["RunBattedINCnt"] == "1"
+
+    def test_process_writes_stats_payload_and_preserves_x(self):
+        payload = _stats_game_to_legacy_payload(STATS_GAME)
+        sheet = _make_sheet()
+        result = process_and_update_sheet(payload, "81", "2026", "A", None, sheet)
+
+        assert result is True
+        values = sheet.update.call_args[1]["values"][0]
+        assert values[1] == "81"
+        assert values[2] == "2026-05-05"
+        assert values[3] == "中信兄弟"
+        assert values[5] == "味全"
+        assert values[7] == "大巨蛋"
+        assert values[21] == 3
+        assert values[22] == 3
+        assert values[36] == 5
+        assert values[38] == 1
+        assert values[34] == 2
+        assert values[91] == ""
+
+    def test_stats_pitching_habit_from_player_meta_description(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.text = (
+            '<html><head><meta name="description" '
+            'content="中信兄弟 | 投手 | 投打習慣: R | 191cm | 105kg"/>'
+            "</head></html>"
+        )
+        session = MagicMock()
+        session.get.return_value = response
+
+        assert get_stats_pitching_habit("0000002345", session) == "右"
 
 
 # ---------------------------------------------------------------------------

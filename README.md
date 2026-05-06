@@ -22,13 +22,13 @@ Automated scrapers that pull game results from CPBL and NPB, then write stats to
 
 ## CPBL (`cpbl.py`)
 
-Scrapes [cpbl.com.tw](https://www.cpbl.com.tw) for regular season (`A`) and preseason (`G`) game results and writes box score data to Google Sheets.
+Scrapes [stats.cpbl.com.tw](https://stats.cpbl.com.tw) by default for regular season (`A`) game results and writes box score data to Google Sheets. The older [cpbl.com.tw](https://www.cpbl.com.tw) JSON endpoints are still available by setting `CPBL_DATA_SOURCE=legacy`.
 
 ### Workflow
 
-1. Fetches the monthly schedule via `POST /schedule/getgamedatas` (requires a CSRF token extracted from the schedule page)
-2. For each game on or before today that hasn't been recorded yet, fetches the box score via `POST /box/getlive`
-3. Parses pitching and batting stats, writes a 125-column row to the target worksheet
+1. Reads existing game numbers from the target worksheet
+2. In `stats` mode, checks a small game-number window around the latest recorded game via `GET /schedule/{year}-{kindCode}-{gameSno}`
+3. Extracts the embedded Next.js game JSON, adapts it to the existing box score format, and writes a 125-column row to the target worksheet
 4. After all games are processed, refreshes the **彙資** sheet with today's games (up to 3)
 
 ### Worksheets
@@ -41,9 +41,19 @@ Scrapes [cpbl.com.tw](https://www.cpbl.com.tw) for regular season (`A`) and pres
 
 ### Scheduler
 
-Runs every 30 minutes between **07:00–16:00 UTC** (15:00–00:00 Taiwan time) via a NordVPN WireGuard tunnel (required to access cpbl.com.tw from GitHub Actions).
+Runs every 30 minutes between **07:00–16:00 UTC** (15:00–00:00 Taiwan time). `stats.cpbl.com.tw` usually does not require the old CSRF/token POST flow, so this path should be less sensitive to GitHub Actions IP blocking.
 
 The workflow defaults to NordVPN `country_id=108` for recommendations, but it can prefer a known-good server IP or hostname first. If CPBL allows a specific Nord `station` IP such as `94.156.205.102`, set `NORDVPN_STATION_ALLOWLIST=94.156.205.102`. If the acceptable servers all share a prefix, such as `94.156.205.*`, set `NORDVPN_STATION_PREFIX_ALLOWLIST=94.156.205.` and the workflow will pick the lowest-load matching server when it is available.
+
+Optional CPBL source variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CPBL_DATA_SOURCE` | `stats` | Use `stats` for `stats.cpbl.com.tw`; use `legacy` for the old `www.cpbl.com.tw` schedule/box endpoints. |
+| `CPBL_STATS_LOOKBACK` | `6` | Re-check this many game numbers before the latest recorded game. |
+| `CPBL_STATS_LOOKAHEAD` | `12` | Check this many game numbers after the latest recorded game. |
+| `CPBL_STATS_SCAN_START` | `1` | First game number to scan when the worksheet has no existing games. |
+| `CPBL_STATS_SCAN_END` | `CPBL_STATS_SCAN_START + CPBL_STATS_LOOKAHEAD` | Last game number to scan when the worksheet has no existing games. |
 
 ### Manual run (single game)
 

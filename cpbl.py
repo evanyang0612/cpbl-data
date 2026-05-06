@@ -18,7 +18,7 @@ SPREADSHEET_KEY = os.getenv("SPREADSHEET_KEY")
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
 # KindCode: A = 正式賽, G = 熱身賽
 WORKSHEET_MAP = {
-    "A": "賽程",
+    "A": "「賽程」的副本",
     "G": "熱身賽賽程",
 }
 
@@ -33,6 +33,11 @@ TEAM_MAP = {
 
 # (connect, read) — 走 VPN 時 cpbl.com.tw 偶爾會被擋，連線階段需要快速失敗
 REQUEST_TIMEOUT = (10, 30)
+STATS_BASE_URL = "https://stats.cpbl.com.tw"
+DATA_SOURCE = os.getenv("CPBL_DATA_SOURCE", "stats").strip().lower()
+STATS_LOOKBACK = int(os.getenv("CPBL_STATS_LOOKBACK", "6"))
+STATS_LOOKAHEAD = int(os.getenv("CPBL_STATS_LOOKAHEAD", "12"))
+_STATS_HABIT_CACHE = {}
 
 
 def get_session():
@@ -163,6 +168,205 @@ def fetch_game_data(game_sno, year, kind_code, session):
         return None
 
 
+def _extract_next_flight_strings(html):
+    """Return decoded Next.js flight string payloads embedded in stats.cpbl.com.tw."""
+    soup = BeautifulSoup(html, "html.parser")
+    payloads = []
+    import re
+
+    pattern = re.compile(r"self\.__next_f\.push\(\[1,(.*)\]\)$", re.S)
+    for script in soup.find_all("script"):
+        text = script.get_text()
+        if "self.__next_f.push" not in text:
+            continue
+        match = pattern.match(text)
+        if not match:
+            continue
+        try:
+            payloads.append(json.loads(match.group(1)))
+        except json.JSONDecodeError:
+            continue
+    return payloads
+
+
+def _extract_stats_game(html, game_id):
+    """Extract the game-detail JSON object from a stats.cpbl.com.tw schedule page."""
+    marker = f'"game":{{"gameId":"{game_id}"'
+    decoder = json.JSONDecoder()
+    for payload in _extract_next_flight_strings(html):
+        idx = payload.find(marker)
+        if idx == -1:
+            continue
+        start = payload.rfind("{", 0, idx)
+        if start == -1:
+            continue
+        try:
+            obj, _ = decoder.raw_decode(payload[start:])
+        except json.JSONDecodeError:
+            continue
+        game = obj.get("game")
+        if game and game.get("gameId") == game_id:
+            return game
+    return None
+
+
+def _status_from_stats(status):
+    return {
+        "FINISHED": "比賽結束",
+        "SCHEDULED": "未開始",
+        "IN_PROGRESS": "比賽中",
+        "POSTPONED": "延賽",
+        "CANCELLED": "取消",
+    }.get(status, status or "")
+
+
+def _stats_pitcher_to_legacy(pitcher, side_type):
+    return {
+        "VisitingHomeType": str(side_type),
+        "RoleType": pitcher.get("roleType", ""),
+        "PitcherName": pitcher.get("pitcherName", ""),
+        "PitcherAcnt": pitcher.get("pitcherAcnt", ""),
+        "InningPitchedCnt": str(pitcher.get("inningPitchedCnt", 0) or 0),
+        "InningPitchedDiv3Cnt": str(pitcher.get("inningPitchedDiv3Cnt", 0) or 0),
+        "PlateAppearances": str(pitcher.get("plateAppearances", 0) or 0),
+        "PitchCnt": str(pitcher.get("pitchCnt", 0) or 0),
+        "StrikeCnt": str(pitcher.get("strikeCnt", 0) or 0),
+        "HittingCnt": str(pitcher.get("hittingCnt", 0) or 0),
+        "HomeRunCnt": str(pitcher.get("homeRunCnt", 0) or 0),
+        "BasesONBallsCnt": str(pitcher.get("basesOnBallsCnt", 0) or 0),
+        "HitBYPitchCnt": str(pitcher.get("hitByPitchCnt", 0) or 0),
+        "StrikeOutCnt": str(pitcher.get("strikeOutCnt", 0) or 0),
+        "WildPitchCnt": str(pitcher.get("wildPitchCnt", 0) or 0),
+        "BalkCnt": str(pitcher.get("balkCnt", 0) or 0),
+        "RunCnt": str(pitcher.get("runCnt", 0) or 0),
+        "EarnedRunCnt": str(pitcher.get("earnedRunCnt", 0) or 0),
+        "ErrorCnt": "0",
+    }
+
+
+def _stats_hitter_to_legacy(hitter, side_type, error_cnt=0):
+    return {
+        "VisitingHomeType": str(side_type),
+        "HitCnt": str(hitter.get("hitCnt", 0) or 0),
+        "ScoreCnt": str(hitter.get("scoreCnt", 0) or 0),
+        "HittingCnt": str(hitter.get("hittingCnt", 0) or 0),
+        "RunBattedINCnt": str(hitter.get("runBattedInCnt", 0) or 0),
+        "TwoBaseHitCnt": str(hitter.get("twoBaseHitCnt", 0) or 0),
+        "ThreeBaseHitCnt": str(hitter.get("threeBaseHitCnt", 0) or 0),
+        "HomeRunCnt": str(hitter.get("homeRunCnt", 0) or 0),
+        "DoublePlayBatCnt": str(hitter.get("doublePlayBatCnt", 0) or 0),
+        "BasesONBallsCnt": str(hitter.get("basesOnBallsCnt", 0) or 0),
+        "HitBYPitchCnt": str(hitter.get("hitByPitchCnt", 0) or 0),
+        "StrikeOutCnt": str(hitter.get("strikeOutCnt", 0) or 0),
+        "SacrificeHitCnt": str(hitter.get("sacrificeHitCnt", 0) or 0),
+        "SacrificeFlyCnt": str(hitter.get("sacrificeFlyCnt", 0) or 0),
+        "StealBaseOKCnt": str(hitter.get("stealBaseOkCnt", 0) or 0),
+        "StealBaseFailCnt": str(hitter.get("stealBaseFailCnt", 0) or 0),
+        "ErrorCnt": str(error_cnt or 0),
+    }
+
+
+def _stats_game_to_legacy_payload(game):
+    visiting = game.get("visiting") or {}
+    home = game.get("home") or {}
+    field = game.get("field") or {}
+    game_sno = str(game.get("gameSno") or game.get("gameId", "").split("-")[-1])
+    game_date = (game.get("preExeDate") or "").split("+")[0]
+
+    game_detail = {
+        "GameSno": game_sno,
+        "GameStatusChi": _status_from_stats(game.get("gameStatus")),
+        "GameDate": game_date,
+        "VisitingTeamName": (visiting.get("team") or {}).get("name", ""),
+        "HomeTeamName": (home.get("team") or {}).get("name", ""),
+        "FieldAbbe": field.get("abbe", ""),
+        "HeadUmpire": "",
+        "VisitingTotalScore": visiting.get("score", 0) or 0,
+        "HomeTotalScore": home.get("score", 0) or 0,
+    }
+
+    scoreboard = []
+    for side_type, team_data in ((1, visiting), (2, home)):
+        for inning in team_data.get("inningScore") or []:
+            scoreboard.append(
+                {
+                    "VisitingHomeType": str(side_type),
+                    "InningSeq": str(inning.get("seq", "")),
+                    "ScoreCnt": str(inning.get("score", "")),
+                }
+            )
+
+    pitching = []
+    batting = []
+    for side_type, team_data in ((1, visiting), (2, home)):
+        pitching.extend(
+            _stats_pitcher_to_legacy(pitcher, side_type)
+            for pitcher in team_data.get("pitchers") or []
+        )
+        for idx, hitter in enumerate(team_data.get("hitters") or []):
+            error_cnt = team_data.get("errorCnt", 0) if idx == 0 else 0
+            batting.append(_stats_hitter_to_legacy(hitter, side_type, error_cnt))
+
+    return {
+        "_Source": "stats.cpbl.com.tw",
+        "CurtGameDetailJson": json.dumps(game_detail, ensure_ascii=False),
+        "GameDetailJson": json.dumps([game_detail], ensure_ascii=False),
+        "ScoreboardJson": json.dumps(scoreboard, ensure_ascii=False),
+        "PitchingJson": json.dumps(pitching, ensure_ascii=False),
+        "BattingJson": json.dumps(batting, ensure_ascii=False),
+    }
+
+
+def fetch_stats_game_data(game_sno, year, kind_code, session):
+    """Fetch one game from stats.cpbl.com.tw and adapt it to the legacy payload."""
+    game_id = f"{year}-{kind_code}-{game_sno}"
+    url = f"{STATS_BASE_URL}/schedule/{game_id}"
+    try:
+        response = session.get(
+            url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": f"{STATS_BASE_URL}/schedule",
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        if response.status_code == 404:
+            print(f"[stats] game not found: {game_id}")
+            return None
+        if response.status_code != 200:
+            print(f"[stats] HTTP {response.status_code} for {game_id}")
+            return None
+        game = _extract_stats_game(response.text, game_id)
+        if not game:
+            print(f"[stats] game JSON not found: {game_id}")
+            return None
+        return _stats_game_to_legacy_payload(game)
+    except Exception as e:
+        print(f"Error fetching stats game {game_id}: {e}")
+        return None
+
+
+def _stats_candidate_snos(existing_snos):
+    numeric_snos = []
+    for sno in existing_snos:
+        try:
+            numeric_snos.append(int(str(sno)))
+        except (TypeError, ValueError):
+            continue
+
+    if not numeric_snos:
+        scan_start = int(os.getenv("CPBL_STATS_SCAN_START", "1"))
+        scan_end = int(
+            os.getenv("CPBL_STATS_SCAN_END", str(scan_start + STATS_LOOKAHEAD))
+        )
+        return [str(sno) for sno in range(scan_start, scan_end + 1)]
+
+    max_sno = max(numeric_snos)
+    start = max(1, max_sno - STATS_LOOKBACK)
+    end = max_sno + STATS_LOOKAHEAD
+    return [str(sno) for sno in range(start, end + 1)]
+
+
 def get_pitching_habit(acnt_id, session):
     if not acnt_id:
         return ""
@@ -181,6 +385,45 @@ def get_pitching_habit(acnt_id, session):
     except Exception as e:
         print(f"Error fetching habit for {acnt_id}: {e}")
     return ""
+
+
+def get_stats_pitching_habit(acnt_id, session):
+    """Fetch pitcher handedness from stats.cpbl.com.tw player metadata."""
+    if not acnt_id or not session:
+        return ""
+    if acnt_id in _STATS_HABIT_CACHE:
+        return _STATS_HABIT_CACHE[acnt_id]
+
+    try:
+        url = f"{STATS_BASE_URL}/players/{acnt_id}"
+        response = session.get(
+            url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": f"{STATS_BASE_URL}/players",
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        if response.status_code != 200:
+            print(f"[stats player] HTTP {response.status_code} for {acnt_id}")
+            _STATS_HABIT_CACHE[acnt_id] = ""
+            return ""
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        meta = soup.find("meta", {"name": "description"})
+        content = meta.get("content", "") if meta else ""
+        import re
+
+        match = re.search(r"投打習慣:\s*([LR])", content)
+        habit = ""
+        if match:
+            habit = {"L": "左", "R": "右"}.get(match.group(1), "")
+        _STATS_HABIT_CACHE[acnt_id] = habit
+        return habit
+    except Exception as e:
+        print(f"Error fetching stats habit for {acnt_id}: {e}")
+        _STATS_HABIT_CACHE[acnt_id] = ""
+        return ""
 
 
 def _get_pitching_stats(pitching, ptype, is_starter=False):
@@ -253,6 +496,15 @@ def _get_batting_stats(batting, pitching, ptype):
     return stats
 
 
+def _score_to_int(value):
+    if str(value).upper() == "X":
+        return None
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     """解析比賽資料並寫入對應 worksheet。回傳 True 代表成功寫入。"""
     curt_game_detail = json.loads(data.get("CurtGameDetailJson", "{}"))
@@ -318,7 +570,10 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
         if str(score.get("VisitingHomeType")) == "1":
             inning = int(float(score.get("InningSeq", 0)))
             if 1 <= inning <= 12:
-                update_values[9 + inning - 1] = int(float(score.get("ScoreCnt", 0)))
+                score_raw = score.get("ScoreCnt", 0)
+                update_values[9 + inning - 1] = (
+                    "X" if str(score_raw).upper() == "X" else int(float(score_raw or 0))
+                )
 
     v_batting = _get_batting_stats(batting, pitching, 1)
     update_values[21] = game_detail.get("VisitingTotalScore", 0)
@@ -330,7 +585,23 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
         if str(score.get("VisitingHomeType")) == "2":
             inning = int(float(score.get("InningSeq", 0)))
             if 1 <= inning <= 12:
-                score_val = int(float(score.get("ScoreCnt", 0)))
+                score_raw = score.get("ScoreCnt", 0)
+                if str(score_raw).upper() == "X":
+                    h_total = int(game_detail.get("HomeTotalScore", 0))
+                    h_score_before = sum(
+                        parsed
+                        for s2 in scoreboard
+                        if str(s2.get("VisitingHomeType")) == "2"
+                        and int(float(s2.get("InningSeq", 0))) < inning
+                        for parsed in [_score_to_int(s2.get("ScoreCnt", 0))]
+                        if parsed is not None
+                    )
+                    implied_score = h_total - h_score_before
+                    update_values[24 + inning - 1] = (
+                        implied_score if implied_score > 0 else "X"
+                    )
+                    continue
+                score_val = int(float(score_raw or 0))
                 if inning >= 9 and game_detail.get("GameStatusChi") == "比賽結束":
                     v_total = int(game_detail.get("VisitingTotalScore", 0))
                     h_total = int(game_detail.get("HomeTotalScore", 0))
@@ -379,8 +650,12 @@ def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     for i in range(13):
         update_values[78 + i] = h_total_pitch[i]
 
-    update_values[91] = get_pitching_habit(v_starter_acnt, session)
-    update_values[92] = get_pitching_habit(h_starter_acnt, session)
+    if data.get("_Source") == "stats.cpbl.com.tw":
+        update_values[91] = get_stats_pitching_habit(v_starter_acnt, session)
+        update_values[92] = get_stats_pitching_habit(h_starter_acnt, session)
+    else:
+        update_values[91] = get_pitching_habit(v_starter_acnt, session)
+        update_values[92] = get_pitching_habit(h_starter_acnt, session)
 
     # 打擊資料
     for i in range(16):
@@ -474,18 +749,10 @@ def run_once(year: str = None, kind_codes=None):
     current_month = str(now.month)
     errors = []
     print(
-        f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Run started (year={year}, kind_codes={kind_codes})"
+        f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Run started (year={year}, kind_codes={kind_codes}, source={DATA_SOURCE})"
     )
 
     for kind_code in kind_codes:
-        try:
-            games = fetch_schedule(year, current_month, kind_code, session)
-        except Exception as e:
-            errors.append(f"fetch_schedule({kind_code}): {e}")
-            continue
-        if not games:
-            continue
-
         sheet = get_worksheet(kind_code)
 
         # 一次性讀取已記錄的場次編號
@@ -497,29 +764,49 @@ def run_once(year: str = None, kind_codes=None):
             if sno and str(year) in str(date_val)
         }
 
-        # 過濾出「過去且未記錄」的候選場次（仿照 NPB 的 new_ids 邏輯）
-        candidates = []
-        for game in games:
-            game_sno = str(game.get("GameSno"))
-            game_date_str = game.get("GameDate", "").split("T")[0]
+        if DATA_SOURCE == "stats":
+            candidate_snos = _stats_candidate_snos(existing_snos)
+            print(
+                f"[{kind_code}] checking stats game range {candidate_snos[0]}-{candidate_snos[-1]}."
+            )
+        else:
             try:
-                game_date = datetime.strptime(game_date_str, "%Y-%m-%d")
-            except ValueError:
+                games = fetch_schedule(year, current_month, kind_code, session)
+            except Exception as e:
+                errors.append(f"fetch_schedule({kind_code}): {e}")
                 continue
-            if game_date.date() > now.date():
+            if not games:
                 continue
-            if game_sno in existing_snos:
-                continue
-            candidates.append(game)
 
-        print(f"[{kind_code}] {len(candidates)} unrecorded past game(s) to check.")
+            # 過濾出「過去且未記錄」的候選場次（仿照 NPB 的 new_ids 邏輯）
+            candidate_snos = []
+            for game in games:
+                game_sno = str(game.get("GameSno"))
+                game_date_str = game.get("GameDate", "").split("T")[0]
+                try:
+                    game_date = datetime.strptime(game_date_str, "%Y-%m-%d")
+                except ValueError:
+                    continue
+                if game_date.date() > now.date():
+                    continue
+                if game_sno in existing_snos:
+                    continue
+                candidate_snos.append(game_sno)
+
+            print(
+                f"[{kind_code}] {len(candidate_snos)} unrecorded past game(s) to check."
+            )
 
         # 只對候選場次發 HTTP 請求
-        for game in candidates:
-            game_sno = str(game.get("GameSno"))
+        for game_sno in candidate_snos:
+            if game_sno in existing_snos:
+                continue
             print(f"Processing GameSno {game_sno} ({kind_code})...")
             try:
-                data = fetch_game_data(game_sno, year, kind_code, session)
+                if DATA_SOURCE == "stats":
+                    data = fetch_stats_game_data(game_sno, year, kind_code, session)
+                else:
+                    data = fetch_game_data(game_sno, year, kind_code, session)
                 if not data:
                     continue
                 written = process_and_update_sheet(
@@ -558,7 +845,10 @@ def main(game_sno: str, year: str, kind_code="A"):
     """
 
     session = get_session()
-    data = fetch_game_data(game_sno, year, kind_code, session)
+    if DATA_SOURCE == "stats":
+        data = fetch_stats_game_data(game_sno, year, kind_code, session)
+    else:
+        data = fetch_game_data(game_sno, year, kind_code, session)
     if not data:
         return
 
