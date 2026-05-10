@@ -21,6 +21,22 @@ WORKSHEET_MAP = {
     "A": "賽程",
     "G": "熱身賽賽程",
 }
+STATUS_WORKSHEET_NAME = "CPBL狀態"
+STATUS_HEADERS = ["Date", "KindCode", "GameSno", "Status", "Resolved", "UpdatedAt"]
+NO_GAMES_SENTINEL = "__NO_GAMES__"
+TERMINAL_STATUS_KEYWORDS = (
+    "延賽",
+    "取消",
+    "保留",
+    "裁定",
+    "沒收",
+    "無效",
+    "中止",
+    "No Game",
+    "NO GAME",
+    "NoGame",
+    "NOGAME",
+)
 
 TEAM_MAP = {
     "樂天桃猿": "樂天",
@@ -31,8 +47,9 @@ TEAM_MAP = {
     "台鋼雄鷹": "台鋼",
 }
 
-# (connect, read) — 走 VPN 時 cpbl.com.tw 偶爾會被擋，連線階段需要快速失敗
 REQUEST_TIMEOUT = (10, 30)
+
+_habit_cache: dict = {}
 
 
 def get_session():
@@ -48,6 +65,10 @@ def get_session():
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         }
     )
+
+    proxy_url = os.environ.get("DECODO_PROXY_URL")
+    if proxy_url:
+        session.proxies = {"http": proxy_url, "https": proxy_url}
 
     return session
 
@@ -65,6 +86,38 @@ def get_worksheet(kind_code):
     client = gspread.authorize(creds)
     worksheet_name = WORKSHEET_MAP.get(kind_code, "賽程")
     return client.open_by_key(SPREADSHEET_KEY).worksheet(worksheet_name)
+
+
+def get_spreadsheet():
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    if creds_json:
+        creds = Credentials.from_service_account_info(
+            json.loads(creds_json), scopes=scope
+        )
+    else:
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
+    client = gspread.authorize(creds)
+    return client.open_by_key(SPREADSHEET_KEY)
+
+
+def get_status_worksheet():
+    spreadsheet = get_spreadsheet()
+    try:
+        sheet = spreadsheet.worksheet(STATUS_WORKSHEET_NAME)
+    except gspread.WorksheetNotFound:
+        sheet = spreadsheet.add_worksheet(
+            title=STATUS_WORKSHEET_NAME, rows=1000, cols=len(STATUS_HEADERS)
+        )
+        sheet.update("A1", [STATUS_HEADERS], value_input_option="USER_ENTERED")
+        return sheet
+
+    values = sheet.get_all_values()
+    if not values:
+        sheet.update("A1", [STATUS_HEADERS], value_input_option="USER_ENTERED")
+    elif values[0][: len(STATUS_HEADERS)] != STATUS_HEADERS:
+        sheet.update("A1", [STATUS_HEADERS], value_input_option="USER_ENTERED")
+    return sheet
 
 
 def fetch_schedule(year, month, kind_code, session):
@@ -125,6 +178,111 @@ def is_game_recorded(game_sno, year, sheet):
     return False
 
 
+def is_terminal_game_status(status: str) -> bool:
+    if not status:
+        return False
+    if status == "比賽結束":
+        return True
+    normalized = status.strip()
+    return any(keyword in normalized for keyword in TERMINAL_STATUS_KEYWORDS)
+
+
+def is_non_finished_terminal_status(status: str) -> bool:
+    return bool(status) and status != "比賽結束" and is_terminal_game_status(status)
+
+
+def _extract_game_detail(data, game_sno):
+    curt_game_detail = json.loads(data.get("CurtGameDetailJson", "{}"))
+    game_detail_list = json.loads(data.get("GameDetailJson", "[]"))
+
+    if str(curt_game_detail.get("GameSno")) == str(game_sno):
+        return curt_game_detail
+
+    for game_detail in game_detail_list:
+        if str(game_detail.get("GameSno")) == str(game_sno):
+            return game_detail
+
+    if game_detail_list:
+        print(
+            f"Warning: No exact match for GameSno {game_sno}. Using first available."
+        )
+        return game_detail_list[0]
+
+    return None
+
+
+def _status_records(status_sheet):
+    rows = status_sheet.get_all_values()
+    if not rows:
+        return []
+    records = []
+    for idx, row in enumerate(rows[1:], start=2):
+        padded = row + [""] * (len(STATUS_HEADERS) - len(row))
+        records.append(
+            {
+                "row": idx,
+                "date": padded[0],
+                "kind_code": padded[1],
+                "game_sno": padded[2],
+                "status": padded[3],
+                "resolved": str(padded[4]).upper() == "TRUE",
+                "updated_at": padded[5],
+            }
+        )
+    return records
+
+
+def _status_records_for_date(status_sheet, date_str, kind_code):
+    return [
+        record
+        for record in _status_records(status_sheet)
+        if record["date"] == date_str and record["kind_code"] == kind_code
+    ]
+
+
+def _all_games_resolved_for_date(status_sheet, date_str, kind_code):
+    records = _status_records_for_date(status_sheet, date_str, kind_code)
+    return bool(records) and all(record["resolved"] for record in records)
+
+
+def _unresolved_game_snos_for_date(status_sheet, date_str, kind_code):
+    return [
+        record["game_sno"]
+        for record in _status_records_for_date(status_sheet, date_str, kind_code)
+        if not record["resolved"] and record["game_sno"] != NO_GAMES_SENTINEL
+    ]
+
+
+def _upsert_status(status_sheet, date_str, kind_code, game_sno, status, resolved):
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    values = [
+        date_str,
+        kind_code,
+        str(game_sno),
+        status or "",
+        "TRUE" if resolved else "FALSE",
+        updated_at,
+    ]
+    for record in _status_records(status_sheet):
+        if (
+            record["date"] == date_str
+            and record["kind_code"] == kind_code
+            and record["game_sno"] == str(game_sno)
+        ):
+            status_sheet.update(
+                range_name=f"A{record['row']}:F{record['row']}",
+                values=[values],
+                value_input_option="USER_ENTERED",
+            )
+            return
+
+    status_sheet.append_row(values, value_input_option="USER_ENTERED")
+
+
+def _game_date_str(game):
+    return game.get("GameDate", "").split("T")[0].replace("/", "-")
+
+
 def fetch_game_data(game_sno, year, kind_code, session):
     """從 box/getlive 抓取比賽的詳細資料，回傳 JSON dict 或 None。"""
     url = f"https://www.cpbl.com.tw/box/index?gameSno={game_sno}&year={year}&kindCode={kind_code}"
@@ -166,6 +324,9 @@ def fetch_game_data(game_sno, year, kind_code, session):
 def get_pitching_habit(acnt_id, session):
     if not acnt_id:
         return ""
+    if acnt_id in _habit_cache:
+        return _habit_cache[acnt_id]
+    result = ""
     try:
         url = f"https://www.cpbl.com.tw/team/person?acnt={acnt_id}"
         response = session.get(url, timeout=REQUEST_TIMEOUT)
@@ -175,12 +336,13 @@ def get_pitching_habit(acnt_id, session):
             if bt_dd:
                 desc = bt_dd.find("div", class_="desc").text.strip()
                 if "左投" in desc:
-                    return "左"
+                    result = "左"
                 elif "右投" in desc:
-                    return "右"
+                    result = "右"
     except Exception as e:
         print(f"Error fetching habit for {acnt_id}: {e}")
-    return ""
+    _habit_cache[acnt_id] = result
+    return result
 
 
 def _get_pitching_stats(pitching, ptype, is_starter=False):
@@ -256,27 +418,10 @@ def _get_batting_stats(batting, pitching, ptype):
 def process_and_update_sheet(data, game_sno, year, kind_code, session, sheet):
     """解析比賽資料並寫入對應 worksheet。回傳 True 代表成功寫入。"""
     curt_game_detail = json.loads(data.get("CurtGameDetailJson", "{}"))
-    game_detail_list = json.loads(data.get("GameDetailJson", "[]"))
-
-    # 找到對應的 game_detail
-    game_detail = None
-    if str(curt_game_detail.get("GameSno")) == str(game_sno):
-        game_detail = curt_game_detail
-    else:
-        for g in game_detail_list:
-            if str(g.get("GameSno")) == str(game_sno):
-                game_detail = g
-                break
-
+    game_detail = _extract_game_detail(data, game_sno)
     if not game_detail:
-        if game_detail_list:
-            game_detail = game_detail_list[0]
-            print(
-                f"Warning: No exact match for GameSno {game_sno}. Using first available."
-            )
-        else:
-            print("No game detail found.")
-            return False
+        print("No game detail found.")
+        return False
 
     # 只在比賽結束時更新
     if game_detail.get("GameStatusChi") != "比賽結束":
@@ -470,23 +615,21 @@ def run_once(year: str = None, kind_codes=None):
     if kind_codes is None:
         kind_codes = ["A", "G"]
 
-    session = get_session()
     current_month = str(now.month)
+    today_str = now.strftime("%Y-%m-%d")
     errors = []
+    updated_any_kind = False
     print(
         f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Run started (year={year}, kind_codes={kind_codes})"
     )
 
     for kind_code in kind_codes:
-        try:
-            games = fetch_schedule(year, current_month, kind_code, session)
-        except Exception as e:
-            errors.append(f"fetch_schedule({kind_code}): {e}")
-            continue
-        if not games:
-            continue
-
         sheet = get_worksheet(kind_code)
+        status_sheet = get_status_worksheet()
+
+        if _all_games_resolved_for_date(status_sheet, today_str, kind_code):
+            print(f"[{kind_code}] {today_str} already resolved. Skipping CPBL fetch.")
+            continue
 
         # 一次性讀取已記錄的場次編號
         col_b_cache = sheet.col_values(2)
@@ -497,48 +640,137 @@ def run_once(year: str = None, kind_codes=None):
             if sno and str(year) in str(date_val)
         }
 
-        # 過濾出「過去且未記錄」的候選場次（仿照 NPB 的 new_ids 邏輯）
-        candidates = []
-        for game in games:
-            game_sno = str(game.get("GameSno"))
-            game_date_str = game.get("GameDate", "").split("T")[0]
-            try:
-                game_date = datetime.strptime(game_date_str, "%Y-%m-%d")
-            except ValueError:
-                continue
-            if game_date.date() > now.date():
-                continue
-            if game_sno in existing_snos:
-                continue
-            candidates.append(game)
+        unresolved_snos = _unresolved_game_snos_for_date(
+            status_sheet, today_str, kind_code
+        )
+        candidates = [
+            {"GameSno": game_sno, "GameDate": today_str}
+            for game_sno in unresolved_snos
+        ]
 
-        print(f"[{kind_code}] {len(candidates)} unrecorded past game(s) to check.")
+        if not candidates:
+            session = get_session()
+            try:
+                games = fetch_schedule(year, current_month, kind_code, session)
+            except Exception as e:
+                errors.append(f"fetch_schedule({kind_code}): {e}")
+                continue
+
+            # 第一次看到今天賽程時，先建立 expected list。之後 cron 可直接讀狀態表。
+            today_games = [
+                game for game in games if _game_date_str(game) == today_str
+            ]
+            if not today_games:
+                _upsert_status(
+                    status_sheet,
+                    today_str,
+                    kind_code,
+                    NO_GAMES_SENTINEL,
+                    "無賽事",
+                    True,
+                )
+                print(f"[{kind_code}] No games scheduled for {today_str}.")
+                continue
+
+            for game in today_games:
+                game_sno = str(game.get("GameSno"))
+                if not game_sno:
+                    continue
+                schedule_status = game.get("GameStatusChi", "")
+                resolved = game_sno in existing_snos or is_non_finished_terminal_status(
+                    schedule_status
+                )
+                if game_sno in existing_snos and not schedule_status:
+                    schedule_status = "比賽結束"
+                _upsert_status(
+                    status_sheet,
+                    today_str,
+                    kind_code,
+                    game_sno,
+                    schedule_status,
+                    resolved,
+                )
+
+            candidates = []
+            for game in today_games:
+                game_sno = str(game.get("GameSno"))
+                if not game_sno or game_sno in existing_snos:
+                    continue
+                if is_non_finished_terminal_status(game.get("GameStatusChi", "")):
+                    continue
+                candidates.append(game)
+        else:
+            session = get_session()
+
+        print(f"[{kind_code}] {len(candidates)} unresolved game(s) to check.")
 
         # 只對候選場次發 HTTP 請求
         for game in candidates:
             game_sno = str(game.get("GameSno"))
+            game_date_str = _game_date_str(game) or today_str
+            if game_sno in existing_snos:
+                _upsert_status(
+                    status_sheet,
+                    game_date_str,
+                    kind_code,
+                    game_sno,
+                    "比賽結束",
+                    True,
+                )
+                continue
+
             print(f"Processing GameSno {game_sno} ({kind_code})...")
             try:
                 data = fetch_game_data(game_sno, year, kind_code, session)
                 if not data:
+                    continue
+                game_detail = _extract_game_detail(data, game_sno)
+                status = game_detail.get("GameStatusChi", "") if game_detail else ""
+                if status and status != "比賽結束":
+                    _upsert_status(
+                        status_sheet,
+                        game_date_str,
+                        kind_code,
+                        game_sno,
+                        status,
+                        is_terminal_game_status(status),
+                    )
+                    if is_terminal_game_status(status):
+                        print(f"Game {game_sno} terminal status: {status}.")
+                    else:
+                        print(f"Game {game_sno} still unresolved: {status}.")
                     continue
                 written = process_and_update_sheet(
                     data, game_sno, year, kind_code, session, sheet
                 )
                 if written:
                     existing_snos.add(game_sno)
+                    _upsert_status(
+                        status_sheet,
+                        game_date_str,
+                        kind_code,
+                        game_sno,
+                        "比賽結束",
+                        True,
+                    )
             except Exception as e:
                 errors.append(f"game {game_sno} ({kind_code}): {e}")
                 continue
 
             time.sleep(2)  # 避免打 API 太快
 
+        if _all_games_resolved_for_date(status_sheet, today_str, kind_code):
+            updated_any_kind = True
+
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Run finished.")
 
-    try:
-        update_huizi(year=year)
-    except Exception as e:
-        errors.append(f"update_huizi: {e}")
+    if updated_any_kind:
+        try:
+            update_huizi(year=year)
+        except Exception as e:
+            errors.append(f"update_huizi: {e}")
+    else:
+        print("No newly resolved CPBL game day. Skipping 彙資 update.")
 
     if errors:
         print(f"\n[ERROR] {len(errors)} failure(s) occurred:")
