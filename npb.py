@@ -1643,9 +1643,41 @@ def _analysis_game_type(data: dict) -> str:
     home = data.get("主隊原名", "")
     if not away or not home:
         return "例行賽"
-    return (
-        "交流賽" if NPB_TEAMS[away]["league"] != NPB_TEAMS[home]["league"] else "例行賽"
-    )
+    away_league = _analysis_team_league(away)
+    home_league = _analysis_team_league(home)
+    if not away_league or not home_league:
+        return "例行賽"
+    if away_league != home_league:
+        return "交流戰"
+    return home_league
+
+
+def _analysis_team_league(team_name: str) -> str | None:
+    normalized = str(team_name or "").replace(" ", "")
+    if not normalized:
+        return None
+
+    aliases = {"横浜": "DeNA", "橫濱": "DeNA"}
+    raw = aliases.get(normalized, normalized)
+    if raw in NPB_TEAMS:
+        return NPB_TEAMS[raw]["league"]
+
+    for key, info in NPB_TEAMS.items():
+        if normalized == str(info["name"]).replace(" ", ""):
+            return info["league"]
+        if normalized == display_team_name(key).replace(" ", ""):
+            return info["league"]
+    return None
+
+
+def _analysis_game_type_from_teams(away_team: str, home_team: str) -> str | None:
+    away_league = _analysis_team_league(away_team)
+    home_league = _analysis_team_league(home_team)
+    if not home_league:
+        return None
+    if away_league and away_league != home_league:
+        return "交流戰"
+    return home_league
 
 
 def _analysis_day_night(game_time: str) -> str:
@@ -2473,6 +2505,44 @@ async def update_analysis_sheet(
     return inserted
 
 
+def repair_analysis_leagues(year: int = ANALYSIS_SEASON) -> int:
+    """
+    Backfill 分析表紀錄 column D from the stored away/home teams.
+
+    Existing rows do not keep Yahoo game IDs, so this repair uses the same visible
+    team columns that identify the row: I=away team and L=home team.
+    """
+    print(f"\n=== {ANALYSIS_SHEET_NAME} league repair ({year}) ===")
+    sheet = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
+    rows = sheet.get_all_values()
+    updates = []
+
+    for row_num, row in enumerate(rows[2:], start=3):
+        if _analysis_row_year(row) != year:
+            continue
+        away_team = row[8] if len(row) > 8 else ""
+        home_team = row[11] if len(row) > 11 else ""
+        game_type = _analysis_game_type_from_teams(away_team, home_team)
+        if not game_type:
+            print(
+                f"  [analysis] row {row_num}: "
+                f"skipped unknown team {away_team}/{home_team}"
+            )
+            continue
+        current = row[3] if len(row) > 3 else ""
+        if current == game_type:
+            continue
+        updates.append({"range": f"D{row_num}", "values": [[game_type]]})
+
+    if not updates:
+        print("[analysis] No league cells need repair.")
+        return 0
+
+    sheet.batch_update(updates, value_input_option="USER_ENTERED")
+    print(f"[analysis] Repaired {len(updates)} league cell(s).")
+    return len(updates)
+
+
 def update_huizi_sheet(today: datetime | str | None = None):
     """
     Refresh 彙資 with a target date's finished games from 分析表紀錄.
@@ -2950,5 +3020,19 @@ if __name__ == "__main__":
             "or YYYY-MM-DD. Defaults to tomorrow; NPB_MATCHUP_DATE is also supported."
         ),
     )
+    parser.add_argument(
+        "--repair-analysis-leagues",
+        action="store_true",
+        help="Backfill 分析表紀錄 column D to 央盟/洋盟/交流戰 for existing rows.",
+    )
+    parser.add_argument(
+        "--analysis-year",
+        type=int,
+        default=ANALYSIS_SEASON,
+        help=f"Season year for analysis repairs. Defaults to {ANALYSIS_SEASON}.",
+    )
     args = parser.parse_args()
-    asyncio.run(run_once(matchup_date=args.matchup_date))
+    if args.repair_analysis_leagues:
+        repair_analysis_leagues(args.analysis_year)
+    else:
+        asyncio.run(run_once(matchup_date=args.matchup_date))
