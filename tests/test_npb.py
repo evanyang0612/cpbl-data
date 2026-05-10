@@ -21,7 +21,9 @@ from npb import (
     _game_font_color_requests,
     _get_schedule_opponent,
     _header_format_request,
+    _analysis_game_type_from_teams,
     _analysis_row,
+    _analysis_team_league,
     _parse_official_caught_stealing,
     _parse_batting_table,
     _resolve_matchup_start_date,
@@ -396,6 +398,37 @@ class TestAnalysisRow:
         )
 
         assert row[13] == "地方球場"
+
+    def test_analysis_game_type_uses_home_league_for_same_league_game(self):
+        row = _analysis_row(1, self._data())
+
+        assert row[3] == "央盟"
+
+    def test_analysis_game_type_marks_cross_league_game_as_interleague(self):
+        row = _analysis_row(
+            1,
+            self._data(
+                home_raw="オリックス",
+                home_display="歐 牛",
+                venue_raw="京セラD大阪",
+                venue_display="京大阪",
+            ),
+        )
+
+        assert row[3] == "交流戰"
+
+
+class TestAnalysisLeagueRepairHelpers:
+    def test_analysis_team_league_accepts_raw_and_sheet_names(self):
+        assert _analysis_team_league("巨人") == "央盟"
+        assert _analysis_team_league("巨 人") == "央盟"
+        assert _analysis_team_league("横浜") == "央盟"
+        assert _analysis_team_league("歐 牛") == "洋盟"
+
+    def test_analysis_game_type_from_existing_row_teams(self):
+        assert _analysis_game_type_from_teams("阪神", "巨人") == "央盟"
+        assert _analysis_game_type_from_teams("楽天", "歐 牛") == "洋盟"
+        assert _analysis_game_type_from_teams("阪神", "歐 牛") == "交流戰"
 
 
 # ---------------------------------------------------------------------------
