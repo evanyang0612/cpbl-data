@@ -4,6 +4,7 @@ import sys
 import re
 import platform
 import asyncio
+import argparse
 import aiohttp
 from bs4 import BeautifulSoup as bs
 from copy import deepcopy
@@ -681,17 +682,47 @@ async def _get_schedule_opponent(
     return None
 
 
+def _resolve_matchup_start_date(
+    value: str | None = None, today: date | None = None
+) -> date:
+    """
+    Resolve the first date allowed for 近十場 matchup ordering.
+
+    Default stays tomorrow so the scheduled job keeps showing the next game day.
+    Manual backfills can pass "today" or YYYY-MM-DD to keep the display anchored
+    on the current day's matchups.
+    """
+    base = today or datetime.now().date()
+    raw = (value or os.getenv("NPB_MATCHUP_DATE") or "").strip()
+    if not raw:
+        return base + timedelta(days=1)
+
+    normalized = raw.lower()
+    if normalized in {"today", "今天", "今日"}:
+        return base
+    if normalized in {"tomorrow", "明天", "明日"}:
+        return base + timedelta(days=1)
+
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(
+            "matchup date must be 'today', 'tomorrow', or YYYY-MM-DD"
+        ) from exc
+
+
 async def get_next_matchups(
-    league: str, session: aiohttp.ClientSession
+    league: str, session: aiohttp.ClientSession, start_date: date | None = None
 ) -> list[tuple[str, str]]:
     """
     Returns up to 3 (away_key, home_key) pairs for the next game day in the league.
-    The display is always based on tomorrow or the first later scheduled game day,
-    so partial results from games in progress today cannot affect the matchup order.
+    By default the display is based on tomorrow or the first later scheduled game
+    day, so partial results from games in progress today cannot affect the matchup
+    order. Manual backfills may pass start_date=today to keep today's matchups.
     NPB.jp official schedule order is preferred; Yahoo team/game pages are fallback.
     """
     league_teams = {k: v for k, v in NPB_TEAMS.items() if v["league"] == league}
-    start = datetime.now().date() + timedelta(days=1)
+    start = start_date or _resolve_matchup_start_date()
 
     official_matchups = await _official_next_matchups(league, session, start)
     if official_matchups:
@@ -2774,7 +2805,7 @@ def update_league_sheet(
 # --- Main ---
 
 
-async def run_once():
+async def run_once(matchup_date: str | None = None):
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -2783,6 +2814,8 @@ async def run_once():
         )
     }
     errors = []
+    matchup_start_date = _resolve_matchup_start_date(matchup_date)
+    print(f"Matchup start date: {matchup_start_date:%Y-%m-%d}")
 
     async with aiohttp.ClientSession(headers=headers) as session:
         for league, sheet_name in LEAGUE_SHEETS.items():
@@ -2791,7 +2824,9 @@ async def run_once():
 
             # 1. Determine team order from next game matchups
             try:
-                matchups = await get_next_matchups(league, session)
+                matchups = await get_next_matchups(
+                    league, session, start_date=matchup_start_date
+                )
             except Exception as e:
                 errors.append(f"get_next_matchups({league}): {e}")
                 teams = list(league_teams.keys())
@@ -2884,4 +2919,13 @@ async def run_once():
 
 
 if __name__ == "__main__":
-    asyncio.run(run_once())
+    parser = argparse.ArgumentParser(description="Update NPB Google Sheets.")
+    parser.add_argument(
+        "--matchup-date",
+        help=(
+            "First date to use for 近十場 matchup ordering: today, tomorrow, "
+            "or YYYY-MM-DD. Defaults to tomorrow; NPB_MATCHUP_DATE is also supported."
+        ),
+    )
+    args = parser.parse_args()
+    asyncio.run(run_once(matchup_date=args.matchup_date))
