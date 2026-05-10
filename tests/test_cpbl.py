@@ -8,8 +8,12 @@ from unittest.mock import MagicMock
 from cpbl import (
     _get_pitching_stats,
     _get_batting_stats,
+    _all_games_resolved_for_date,
+    _upsert_status,
     process_and_update_sheet,
     is_game_recorded,
+    is_non_finished_terminal_status,
+    is_terminal_game_status,
 )
 
 
@@ -371,6 +375,70 @@ class TestIsGameRecorded:
         # row has fewer than 3 values → year check never reached
         sheet = self._make_sheet(["", "42"], {2: ["42"]})
         assert is_game_recorded("42", "2025", sheet) is False
+
+
+# ---------------------------------------------------------------------------
+# CPBL status tracking
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalGameStatus:
+    def test_finished_is_terminal_but_not_non_finished_terminal(self):
+        assert is_terminal_game_status("比賽結束") is True
+        assert is_non_finished_terminal_status("比賽結束") is False
+
+    def test_rainout_status_is_terminal(self):
+        assert is_terminal_game_status("因雨延賽") is True
+        assert is_non_finished_terminal_status("因雨延賽") is True
+
+    def test_in_progress_is_not_terminal(self):
+        assert is_terminal_game_status("比賽中") is False
+        assert is_non_finished_terminal_status("比賽中") is False
+
+
+class TestStatusSheetHelpers:
+    def _make_status_sheet(self, rows):
+        sheet = MagicMock()
+        sheet.get_all_values.return_value = rows
+        return sheet
+
+    def test_all_games_resolved_for_date(self):
+        sheet = self._make_status_sheet(
+            [
+                ["Date", "KindCode", "GameSno", "Status", "Resolved", "UpdatedAt"],
+                ["2026-05-10", "A", "1", "比賽結束", "TRUE", ""],
+                ["2026-05-10", "A", "2", "因雨延賽", "TRUE", ""],
+            ]
+        )
+        assert _all_games_resolved_for_date(sheet, "2026-05-10", "A") is True
+
+    def test_unresolved_game_keeps_day_open(self):
+        sheet = self._make_status_sheet(
+            [
+                ["Date", "KindCode", "GameSno", "Status", "Resolved", "UpdatedAt"],
+                ["2026-05-10", "A", "1", "比賽結束", "TRUE", ""],
+                ["2026-05-10", "A", "2", "比賽中", "FALSE", ""],
+            ]
+        )
+        assert _all_games_resolved_for_date(sheet, "2026-05-10", "A") is False
+
+    def test_upsert_updates_existing_row(self):
+        sheet = self._make_status_sheet(
+            [
+                ["Date", "KindCode", "GameSno", "Status", "Resolved", "UpdatedAt"],
+                ["2026-05-10", "A", "1", "比賽中", "FALSE", ""],
+            ]
+        )
+        _upsert_status(sheet, "2026-05-10", "A", "1", "比賽結束", True)
+        sheet.update.assert_called_once()
+        sheet.append_row.assert_not_called()
+
+    def test_upsert_appends_new_row(self):
+        sheet = self._make_status_sheet(
+            [["Date", "KindCode", "GameSno", "Status", "Resolved", "UpdatedAt"]]
+        )
+        _upsert_status(sheet, "2026-05-10", "A", "1", "比賽中", False)
+        sheet.append_row.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
