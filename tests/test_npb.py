@@ -328,8 +328,14 @@ class TestBuildBlockValues:
 
 
 class TestAnalysisRow:
-    def test_pitching_blocks_use_same_side_pitchers(self):
-        data = {
+    def _data(
+        self,
+        home_raw="巨人",
+        home_display="巨 人",
+        venue_raw="東京ドーム",
+        venue_display="東 京",
+    ):
+        return {
             "日期": "2026-03-27",
             "時間": "18:00",
             "主審": "市川貴",
@@ -337,10 +343,10 @@ class TestAnalysisRow:
             "主投別": "左",
             "客隊原名": "阪神",
             "客隊": "阪 神",
-            "主隊原名": "巨人",
-            "主隊": "巨 人",
-            "球場原名": "東京ドーム",
-            "球場": "東 京",
+            "主隊原名": home_raw,
+            "主隊": home_display,
+            "球場原名": venue_raw,
+            "球場": venue_display,
             "客總分": 1,
             "主總分": 3,
             "客總失誤": 2,
@@ -355,12 +361,41 @@ class TestAnalysisRow:
             "主打擊": [31, 3, 7, 3, 2, 0, 1, 0, 4, 1, 9, 0, 0, 1, 0, 4],
         }
 
+    def test_pitching_blocks_use_same_side_pitchers(self):
+        data = self._data()
+
         row = _analysis_row(1, data)
 
         assert row[34:43] == ["6", 22, 3, 0, 3, 3, 2, 3, "QS"]
         assert row[43:58] == ["8", 140, 31, 7, 1, 9, 5, 3, 2, 2, 0, 0, 0, 9, 2]
         assert row[59:68] == ["7", 24, 4, 1, 0, 1, 1, 7, "QS"]
         assert row[68:83] == ["9", 128, 33, 5, 1, 10, 1, 1, 1, 4, 0, 1, 0, 12, 3]
+
+    def test_analysis_field_uses_home_team_primary_stadium(self):
+        row = _analysis_row(
+            1,
+            self._data(
+                home_raw="オリックス",
+                home_display="歐 牛",
+                venue_raw="京セラD大阪",
+                venue_display="京大阪",
+            ),
+        )
+
+        assert row[13] == "京セラドーム"
+
+    def test_analysis_field_marks_non_primary_home_stadium_as_local(self):
+        row = _analysis_row(
+            1,
+            self._data(
+                home_raw="阪神",
+                home_display="阪 神",
+                venue_raw="京セラD大阪",
+                venue_display="京大阪",
+            ),
+        )
+
+        assert row[13] == "地方球場"
 
 
 # ---------------------------------------------------------------------------
