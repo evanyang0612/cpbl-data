@@ -217,6 +217,21 @@ ANALYSIS_FIELDS = {
     "スカイマーク": "スカイマーク",
 }
 
+NPB_TEAM_HOME_FIELDS = {
+    "巨人": {"東京ドーム"},
+    "ヤクルト": {"神宮", "明治神宮"},
+    "DeNA": {"横浜"},
+    "中日": {"バンテリンドーム", "ナゴヤドーム"},
+    "阪神": {"甲子園"},
+    "広島": {"マツダスタジアム", "マツダ"},
+    "西武": {"ベルーナドーム", "西武ドーム"},
+    "日本ハム": {"エスコンF"},
+    "ロッテ": {"ZOZOマリン", "QVCマリン"},
+    "オリックス": {"京セラD大阪", "京セラドーム", "京セラD"},
+    "ソフトバンク": {"みずほPayPay", "ヤフードーム"},
+    "楽天": {"楽天モバイル", "Ｋスタ宮城"},
+}
+
 
 LEAGUE_SHEETS = {
     "央盟": "近十場a",
@@ -1646,7 +1661,15 @@ def _analysis_team_name(team_name: str) -> str:
 
 def _analysis_field(data: dict) -> str:
     raw = data.get("球場原名") or data.get("球場") or ""
-    return ANALYSIS_FIELDS.get(raw, "地方球場" if raw else "")
+    if not raw:
+        return ""
+
+    home = data.get("主隊原名") or data.get("主場隊伍") or ""
+    home_fields = NPB_TEAM_HOME_FIELDS.get(home)
+    if home_fields is not None and raw not in home_fields:
+        return "地方球場"
+
+    return ANALYSIS_FIELDS.get(raw, "地方球場")
 
 
 def _analysis_hand(hand: str) -> str:
