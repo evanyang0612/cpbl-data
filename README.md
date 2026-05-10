@@ -113,3 +113,13 @@ echo "SPREADSHEET_KEY=your_spreadsheet_id" >> .env
 python cpbl.py   # runs run_once() for current year
 python npb.py    # runs run_once() for all NPB teams
 ```
+
+For an NPB manual backfill after today's games have already finished, keep the
+近十場 matchup order anchored on today with:
+
+```bash
+python npb.py --matchup-date today
+```
+
+You can also set `NPB_MATCHUP_DATE=today` or pass a date such as
+`--matchup-date 2026-05-10`.

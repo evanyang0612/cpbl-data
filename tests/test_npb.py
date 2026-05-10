@@ -6,7 +6,7 @@ Covers: hex_to_rgb, col_to_letter, _pitcher_font_size, build_block_values,
 """
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -24,6 +24,7 @@ from npb import (
     _analysis_row,
     _parse_official_caught_stealing,
     _parse_batting_table,
+    _resolve_matchup_start_date,
     _pitcher_font_requests,
     _pitcher_font_size,
     build_block_values,
@@ -35,6 +36,33 @@ from npb import (
     GAMES_COUNT,
     NPB_TEAMS,
 )
+
+
+# ---------------------------------------------------------------------------
+# _resolve_matchup_start_date
+# ---------------------------------------------------------------------------
+
+
+class TestResolveMatchupStartDate:
+    def test_default_is_tomorrow(self):
+        assert _resolve_matchup_start_date(today=date(2026, 5, 10)) == date(
+            2026, 5, 11
+        )
+
+    def test_today_aliases_keep_today(self):
+        assert _resolve_matchup_start_date("today", date(2026, 5, 10)) == date(
+            2026, 5, 10
+        )
+        assert _resolve_matchup_start_date("今天", date(2026, 5, 10)) == date(
+            2026, 5, 10
+        )
+
+    def test_explicit_date(self):
+        assert _resolve_matchup_start_date("2026-05-12") == date(2026, 5, 12)
+
+    def test_invalid_date_raises_clear_error(self):
+        with pytest.raises(ValueError, match="today.*tomorrow.*YYYY-MM-DD"):
+            _resolve_matchup_start_date("05/12/2026")
 
 
 # ---------------------------------------------------------------------------
@@ -891,7 +919,12 @@ class TestGetNextScheduledGame:
     def _patch_now(self, dt):
         return patch(
             "npb.datetime",
-            **{"now.return_value": dt, "strptime.side_effect": datetime.strptime},
+            **{
+                "now.return_value": dt,
+                "strptime.side_effect": datetime.strptime,
+                "combine.side_effect": datetime.combine,
+                "min": datetime.min,
+            },
         )
 
     def test_returns_none_none_when_fetch_fails(self):
