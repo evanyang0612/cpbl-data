@@ -6,9 +6,7 @@ import platform
 import asyncio
 import argparse
 import aiohttp
-import base64
 import hashlib
-import hmac
 import secrets
 from bs4 import BeautifulSoup as bs
 from copy import deepcopy
@@ -137,7 +135,7 @@ PREDICTION_SPREADSHEET_KEY = "1-L5RvjhN3OFiXfrDUVxBa8W0EqYIaLQtxizSi-yP8b0"
 ANALYSIS_SEASON = 2026
 PREDICTION_STARTING_BALANCE = 100.0
 PREDICTION_DEFAULT_STAKE = 10.0
-PREDICTION_CIPHER_PREFIX = "npb-pred:v1"
+PREDICTION_SALT_BYTES = 18
 PREDICTION_MARKET_ALIASES = {
     "half": "half_winner",
     "half-winner": "half_winner",
@@ -330,74 +328,21 @@ def display_team_name(team_name: str) -> str:
 # --- NPB prediction ledger ---
 
 
-def _prediction_b64encode(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _prediction_b64decode(encoded: str) -> bytes:
-    padding = "=" * (-len(encoded) % 4)
-    return base64.urlsafe_b64decode((encoded + padding).encode("ascii"))
-
-
-def _prediction_stream(key: str, nonce: bytes, length: int) -> bytes:
-    out = bytearray()
-    counter = 0
-    key_bytes = key.encode("utf-8")
-    while len(out) < length:
-        out.extend(
-            hmac.new(
-                key_bytes,
-                nonce + counter.to_bytes(4, "big"),
-                hashlib.sha256,
-            ).digest()
-        )
-        counter += 1
-    return bytes(out[:length])
-
-
-def encrypt_prediction_payload(payload: dict, key: str, nonce: bytes | None = None) -> str:
+def prediction_reveal_text(payload: dict, salt: str) -> str:
     """
-    Encrypt a compact prediction payload for a public pre-game commitment.
-
-    This intentionally uses only stdlib primitives so GitHub Actions does not need
-    another dependency.  The reveal key is posted after final score, and the HMAC
-    tag lets followers verify they decrypted the exact committed payload.
+    Build the exact text followers hash with any standard SHA-256 verifier.
     """
-    nonce = nonce or secrets.token_bytes(12)
-    plaintext = json.dumps(
+    canonical_payload = json.dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
-    ).encode("utf-8")
-    stream = _prediction_stream(key, nonce, len(plaintext))
-    cipher = bytes(a ^ b for a, b in zip(plaintext, stream))
-    tag = hmac.new(key.encode("utf-8"), nonce + cipher, hashlib.sha256).digest()[:16]
-    return ":".join(
-        [
-            PREDICTION_CIPHER_PREFIX,
-            _prediction_b64encode(nonce),
-            _prediction_b64encode(cipher),
-            _prediction_b64encode(tag),
-        ]
     )
+    return f"{canonical_payload}|salt={salt}"
 
 
-def decrypt_prediction_payload(encrypted: str, key: str) -> dict:
-    parts = encrypted.split(":")
-    if len(parts) != 5 or ":".join(parts[:2]) != PREDICTION_CIPHER_PREFIX:
-        raise ValueError("Unsupported prediction ciphertext format.")
-    nonce = _prediction_b64decode(parts[2])
-    cipher = _prediction_b64decode(parts[3])
-    tag = _prediction_b64decode(parts[4])
-    expected = hmac.new(key.encode("utf-8"), nonce + cipher, hashlib.sha256).digest()[
-        :16
-    ]
-    if not hmac.compare_digest(tag, expected):
-        raise ValueError("Prediction key does not match the encrypted post.")
-    stream = _prediction_stream(key, nonce, len(cipher))
-    plaintext = bytes(a ^ b for a, b in zip(cipher, stream))
-    return json.loads(plaintext.decode("utf-8"))
+def hash_prediction_reveal(reveal_text: str) -> str:
+    return hashlib.sha256(reveal_text.encode("utf-8")).hexdigest()
 
 
 def _prediction_now() -> str:
@@ -434,26 +379,32 @@ def build_prediction_posts(
     *,
     market: str = "final_winner",
     line: float | None = None,
-    key: str | None = None,
+    salt: str | None = None,
     predicted_at: str | None = None,
-    nonce: bytes | None = None,
 ) -> dict:
-    key = key or secrets.token_urlsafe(24)
+    salt = salt or secrets.token_urlsafe(PREDICTION_SALT_BYTES)
     payload = _prediction_payload(
         game_id, pick, rate, stake, market=market, line=line, predicted_at=predicted_at
     )
-    encrypted = encrypt_prediction_payload(payload, key, nonce=nonce)
-    encrypted_post = f"NPB prediction locked before first pitch\nGame {game_id}\n{encrypted}"
-    reveal_post = f"NPB prediction reveal\nGame {game_id}\nKey: {key}"
-    if len(encrypted_post) > 280:
-        raise ValueError("Encrypted prediction post is longer than 280 characters.")
+    reveal_text = prediction_reveal_text(payload, salt)
+    commitment_hash = hash_prediction_reveal(reveal_text)
+    commitment_post = (
+        f"NPB prediction locked before first pitch\n"
+        f"Game {game_id}\n"
+        f"SHA-256: {commitment_hash}\n"
+        f"Reveal after final."
+    )
+    reveal_post = f"NPB prediction reveal\nGame {game_id}\nVerify SHA-256 of:\n{reveal_text}"
+    if len(commitment_post) > 280:
+        raise ValueError("Prediction commitment post is longer than 280 characters.")
     if len(reveal_post) > 280:
         raise ValueError("Prediction reveal post is longer than 280 characters.")
     return {
-        "key": key,
+        "salt": salt,
         "payload": payload,
-        "encrypted": encrypted,
-        "encrypted_post": encrypted_post,
+        "reveal_text": reveal_text,
+        "commitment_hash": commitment_hash,
+        "commitment_post": commitment_post,
         "reveal_post": reveal_post,
     }
 
@@ -650,10 +601,10 @@ def _prediction_headers() -> list[str]:
         "outcome",
         "balance_before",
         "balance_after",
-        "encrypted_post_id",
+        "commitment_post_id",
         "reveal_post_id",
-        "encrypted_post",
-        "key",
+        "commitment_hash",
+        "salt",
         "reveal_post",
         "created_at",
         "resolved_at",
@@ -748,7 +699,7 @@ def _prediction_stats_after(
 
 
 def build_prediction_reveal_post(
-    game_id: str, key: str, outcome: str, stats: dict
+    game_id: str, reveal_text: str, outcome: str, stats: dict
 ) -> str:
     record = f"{stats['wins']}-{stats['losses']}-{stats['pushes']}"
     text = (
@@ -757,7 +708,8 @@ def build_prediction_reveal_post(
         f"Result: {str(outcome).upper()}\n"
         f"Record: {record} | Win rate: {stats['win_rate']}%\n"
         f"Balance: {stats['balance']}\n"
-        f"Key: {key}"
+        f"Verify SHA-256 of:\n"
+        f"{reveal_text}"
     )
     if len(text) > 280:
         raise ValueError("Prediction reveal post is longer than 280 characters.")
@@ -798,9 +750,9 @@ def create_npb_prediction(
         line=line,
         predicted_at=created_at,
     )
-    encrypted_post_id = ""
+    commitment_post_id = ""
     if post and not dry_run:
-        encrypted_post_id = _post_to_x(posts["encrypted_post"])
+        commitment_post_id = _post_to_x(posts["commitment_post"])
 
     balance_after = calculate_prediction_balance(balance_before, stake, rate, "pending")
     row = [
@@ -818,10 +770,10 @@ def create_npb_prediction(
         "",
         balance_before,
         balance_after,
-        encrypted_post_id,
+        commitment_post_id,
         "",
-        posts["encrypted"],
-        posts["key"],
+        posts["commitment_hash"],
+        posts["salt"],
         posts["reveal_post"],
         created_at,
         "",
@@ -832,7 +784,7 @@ def create_npb_prediction(
         "prediction_id": prediction_id,
         "balance_before": balance_before,
         "balance_after": balance_after,
-        "encrypted_post_id": encrypted_post_id,
+        "commitment_post_id": commitment_post_id,
         **posts,
     }
 
@@ -860,10 +812,11 @@ def resolve_npb_predictions_for_game(
         "outcome",
         "balance_before",
         "balance_after",
-        "encrypted_post_id",
+        "commitment_post_id",
         "reveal_post_id",
         "reveal_post",
-        "key",
+        "salt",
+        "created_at",
         "resolved_at",
     }
     missing = required - set(index)
@@ -888,9 +841,19 @@ def resolve_npb_predictions_for_game(
             balance_before, stake, rate, outcome
         )
         stats = _prediction_stats_after(rows, outcome, balance_after)
+        payload = _prediction_payload(
+            game_id,
+            pick,
+            rate,
+            stake,
+            market=market,
+            line=line,
+            predicted_at=row[index["created_at"]] or None,
+        )
+        reveal_text = prediction_reveal_text(payload, row[index["salt"]])
         reveal_post = build_prediction_reveal_post(
             game_id,
-            row[index["key"]],
+            reveal_text,
             outcome,
             stats,
         )
@@ -898,7 +861,7 @@ def resolve_npb_predictions_for_game(
         if post and not dry_run:
             reveal_post_id = _post_to_x(
                 reveal_post,
-                reply_to_tweet_id=row[index["encrypted_post_id"]] or None,
+                reply_to_tweet_id=row[index["commitment_post_id"]] or None,
             )
 
         running_balance = balance_after
@@ -3737,7 +3700,7 @@ if __name__ == "__main__":
             post=not args.no_twitter,
             dry_run=args.dry_run,
         )
-        print(result["encrypted_post"])
+        print(result["commitment_post"])
         print(result["reveal_post"])
     elif args.repair_analysis_leagues:
         repair_analysis_leagues(args.analysis_year)

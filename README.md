@@ -127,7 +127,7 @@ You can also set `NPB_MATCHUP_DATE=today` or pass a date such as
 ### Prediction Ledger
 
 NPB predictions are recorded in the separate prediction spreadsheet. A pre-game
-command writes a pending row and can publish an encrypted X/Twitter post:
+command writes a pending row and can publish a SHA-256 commitment to X/Twitter:
 
 ```bash
 python npb.py --create-prediction 2021038658 --market final_winner --pick 巨人 --rate 0.92 --stake 10
@@ -137,11 +137,13 @@ python npb.py --create-prediction 2021038658 --market final_total --pick under -
 ```
 
 Use `--no-twitter` to record without posting, or `--dry-run` to print the locked
-and reveal posts without writing anything. After the game is scraped as finished,
-the NPB run resolves pending predictions for that game, updates the balance, and
-posts the reveal key with the result, public record, win rate, and current
-balance. The balance starts at `100`; a 10-unit win at rate `0.92` becomes
-`109.2`, while a loss subtracts the stake.
+and reveal posts without writing anything. The pre-game post contains only the
+SHA-256 hash. After the game is scraped as finished, the NPB run resolves pending
+predictions for that game, updates the balance, and posts the exact reveal text
+with the result, public record, win rate, and current balance. Followers can paste
+that reveal text into any SHA-256 verifier and compare it with the pre-game hash.
+The balance starts at `100`; a 10-unit win at rate `0.92` becomes `109.2`, while
+a loss subtracts the stake.
 
 The four supported markets are `half_winner` (winner through 5 innings),
 `final_winner`, `half_total` (combined runs through 5 innings), and

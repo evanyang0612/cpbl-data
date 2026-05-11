@@ -34,13 +34,13 @@ from npb import (
     calculate_prediction_balance,
     col_to_letter,
     create_npb_prediction,
-    decrypt_prediction_payload,
-    encrypt_prediction_payload,
     get_game_info,
     get_last_n_game_ids,
     get_next_scheduled_game,
+    hash_prediction_reveal,
     hex_to_rgb,
     prediction_outcome_for_game,
+    prediction_reveal_text,
     resolve_npb_predictions_for_game,
     GAMES_COUNT,
     NPB_TEAMS,
@@ -233,30 +233,29 @@ class FakePredictionSheet:
 
 
 class TestPredictionLedger:
-    def test_encrypt_decrypt_round_trip_and_rejects_wrong_key(self):
+    def test_prediction_reveal_hash_uses_canonical_text_and_salt(self):
         payload = {"g": "2021038658", "p": "巨人", "r": 0.92, "s": 10.0}
-        encrypted = encrypt_prediction_payload(
-            payload, "secret-key", nonce=b"123456789012"
+        reveal_text = prediction_reveal_text(payload, "test-salt")
+
+        assert reveal_text == '{"g":"2021038658","p":"巨人","r":0.92,"s":10.0}|salt=test-salt'
+        assert (
+            hash_prediction_reveal(reveal_text)
+            == "cad7f1834d794bcadeeb6a476b7b90fc23c3809f1ad10a213909436e97b70fc7"
         )
 
-        assert decrypt_prediction_payload(encrypted, "secret-key") == payload
-        with pytest.raises(ValueError, match="key"):
-            decrypt_prediction_payload(encrypted, "wrong-key")
-
-    def test_build_prediction_posts_are_short_and_decryptable(self):
+    def test_build_prediction_posts_are_short_and_verifiable_with_sha256(self):
         result = build_prediction_posts(
             "2021038658",
             "巨人",
             0.92,
             10,
-            key="secret-key",
+            salt="test-salt",
             predicted_at="2026-05-11T12:00:00",
-            nonce=b"123456789012",
         )
 
-        assert len(result["encrypted_post"]) <= 280
+        assert len(result["commitment_post"]) <= 280
         assert len(result["reveal_post"]) <= 280
-        assert decrypt_prediction_payload(result["encrypted"], result["key"]) == {
+        assert result["payload"] == {
             "g": "2021038658",
             "m": "final_winner",
             "p": "巨人",
@@ -264,6 +263,10 @@ class TestPredictionLedger:
             "s": 10.0,
             "t": "2026-05-11T12:00:00",
         }
+        assert "SHA-256: " in result["commitment_post"]
+        assert result["commitment_hash"] == hash_prediction_reveal(result["reveal_text"])
+        assert f"SHA-256: {result['commitment_hash']}" in result["commitment_post"]
+        assert result["reveal_text"] in result["reveal_post"]
 
     def test_balance_math_matches_stake_rate_example(self):
         assert calculate_prediction_balance(100, 10, 0.92, "win") == 109.2
@@ -316,7 +319,7 @@ class TestPredictionLedger:
         assert row[headers.index("status")] == "pending"
         assert row[headers.index("balance_before")] == 100.0
         assert row[headers.index("balance_after")] == 100.0
-        assert result["encrypted_post_id"] == ""
+        assert result["commitment_post_id"] == ""
 
     def test_resolve_prediction_updates_outcome_and_balance(self):
         headers = [
@@ -334,10 +337,10 @@ class TestPredictionLedger:
             "outcome",
             "balance_before",
             "balance_after",
-            "encrypted_post_id",
+            "commitment_post_id",
             "reveal_post_id",
-            "encrypted_post",
-            "key",
+            "commitment_hash",
+            "salt",
             "reveal_post",
             "created_at",
             "resolved_at",
@@ -362,8 +365,8 @@ class TestPredictionLedger:
                     "100",
                     "",
                     "",
-                    "cipher",
-                    "key",
+                    "hash",
+                    "test-salt",
                     "reveal",
                     "2026-05-11T12:00:00",
                     "",
