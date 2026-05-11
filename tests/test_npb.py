@@ -30,11 +30,18 @@ from npb import (
     _pitcher_font_requests,
     _pitcher_font_size,
     build_block_values,
+    build_prediction_posts,
+    calculate_prediction_balance,
     col_to_letter,
+    create_npb_prediction,
+    decrypt_prediction_payload,
+    encrypt_prediction_payload,
     get_game_info,
     get_last_n_game_ids,
     get_next_scheduled_game,
     hex_to_rgb,
+    prediction_outcome_for_game,
+    resolve_npb_predictions_for_game,
     GAMES_COUNT,
     NPB_TEAMS,
 )
@@ -196,6 +203,200 @@ SAMPLE_GAMES = [
     _make_game("2025/04/01", "燕 子", "原", "東 京", 2, 2, 3, 3, 7, 9, 4, 0, 0),
     _make_game("2025/04/02", "中 日", "小澤", "名古屋", 0, 0, 2, 2, 3, 5, 1, 0, 0),
 ]
+
+
+class FakePredictionSheet:
+    def __init__(self, rows=None):
+        self.rows = [list(row) for row in (rows or [])]
+        self.appended = []
+        self.updated_cells = []
+
+    def get_all_values(self):
+        return [list(row) for row in self.rows]
+
+    def append_row(self, row, value_input_option=None):
+        self.rows.append(list(row))
+        self.appended.append(list(row))
+
+    def update_cell(self, row, col, value):
+        while len(self.rows) < row:
+            self.rows.append([])
+        while len(self.rows[row - 1]) < col:
+            self.rows[row - 1].append("")
+        self.rows[row - 1][col - 1] = value
+        self.updated_cells.append((row, col, value))
+
+
+# ---------------------------------------------------------------------------
+# NPB prediction ledger
+# ---------------------------------------------------------------------------
+
+
+class TestPredictionLedger:
+    def test_encrypt_decrypt_round_trip_and_rejects_wrong_key(self):
+        payload = {"g": "2021038658", "p": "巨人", "r": 0.92, "s": 10.0}
+        encrypted = encrypt_prediction_payload(
+            payload, "secret-key", nonce=b"123456789012"
+        )
+
+        assert decrypt_prediction_payload(encrypted, "secret-key") == payload
+        with pytest.raises(ValueError, match="key"):
+            decrypt_prediction_payload(encrypted, "wrong-key")
+
+    def test_build_prediction_posts_are_short_and_decryptable(self):
+        result = build_prediction_posts(
+            "2021038658",
+            "巨人",
+            0.92,
+            10,
+            key="secret-key",
+            predicted_at="2026-05-11T12:00:00",
+            nonce=b"123456789012",
+        )
+
+        assert len(result["encrypted_post"]) <= 280
+        assert len(result["reveal_post"]) <= 280
+        assert decrypt_prediction_payload(result["encrypted"], result["key"]) == {
+            "g": "2021038658",
+            "m": "final_winner",
+            "p": "巨人",
+            "r": 0.92,
+            "s": 10.0,
+            "t": "2026-05-11T12:00:00",
+        }
+
+    def test_balance_math_matches_stake_rate_example(self):
+        assert calculate_prediction_balance(100, 10, 0.92, "win") == 109.2
+        assert calculate_prediction_balance(100, 10, 0.92, "loss") == 90
+        assert calculate_prediction_balance(100, 10, 0.92, "push") == 100
+
+    def test_prediction_outcome_compares_pick_to_final_winner(self):
+        data = {
+            "客隊原名": "阪神",
+            "客隊": "阪 神",
+            "主隊原名": "巨人",
+            "主隊": "巨 人",
+            "客總分": 2,
+            "主總分": 4,
+            "away_innings": [0, 0, 1, 1, 0, "", "", "", "", "", "", ""],
+            "home_innings": [1, 1, 0, 0, 2, "", "", "", "", "", "", ""],
+        }
+
+        assert prediction_outcome_for_game(data, "巨 人") == "win"
+        assert prediction_outcome_for_game(data, "阪神") == "loss"
+        assert prediction_outcome_for_game(data, "巨人", market="half_winner") == "win"
+        assert (
+            prediction_outcome_for_game(data, "over", market="half_total", line=5.5)
+            == "win"
+        )
+        assert (
+            prediction_outcome_for_game(data, "under", market="final_total", line=6.5)
+            == "win"
+        )
+
+    def test_create_prediction_records_pending_row_without_external_posts(self):
+        sheet = FakePredictionSheet([])
+
+        result = create_npb_prediction(
+            "2021038658",
+            "巨人",
+            0.92,
+            stake=10,
+            game_date="2026-05-11",
+            away_team="阪神",
+            home_team="巨人",
+            sheet=sheet,
+            post=False,
+        )
+
+        assert len(sheet.rows) == 2
+        headers = sheet.rows[0]
+        row = sheet.rows[1]
+        assert row[headers.index("game_id")] == "2021038658"
+        assert row[headers.index("status")] == "pending"
+        assert row[headers.index("balance_before")] == 100.0
+        assert row[headers.index("balance_after")] == 100.0
+        assert result["encrypted_post_id"] == ""
+
+    def test_resolve_prediction_updates_outcome_and_balance(self):
+        headers = [
+            "prediction_id",
+            "game_id",
+            "game_date",
+            "away_team",
+            "home_team",
+            "market",
+            "pick",
+            "line",
+            "rate",
+            "stake",
+            "status",
+            "outcome",
+            "balance_before",
+            "balance_after",
+            "encrypted_post_id",
+            "reveal_post_id",
+            "encrypted_post",
+            "key",
+            "reveal_post",
+            "created_at",
+            "resolved_at",
+        ]
+        sheet = FakePredictionSheet(
+            [
+                headers,
+                [
+                    "p1",
+                    "2021038658",
+                    "2026-05-11",
+                    "阪神",
+                    "巨人",
+                    "final_winner",
+                    "巨人",
+                    "",
+                    "0.92",
+                    "10",
+                    "pending",
+                    "",
+                    "100",
+                    "100",
+                    "",
+                    "",
+                    "cipher",
+                    "key",
+                    "reveal",
+                    "2026-05-11T12:00:00",
+                    "",
+                ],
+            ]
+        )
+        data = {
+            "客隊原名": "阪神",
+            "客隊": "阪 神",
+            "主隊原名": "巨人",
+            "主隊": "巨 人",
+            "客總分": 2,
+            "主總分": 4,
+            "away_innings": [0, 0, 1, 1, 0, "", "", "", "", "", "", ""],
+            "home_innings": [1, 1, 0, 0, 2, "", "", "", "", "", "", ""],
+        }
+
+        assert (
+            resolve_npb_predictions_for_game(
+                "2021038658", data, sheet=sheet, post=False
+            )
+            == 1
+        )
+
+        row = sheet.rows[1]
+        assert row[headers.index("status")] == "resolved"
+        assert row[headers.index("outcome")] == "win"
+        assert row[headers.index("balance_before")] == 100.0
+        assert row[headers.index("balance_after")] == 109.2
+        assert "Result: WIN" in row[headers.index("reveal_post")]
+        assert "Record: 1-0-0" in row[headers.index("reveal_post")]
+        assert "Win rate: 100.0%" in row[headers.index("reveal_post")]
+        assert "Balance: 109.2" in row[headers.index("reveal_post")]
 
 
 class TestBuildBlockValues:

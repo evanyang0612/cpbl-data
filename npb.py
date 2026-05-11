@@ -6,6 +6,10 @@ import platform
 import asyncio
 import argparse
 import aiohttp
+import base64
+import hashlib
+import hmac
+import secrets
 from bs4 import BeautifulSoup as bs
 from copy import deepcopy
 from datetime import date, datetime, timedelta
@@ -13,6 +17,7 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import gspread
+import requests
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 
@@ -127,7 +132,26 @@ SAILU_SHEET_NAME = "賽錄"
 EXHIBITION_SHEET_NAME = "熱身賽紀錄"
 ANALYSIS_SHEET_NAME = "分析表紀錄"
 HUIZI_SHEET_NAME = "彙資"
+PREDICTION_SHEET_NAME = "預測紀錄"
+PREDICTION_SPREADSHEET_KEY = "1-L5RvjhN3OFiXfrDUVxBa8W0EqYIaLQtxizSi-yP8b0"
 ANALYSIS_SEASON = 2026
+PREDICTION_STARTING_BALANCE = 100.0
+PREDICTION_DEFAULT_STAKE = 10.0
+PREDICTION_CIPHER_PREFIX = "npb-pred:v1"
+PREDICTION_MARKET_ALIASES = {
+    "half": "half_winner",
+    "half-winner": "half_winner",
+    "half_winner": "half_winner",
+    "final": "final_winner",
+    "winner": "final_winner",
+    "final-winner": "final_winner",
+    "final_winner": "final_winner",
+    "half-total": "half_total",
+    "half_total": "half_total",
+    "final-total": "final_total",
+    "total": "final_total",
+    "final_total": "final_total",
+}
 
 OFFICIAL_TEAM_NAME_MAP = {
     "読売": "巨人",
@@ -301,6 +325,623 @@ def is_exhibition_game_id(game_id: str) -> bool:
 def display_team_name(team_name: str) -> str:
     """Match existing sheet naming conventions."""
     return "横浜" if team_name == "DeNA" else team_name
+
+
+# --- NPB prediction ledger ---
+
+
+def _prediction_b64encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _prediction_b64decode(encoded: str) -> bytes:
+    padding = "=" * (-len(encoded) % 4)
+    return base64.urlsafe_b64decode((encoded + padding).encode("ascii"))
+
+
+def _prediction_stream(key: str, nonce: bytes, length: int) -> bytes:
+    out = bytearray()
+    counter = 0
+    key_bytes = key.encode("utf-8")
+    while len(out) < length:
+        out.extend(
+            hmac.new(
+                key_bytes,
+                nonce + counter.to_bytes(4, "big"),
+                hashlib.sha256,
+            ).digest()
+        )
+        counter += 1
+    return bytes(out[:length])
+
+
+def encrypt_prediction_payload(payload: dict, key: str, nonce: bytes | None = None) -> str:
+    """
+    Encrypt a compact prediction payload for a public pre-game commitment.
+
+    This intentionally uses only stdlib primitives so GitHub Actions does not need
+    another dependency.  The reveal key is posted after final score, and the HMAC
+    tag lets followers verify they decrypted the exact committed payload.
+    """
+    nonce = nonce or secrets.token_bytes(12)
+    plaintext = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    stream = _prediction_stream(key, nonce, len(plaintext))
+    cipher = bytes(a ^ b for a, b in zip(plaintext, stream))
+    tag = hmac.new(key.encode("utf-8"), nonce + cipher, hashlib.sha256).digest()[:16]
+    return ":".join(
+        [
+            PREDICTION_CIPHER_PREFIX,
+            _prediction_b64encode(nonce),
+            _prediction_b64encode(cipher),
+            _prediction_b64encode(tag),
+        ]
+    )
+
+
+def decrypt_prediction_payload(encrypted: str, key: str) -> dict:
+    parts = encrypted.split(":")
+    if len(parts) != 5 or ":".join(parts[:2]) != PREDICTION_CIPHER_PREFIX:
+        raise ValueError("Unsupported prediction ciphertext format.")
+    nonce = _prediction_b64decode(parts[2])
+    cipher = _prediction_b64decode(parts[3])
+    tag = _prediction_b64decode(parts[4])
+    expected = hmac.new(key.encode("utf-8"), nonce + cipher, hashlib.sha256).digest()[
+        :16
+    ]
+    if not hmac.compare_digest(tag, expected):
+        raise ValueError("Prediction key does not match the encrypted post.")
+    stream = _prediction_stream(key, nonce, len(cipher))
+    plaintext = bytes(a ^ b for a, b in zip(cipher, stream))
+    return json.loads(plaintext.decode("utf-8"))
+
+
+def _prediction_now() -> str:
+    return datetime.now().replace(microsecond=0).isoformat()
+
+
+def _prediction_payload(
+    game_id: str,
+    pick: str,
+    rate: float,
+    stake: float,
+    market: str = "final_winner",
+    line: float | None = None,
+    predicted_at: str | None = None,
+) -> dict:
+    payload = {
+        "g": str(game_id),
+        "m": normalize_prediction_market(market),
+        "p": str(pick),
+        "r": float(rate),
+        "s": float(stake),
+        "t": predicted_at or _prediction_now(),
+    }
+    if line is not None:
+        payload["l"] = float(line)
+    return payload
+
+
+def build_prediction_posts(
+    game_id: str,
+    pick: str,
+    rate: float,
+    stake: float = PREDICTION_DEFAULT_STAKE,
+    *,
+    market: str = "final_winner",
+    line: float | None = None,
+    key: str | None = None,
+    predicted_at: str | None = None,
+    nonce: bytes | None = None,
+) -> dict:
+    key = key or secrets.token_urlsafe(24)
+    payload = _prediction_payload(
+        game_id, pick, rate, stake, market=market, line=line, predicted_at=predicted_at
+    )
+    encrypted = encrypt_prediction_payload(payload, key, nonce=nonce)
+    encrypted_post = f"NPB prediction locked before first pitch\nGame {game_id}\n{encrypted}"
+    reveal_post = f"NPB prediction reveal\nGame {game_id}\nKey: {key}"
+    if len(encrypted_post) > 280:
+        raise ValueError("Encrypted prediction post is longer than 280 characters.")
+    if len(reveal_post) > 280:
+        raise ValueError("Prediction reveal post is longer than 280 characters.")
+    return {
+        "key": key,
+        "payload": payload,
+        "encrypted": encrypted,
+        "encrypted_post": encrypted_post,
+        "reveal_post": reveal_post,
+    }
+
+
+def calculate_prediction_balance(
+    balance_before: float, stake: float, rate: float, outcome: str
+) -> float:
+    outcome = str(outcome).lower()
+    if outcome == "win":
+        return round(float(balance_before) + float(stake) * float(rate), 4)
+    if outcome == "loss":
+        return round(float(balance_before) - float(stake), 4)
+    if outcome in {"push", "void", "pending"}:
+        return round(float(balance_before), 4)
+    raise ValueError(f"Unsupported prediction outcome: {outcome}")
+
+
+def _prediction_float(value, default: float = 0.0) -> float:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _prediction_normalize_team(value: str) -> str:
+    text = str(value or "").replace(" ", "")
+    aliases = {"横浜": "DeNA", "橫濱": "DeNA"}
+    text = aliases.get(text, text)
+    for raw, info in NPB_TEAMS.items():
+        candidates = {
+            raw.replace(" ", ""),
+            display_team_name(raw).replace(" ", ""),
+            str(info["name"]).replace(" ", ""),
+        }
+        if text in candidates:
+            return raw
+    return text
+
+
+def normalize_prediction_market(market: str) -> str:
+    normalized = str(market or "final_winner").strip().lower().replace(" ", "_")
+    if normalized in PREDICTION_MARKET_ALIASES:
+        return PREDICTION_MARKET_ALIASES[normalized]
+    raise ValueError(f"Unsupported prediction market: {market}")
+
+
+def _prediction_side(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "over": "over",
+        "greater": "over",
+        "gt": "over",
+        ">": "over",
+        "大": "over",
+        "under": "under",
+        "less": "under",
+        "lt": "under",
+        "<": "under",
+        "小": "under",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    raise ValueError("Total predictions require pick over/under or greater/less.")
+
+
+def _prediction_int(value) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _prediction_innings_total(values: list, innings: int = 5) -> int:
+    return sum(_prediction_int(v) for v in values[:innings])
+
+
+def _prediction_winner_outcome(
+    data: dict, pick: str, *, half: bool = False
+) -> str:
+    if half:
+        away_score = _prediction_innings_total(data.get("away_innings", []), 5)
+        home_score = _prediction_innings_total(data.get("home_innings", []), 5)
+    else:
+        away_score = int(data["客總分"])
+        home_score = int(data["主總分"])
+    if away_score == home_score:
+        return "push"
+
+    away = _prediction_normalize_team(data.get("客隊原名") or data.get("客隊"))
+    home = _prediction_normalize_team(data.get("主隊原名") or data.get("主隊"))
+    winner = away if away_score > home_score else home
+    picked = _prediction_normalize_team(pick)
+    return "win" if picked == winner else "loss"
+
+
+def _prediction_total_outcome(
+    data: dict, pick: str, line: float, *, half: bool = False
+) -> str:
+    if half:
+        total = _prediction_innings_total(data.get("away_innings", []), 5)
+        total += _prediction_innings_total(data.get("home_innings", []), 5)
+    else:
+        total = int(data["客總分"]) + int(data["主總分"])
+
+    line = float(line)
+    if total == line:
+        return "push"
+    side = _prediction_side(pick)
+    if side == "over":
+        return "win" if total > line else "loss"
+    return "win" if total < line else "loss"
+
+
+def prediction_outcome_for_game(
+    data: dict, pick: str, market: str = "final_winner", line: float | None = None
+) -> str:
+    market = normalize_prediction_market(market)
+    if market == "final_winner":
+        return _prediction_winner_outcome(data, pick, half=False)
+    if market == "half_winner":
+        return _prediction_winner_outcome(data, pick, half=True)
+    if market == "final_total":
+        if line is None:
+            raise ValueError("final_total predictions require a line.")
+        return _prediction_total_outcome(data, pick, line, half=False)
+    if market == "half_total":
+        if line is None:
+            raise ValueError("half_total predictions require a line.")
+        return _prediction_total_outcome(data, pick, line, half=True)
+    raise ValueError(f"Unsupported prediction market: {market}")
+
+
+def _post_to_x(text: str, reply_to_tweet_id: str | None = None) -> str:
+    """
+    Create an X/Twitter post through the current X API v2 POST /2/tweets endpoint.
+
+    Supported credentials:
+      - X_USER_ACCESS_TOKEN: OAuth 2.0 user access token with tweet.write scope.
+      - Or OAuth 1.0a: X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN,
+        X_ACCESS_TOKEN_SECRET.
+    """
+    payload = {"text": text}
+    if reply_to_tweet_id:
+        payload["reply"] = {"in_reply_to_tweet_id": str(reply_to_tweet_id)}
+
+    bearer = os.getenv("X_USER_ACCESS_TOKEN")
+    if bearer:
+        response = requests.post(
+            "https://api.x.com/2/tweets",
+            json=payload,
+            headers={"Authorization": f"Bearer {bearer}"},
+            timeout=20,
+        )
+    else:
+        api_key = os.getenv("X_API_KEY") or os.getenv("X_CONSUMER_KEY")
+        api_secret = os.getenv("X_API_SECRET") or os.getenv("X_CONSUMER_SECRET")
+        access_token = os.getenv("X_ACCESS_TOKEN")
+        access_token_secret = os.getenv("X_ACCESS_TOKEN_SECRET")
+        if not all([api_key, api_secret, access_token, access_token_secret]):
+            raise RuntimeError(
+                "Missing X credentials. Set X_USER_ACCESS_TOKEN or OAuth 1.0a "
+                "X_API_KEY/X_API_SECRET/X_ACCESS_TOKEN/X_ACCESS_TOKEN_SECRET. "
+                "X_CONSUMER_KEY/X_CONSUMER_SECRET are also accepted aliases."
+            )
+        from requests_oauthlib import OAuth1Session
+
+        oauth = OAuth1Session(
+            api_key,
+            client_secret=api_secret,
+            resource_owner_key=access_token,
+            resource_owner_secret=access_token_secret,
+        )
+        response = oauth.post("https://api.x.com/2/tweets", json=payload, timeout=20)
+
+    if response.status_code >= 400:
+        raise RuntimeError(f"X post failed: HTTP {response.status_code} {response.text}")
+    data = response.json()
+    return str(data.get("data", {}).get("id", ""))
+
+
+def _prediction_headers() -> list[str]:
+    return [
+        "prediction_id",
+        "game_id",
+        "game_date",
+        "away_team",
+        "home_team",
+        "market",
+        "pick",
+        "line",
+        "rate",
+        "stake",
+        "status",
+        "outcome",
+        "balance_before",
+        "balance_after",
+        "encrypted_post_id",
+        "reveal_post_id",
+        "encrypted_post",
+        "key",
+        "reveal_post",
+        "created_at",
+        "resolved_at",
+    ]
+
+
+def _prediction_sheet():
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    if creds_json:
+        creds = Credentials.from_service_account_info(
+            json.loads(creds_json), scopes=scope
+        )
+    else:
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(PREDICTION_SPREADSHEET_KEY)
+    try:
+        return spreadsheet.worksheet(PREDICTION_SHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        return spreadsheet.get_worksheet(0)
+
+
+def _prediction_rows(sheet, *, ensure_header: bool = True) -> list[list[str]]:
+    rows = sheet.get_all_values()
+    if not rows:
+        if ensure_header:
+            sheet.append_row(_prediction_headers(), value_input_option="USER_ENTERED")
+        return [_prediction_headers()]
+    return rows
+
+
+def _last_prediction_balance(rows: list[list[str]]) -> float:
+    headers = rows[0] if rows else _prediction_headers()
+    try:
+        balance_idx = headers.index("balance_after")
+    except ValueError:
+        return PREDICTION_STARTING_BALANCE
+    for row in reversed(rows[1:]):
+        if len(row) > balance_idx and str(row[balance_idx]).strip():
+            return _prediction_float(row[balance_idx], PREDICTION_STARTING_BALANCE)
+    return PREDICTION_STARTING_BALANCE
+
+
+def _prediction_stats_from_rows(rows: list[list[str]]) -> dict:
+    headers = rows[0] if rows else _prediction_headers()
+    index = {name: idx for idx, name in enumerate(headers)}
+    wins = losses = pushes = 0
+    for row in rows[1:]:
+        row = row + [""] * (len(headers) - len(row))
+        if row[index.get("status", -1)] != "resolved":
+            continue
+        outcome = str(row[index.get("outcome", -1)]).lower()
+        if outcome == "win":
+            wins += 1
+        elif outcome == "loss":
+            losses += 1
+        elif outcome == "push":
+            pushes += 1
+
+    graded = wins + losses
+    win_rate = round((wins / graded) * 100, 1) if graded else 0.0
+    return {
+        "wins": wins,
+        "losses": losses,
+        "pushes": pushes,
+        "graded": graded,
+        "win_rate": win_rate,
+        "balance": _last_prediction_balance(rows),
+    }
+
+
+def _prediction_stats_after(
+    rows: list[list[str]], outcome: str, balance_after: float
+) -> dict:
+    stats = _prediction_stats_from_rows(rows)
+    outcome = str(outcome).lower()
+    if outcome == "win":
+        stats["wins"] += 1
+    elif outcome == "loss":
+        stats["losses"] += 1
+    elif outcome == "push":
+        stats["pushes"] += 1
+    stats["graded"] = stats["wins"] + stats["losses"]
+    stats["win_rate"] = (
+        round((stats["wins"] / stats["graded"]) * 100, 1)
+        if stats["graded"]
+        else 0.0
+    )
+    stats["balance"] = round(float(balance_after), 4)
+    return stats
+
+
+def build_prediction_reveal_post(
+    game_id: str, key: str, outcome: str, stats: dict
+) -> str:
+    record = f"{stats['wins']}-{stats['losses']}-{stats['pushes']}"
+    text = (
+        f"NPB prediction reveal\n"
+        f"Game {game_id}\n"
+        f"Result: {str(outcome).upper()}\n"
+        f"Record: {record} | Win rate: {stats['win_rate']}%\n"
+        f"Balance: {stats['balance']}\n"
+        f"Key: {key}"
+    )
+    if len(text) > 280:
+        raise ValueError("Prediction reveal post is longer than 280 characters.")
+    return text
+
+
+def create_npb_prediction(
+    game_id: str,
+    pick: str,
+    rate: float,
+    *,
+    market: str = "final_winner",
+    line: float | None = None,
+    stake: float = PREDICTION_DEFAULT_STAKE,
+    game_date: str = "",
+    away_team: str = "",
+    home_team: str = "",
+    sheet=None,
+    post: bool = True,
+    dry_run: bool = False,
+) -> dict:
+    sheet = sheet or (None if dry_run else _prediction_sheet())
+    rows = (
+        _prediction_rows(sheet, ensure_header=not dry_run)
+        if sheet
+        else [_prediction_headers()]
+    )
+    balance_before = _last_prediction_balance(rows)
+    prediction_id = secrets.token_hex(8)
+    created_at = _prediction_now()
+    market = normalize_prediction_market(market)
+    posts = build_prediction_posts(
+        game_id,
+        pick,
+        float(rate),
+        float(stake),
+        market=market,
+        line=line,
+        predicted_at=created_at,
+    )
+    encrypted_post_id = ""
+    if post and not dry_run:
+        encrypted_post_id = _post_to_x(posts["encrypted_post"])
+
+    balance_after = calculate_prediction_balance(balance_before, stake, rate, "pending")
+    row = [
+        prediction_id,
+        game_id,
+        game_date,
+        away_team,
+        home_team,
+        market,
+        pick,
+        "" if line is None else float(line),
+        float(rate),
+        float(stake),
+        "pending",
+        "",
+        balance_before,
+        balance_after,
+        encrypted_post_id,
+        "",
+        posts["encrypted"],
+        posts["key"],
+        posts["reveal_post"],
+        created_at,
+        "",
+    ]
+    if not dry_run:
+        sheet.append_row(row, value_input_option="USER_ENTERED")
+    return {
+        "prediction_id": prediction_id,
+        "balance_before": balance_before,
+        "balance_after": balance_after,
+        "encrypted_post_id": encrypted_post_id,
+        **posts,
+    }
+
+
+def resolve_npb_predictions_for_game(
+    game_id: str,
+    data: dict,
+    *,
+    sheet=None,
+    post: bool = True,
+    dry_run: bool = False,
+) -> int:
+    sheet = sheet or _prediction_sheet()
+    rows = _prediction_rows(sheet)
+    headers = rows[0]
+    index = {name: idx for idx, name in enumerate(headers)}
+    required = {
+        "game_id",
+        "market",
+        "pick",
+        "line",
+        "rate",
+        "stake",
+        "status",
+        "outcome",
+        "balance_before",
+        "balance_after",
+        "encrypted_post_id",
+        "reveal_post_id",
+        "reveal_post",
+        "key",
+        "resolved_at",
+    }
+    missing = required - set(index)
+    if missing:
+        raise ValueError(f"{PREDICTION_SHEET_NAME} missing columns: {sorted(missing)}")
+
+    resolved = 0
+    running_balance = _last_prediction_balance(rows)
+    for row_num, row in enumerate(rows[1:], start=2):
+        row = row + [""] * (len(headers) - len(row))
+        if row[index["game_id"]] != str(game_id) or row[index["status"]] != "pending":
+            continue
+
+        market = row[index["market"]] or "final_winner"
+        pick = row[index["pick"]]
+        line = row[index["line"]] or None
+        rate = _prediction_float(row[index["rate"]])
+        stake = _prediction_float(row[index["stake"]], PREDICTION_DEFAULT_STAKE)
+        outcome = prediction_outcome_for_game(data, pick, market=market, line=line)
+        balance_before = running_balance
+        balance_after = calculate_prediction_balance(
+            balance_before, stake, rate, outcome
+        )
+        stats = _prediction_stats_after(rows, outcome, balance_after)
+        reveal_post = build_prediction_reveal_post(
+            game_id,
+            row[index["key"]],
+            outcome,
+            stats,
+        )
+        reveal_post_id = ""
+        if post and not dry_run:
+            reveal_post_id = _post_to_x(
+                reveal_post,
+                reply_to_tweet_id=row[index["encrypted_post_id"]] or None,
+            )
+
+        running_balance = balance_after
+        resolved_at = _prediction_now()
+        if not dry_run:
+            updates = [
+                ("status", "resolved"),
+                ("outcome", outcome),
+                ("balance_before", balance_before),
+                ("balance_after", balance_after),
+                ("reveal_post_id", reveal_post_id),
+                ("reveal_post", reveal_post),
+                ("resolved_at", resolved_at),
+            ]
+            for col_name, value in updates:
+                sheet.update_cell(row_num, index[col_name] + 1, value)
+                row[index[col_name]] = str(value)
+            rows[row_num - 1] = row
+        resolved += 1
+    return resolved
+
+
+async def update_npb_prediction_reveals(
+    session: aiohttp.ClientSession,
+    game_ids: list[str],
+    *,
+    post: bool = True,
+    dry_run: bool = False,
+) -> int:
+    if not game_ids:
+        return 0
+    total = 0
+    sheet = _prediction_sheet()
+    for gid in game_ids:
+        data = await get_schedule_game_data(gid, session, retry=False)
+        if not data:
+            continue
+        total += resolve_npb_predictions_for_game(
+            gid, data, sheet=sheet, post=post, dry_run=dry_run
+        )
+    if total:
+        print(f"[prediction] Revealed {total} prediction(s).")
+    return total
 
 
 # --- Scraping ---
@@ -2994,6 +3635,7 @@ async def run_once(matchup_date: str | None = None):
                 sailu_dates = _sailu_dates_for_game_ids(analysis_game_ids)
             if sailu_dates:
                 huizi_date = sailu_dates[-1]
+            await update_npb_prediction_reveals(session, analysis_game_ids)
         except Exception as e:
             errors.append(f"update_analysis_sheet: {e}")
 
@@ -3031,8 +3673,73 @@ if __name__ == "__main__":
         default=ANALYSIS_SEASON,
         help=f"Season year for analysis repairs. Defaults to {ANALYSIS_SEASON}.",
     )
+    parser.add_argument(
+        "--create-prediction",
+        metavar="GAME_ID",
+        help="Create an NPB prediction commitment for a Yahoo game ID.",
+    )
+    parser.add_argument(
+        "--pick",
+        help="Team for winner markets, or over/under for total markets.",
+    )
+    parser.add_argument(
+        "--market",
+        default="final_winner",
+        choices=["half_winner", "final_winner", "half_total", "final_total"],
+        help="Prediction market. Defaults to final_winner.",
+    )
+    parser.add_argument(
+        "--line",
+        type=float,
+        help="Score line for half_total/final_total predictions.",
+    )
+    parser.add_argument(
+        "--rate",
+        type=float,
+        help="Prediction return rate, e.g. 0.92.",
+    )
+    parser.add_argument(
+        "--stake",
+        type=float,
+        default=PREDICTION_DEFAULT_STAKE,
+        help=f"Stake size for the prediction. Defaults to {PREDICTION_DEFAULT_STAKE}.",
+    )
+    parser.add_argument("--game-date", default="", help="Optional prediction game date.")
+    parser.add_argument("--away-team", default="", help="Optional prediction away team.")
+    parser.add_argument("--home-team", default="", help="Optional prediction home team.")
+    parser.add_argument(
+        "--no-twitter",
+        action="store_true",
+        help="Record the prediction without posting to X/Twitter.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build prediction output without posting or writing to Google Sheets.",
+    )
     args = parser.parse_args()
-    if args.repair_analysis_leagues:
+
+    if args.create_prediction:
+        if not args.pick or args.rate is None:
+            parser.error("--create-prediction requires --pick and --rate")
+        if args.market in {"half_total", "final_total"} and args.line is None:
+            parser.error("--market half_total/final_total requires --line")
+        result = create_npb_prediction(
+            args.create_prediction,
+            args.pick,
+            args.rate,
+            market=args.market,
+            line=args.line,
+            stake=args.stake,
+            game_date=args.game_date,
+            away_team=args.away_team,
+            home_team=args.home_team,
+            post=not args.no_twitter,
+            dry_run=args.dry_run,
+        )
+        print(result["encrypted_post"])
+        print(result["reveal_post"])
+    elif args.repair_analysis_leagues:
         repair_analysis_leagues(args.analysis_year)
     else:
         asyncio.run(run_once(matchup_date=args.matchup_date))

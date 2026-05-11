@@ -123,3 +123,30 @@ python npb.py --matchup-date today
 
 You can also set `NPB_MATCHUP_DATE=today` or pass a date such as
 `--matchup-date 2026-05-10`.
+
+### Prediction Ledger
+
+NPB predictions are recorded in the separate prediction spreadsheet. A pre-game
+command writes a pending row and can publish an encrypted X/Twitter post:
+
+```bash
+python npb.py --create-prediction 2021038658 --market final_winner --pick 巨人 --rate 0.92 --stake 10
+python npb.py --create-prediction 2021038658 --market half_winner --pick 巨人 --rate 0.92 --stake 10
+python npb.py --create-prediction 2021038658 --market half_total --pick over --line 4.5 --rate 0.92 --stake 10
+python npb.py --create-prediction 2021038658 --market final_total --pick under --line 8.5 --rate 0.92 --stake 10
+```
+
+Use `--no-twitter` to record without posting, or `--dry-run` to print the locked
+and reveal posts without writing anything. After the game is scraped as finished,
+the NPB run resolves pending predictions for that game, updates the balance, and
+posts the reveal key with the result, public record, win rate, and current
+balance. The balance starts at `100`; a 10-unit win at rate `0.92` becomes
+`109.2`, while a loss subtracts the stake.
+
+The four supported markets are `half_winner` (winner through 5 innings),
+`final_winner`, `half_total` (combined runs through 5 innings), and
+`final_total`. Total markets require `--line`; equality with the line is a push.
+
+For X posting, set either `X_USER_ACCESS_TOKEN` with tweet write access, or the
+OAuth 1.0a variables `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, and
+`X_ACCESS_TOKEN_SECRET`.
