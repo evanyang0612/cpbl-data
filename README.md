@@ -34,10 +34,10 @@ Scrapes [cpbl.com.tw](https://www.cpbl.com.tw) for regular season (`A`) and pres
 ### Worksheets
 
 | Kind Code | Worksheet  | Description     |
-|-----------|------------|-----------------|
-| `A`       | 賽程        | Regular season  |
-| `G`       | 熱身賽賽程   | Preseason       |
-| —         | 彙資        | Today's summary |
+| --------- | ---------- | --------------- |
+| `A`       | 賽程       | Regular season  |
+| `G`       | 熱身賽賽程 | Preseason       |
+| —         | 彙資       | Today's summary |
 
 ### Scheduler
 
@@ -68,10 +68,10 @@ Scrapes [baseball.yahoo.co.jp](https://baseball.yahoo.co.jp/npb/) for the last 1
 
 ### Worksheets
 
-| League | Worksheet  |
-|--------|------------|
-| 央盟    | 近十場a    |
-| 洋盟    | 近十場b    |
+| League | Worksheet |
+| ------ | --------- |
+| 央盟   | 近十場a   |
+| 洋盟   | 近十場b   |
 
 ### Scheduler
 
@@ -81,24 +81,24 @@ Runs every 30 minutes between **08:00–14:00 UTC** (17:00–23:00 JST), coverin
 
 ## GitHub Secrets
 
-| Secret                  | Used by        | Description                              |
-|-------------------------|----------------|------------------------------------------|
-| `GOOGLE_CREDENTIALS`    | CPBL, NPB      | Google service account JSON (full body)  |
-| `SPREADSHEET_KEY`       | CPBL           | Google Sheets spreadsheet ID for CPBL    |
-| `NORDVPN_TOKEN`         | CPBL           | NordVPN token for WireGuard tunnel       |
-| `TELEGRAM_BOT_TOKEN`    | CPBL, NPB      | Telegram bot token for failure alerts    |
-| `TELEGRAM_CHAT_ID`      | CPBL, NPB      | Telegram chat ID for failure alerts      |
+| Secret               | Used by   | Description                             |
+| -------------------- | --------- | --------------------------------------- |
+| `GOOGLE_CREDENTIALS` | CPBL, NPB | Google service account JSON (full body) |
+| `SPREADSHEET_KEY`    | CPBL      | Google Sheets spreadsheet ID for CPBL   |
+| `NORDVPN_TOKEN`      | CPBL      | NordVPN token for WireGuard tunnel      |
+| `TELEGRAM_BOT_TOKEN` | CPBL, NPB | Telegram bot token for failure alerts   |
+| `TELEGRAM_CHAT_ID`   | CPBL, NPB | Telegram chat ID for failure alerts     |
 
 ## GitHub Variables
 
 Optional repository variables used by `.github/workflows/cpbl_scheduler.yml`:
 
-| Variable                    | Default | Description |
-|----------------------------|---------|-------------|
-| `NORDVPN_COUNTRY_ID`       | `108`   | Country filter for the fallback Nord recommendation query |
-| `NORDVPN_STATION_ALLOWLIST`| —       | Comma-separated Nord `station` IPs to prefer before fallback |
-| `NORDVPN_STATION_PREFIX_ALLOWLIST` | — | Comma-separated IP prefixes to prefer before fallback, for example `94.156.205.` |
-| `NORDVPN_HOSTNAME_ALLOWLIST` | —     | Comma-separated Nord hostnames to prefer before fallback |
+| Variable                           | Default | Description                                                                      |
+| ---------------------------------- | ------- | -------------------------------------------------------------------------------- |
+| `NORDVPN_COUNTRY_ID`               | `108`   | Country filter for the fallback Nord recommendation query                        |
+| `NORDVPN_STATION_ALLOWLIST`        | —       | Comma-separated Nord `station` IPs to prefer before fallback                     |
+| `NORDVPN_STATION_PREFIX_ALLOWLIST` | —       | Comma-separated IP prefixes to prefer before fallback, for example `94.156.205.` |
+| `NORDVPN_HOSTNAME_ALLOWLIST`       | —       | Comma-separated Nord hostnames to prefer before fallback                         |
 
 ## Local Development
 
@@ -127,28 +127,55 @@ You can also set `NPB_MATCHUP_DATE=today` or pass a date such as
 ### Prediction Ledger
 
 NPB predictions are recorded in the separate prediction spreadsheet. A pre-game
-command writes a pending row and can publish a SHA-256 commitment to X/Twitter:
+command writes a pending row with a SHA-256 commitment:
 
 ```bash
-python npb.py --create-prediction 2021038658 --market final_winner --pick 巨人 --rate 0.92 --stake 10
-python npb.py --create-prediction 2021038658 --market half_winner --pick 巨人 --rate 0.92 --stake 10
-python npb.py --create-prediction 2021038658 --market half_total --pick over --line 4.5 --rate 0.92 --stake 10
-python npb.py --create-prediction 2021038658 --market final_total --pick under --line 8.5 --rate 0.92 --stake 10
+python npb.py --create-prediction 巨人 --market final_winner --pick 巨人 --rate 0.92 --stake 10
+python npb.py --create-prediction 巨人 --market half_winner --pick 巨人 --rate 0.92 --stake 10
+python npb.py --create-prediction 巨人 --market half_total --pick over --line 4.5 --rate 0.92 --stake 10
+python npb.py --create-prediction 巨人 --market final_total --pick under --line 8.5 --rate 0.92 --stake 10
 ```
 
-Use `--no-twitter` to record without posting, or `--dry-run` to print the locked
-and reveal posts without writing anything. The pre-game post contains only the
-SHA-256 hash. After the game is scraped as finished, the NPB run resolves pending
-predictions for that game, updates the balance, and posts the exact reveal text
-with the result, public record, win rate, and current balance. Followers can paste
-that reveal text into any SHA-256 verifier and compare it with the pre-game hash.
-The balance starts at `100`; a 10-unit win at rate `0.92` becomes `109.2`, while
-a loss subtracts the stake.
+Short flags are also supported:
+
+```bash
+python npb.py --predict 巨人 -p 巨人 -r 0.92
+python npb.py --predict 巨人 -m half_total -p over -l 4.5 -r 0.92
+```
+
+The positional value is the home team name, not a game ID. Valid home teams are:
+`巨人`, `ヤクルト`, `DeNA`, `中日`, `阪神`, `広島`, `西武`, `日本ハム`,
+`ロッテ`, `オリックス`, `ソフトバンク`, `楽天`. The command only looks at
+today's and tomorrow's unstarted games, resolves the game ID, then prints the
+date, matchup, and starters for validation before recording.
+
+For prompted input, omit the game ID:
+
+```bash
+python npb.py --predict
+```
+
+It will list valid home team options, then ask for `Home team`, `Market`,
+`Pick`, `Line` when needed, `Rate`, `Stake`, and optional game metadata one by
+one. Press Enter to accept defaults such as `final_winner` for market and
+`10.0` for stake.
+
+For the shortest daily command, add an alias:
+
+```bash
+alias npbp='cd /Users/evansmac/cpbl && uv run python npb.py --predict'
+npbp
+```
+
+Use `--dry-run` to print the locked and reveal text without writing anything.
+After the game is scraped as finished, the NPB run resolves pending predictions
+for that game, updates the balance, and stores the reveal text with the result,
+public record, win rate, and current balance in the prediction sheet. The reveal
+text can be pasted into any SHA-256 verifier and compared with the pre-game hash.
+An empty prediction sheet starts at `0`; existing sheets continue from the last
+non-empty `balance_after`. A 10-unit win at rate `0.92` from zero becomes `9.2`,
+while a loss subtracts the stake.
 
 The four supported markets are `half_winner` (winner through 5 innings),
 `final_winner`, `half_total` (combined runs through 5 innings), and
 `final_total`. Total markets require `--line`; equality with the line is a push.
-
-For X posting, set either `X_USER_ACCESS_TOKEN` with tweet write access, or the
-OAuth 1.0a variables `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, and
-`X_ACCESS_TOKEN_SECRET`.

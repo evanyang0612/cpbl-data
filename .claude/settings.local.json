@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__google-sheets__list_spreadsheets",
+      "mcp__google-sheets__list_sheets",
+      "mcp__google-sheets__get_multiple_sheet_data",
+      "Bash(ls:*)",
+      "Bash(.venv/bin/python -m pytest test_cpbl.py test_npb.py -v 2>&1)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(.venv/bin/python -m pytest test_cpbl.py test_npb.py -v)",
+      "Bash(python3 -m pip install pytest -q)",
+      "Bash(python3 -m pytest test_cpbl.py test_npb.py -v)",
+      "Bash(python3 -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(pip3 install:*)",
+      "Bash(python3.11 -m ensurepip --upgrade)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.11/bin/pip3 install:*)",
+      "Bash(uv add:*)",
+      "Bash(uv run:*)",
+      "Bash(python:*)",
+      "Bash(echo \"EXIT:$?\")",
+      "mcp__google-sheets__get_sheet_data",
+      "mcp__google-sheets__get_sheet_formulas",
+      "Bash(python3:*)",
+      "Bash(crontab -l)",
+      "Bash(crontab -)",
+      "Bash(grep -n \"async def main\\\\|def main\\\\|asyncio.run\\\\|update_sailu\\\\|update_schedule\\\\|update_record\\\\|new_ids\\\\|if not new_ids\\\\|early.exit\\\\|return$\" /Users/evansmac/cpbl/npb.py)"
+    ]
+  }
+}

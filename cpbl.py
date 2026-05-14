@@ -1,13 +1,14 @@
 import json
 import os
+import sys
 import requests
 from bs4 import BeautifulSoup
 import gspread
-from google.oauth2.service_account import Credentials
-import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
+from baseball.cpbl_services import CpblHuiziService, CpblScheduleService
+from baseball.sheets import GoogleSheetsClient
 from utils import send_telegram
 
 from dotenv import load_dotenv
@@ -16,6 +17,7 @@ load_dotenv(dotenv_path="/Users/evansmac/cpbl/.env")
 # --- Configuration ---
 SPREADSHEET_KEY = os.getenv("SPREADSHEET_KEY")
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
+_sheets_client = GoogleSheetsClient(credentials_file=CREDENTIALS_FILE)
 # KindCode: A = 正式賽, G = 熱身賽
 WORKSHEET_MAP = {
     "A": "賽程",
@@ -74,31 +76,12 @@ def get_session():
 
 
 def get_worksheet(kind_code):
-    scope = ["https://www.googleapis.com/auth/spreadsheets"]
-    # 優先使用環境變數（GitHub Actions），否則使用本地憑證檔
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
-    if creds_json:
-        creds = Credentials.from_service_account_info(
-            json.loads(creds_json), scopes=scope
-        )
-    else:
-        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
-    client = gspread.authorize(creds)
     worksheet_name = WORKSHEET_MAP.get(kind_code, "賽程")
-    return client.open_by_key(SPREADSHEET_KEY).worksheet(worksheet_name)
+    return _sheets_client.worksheet(SPREADSHEET_KEY, worksheet_name)
 
 
 def get_spreadsheet():
-    scope = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
-    if creds_json:
-        creds = Credentials.from_service_account_info(
-            json.loads(creds_json), scopes=scope
-        )
-    else:
-        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
-    client = gspread.authorize(creds)
-    return client.open_by_key(SPREADSHEET_KEY)
+    return _sheets_client.spreadsheet(SPREADSHEET_KEY)
 
 
 def get_status_worksheet():
@@ -556,16 +539,7 @@ def update_huizi(year: str = None):
     today_str = effective_now.strftime("%Y-%m-%d")
     print(f"Updating 彙資 for {today_str}...")
 
-    scope = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
-    if creds_json:
-        creds = Credentials.from_service_account_info(
-            json.loads(creds_json), scopes=scope
-        )
-    else:
-        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
-    client = gspread.authorize(creds)
-    spreadsheet = client.open_by_key(SPREADSHEET_KEY)
+    spreadsheet = get_spreadsheet()
     huizi = spreadsheet.worksheet("彙資")
 
     # Collect today's games from 賽程 then 熱身賽賽程
@@ -608,175 +582,9 @@ def run_once(year: str = None, kind_codes=None):
         year: 賽季年份，預設為今年
         kind_codes: 要監控的賽事種類列表，預設 ["A", "G"]（正式賽 + 熱身賽）
     """
-    # 比賽常會跑到凌晨，凌晨 6 點前都算前一天的比賽日
-    now = datetime.now() - timedelta(hours=6)
-    if year is None:
-        year = str(now.year)
-    if kind_codes is None:
-        kind_codes = ["A", "G"]
-
-    current_month = str(now.month)
-    today_str = now.strftime("%Y-%m-%d")
-    errors = []
-    updated_any_kind = False
-    print(
-        f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Run started (year={year}, kind_codes={kind_codes})"
+    return CpblScheduleService(module=sys.modules[__name__]).run_once(
+        year=year, kind_codes=kind_codes
     )
-
-    for kind_code in kind_codes:
-        sheet = get_worksheet(kind_code)
-        status_sheet = get_status_worksheet()
-
-        if _all_games_resolved_for_date(status_sheet, today_str, kind_code):
-            print(f"[{kind_code}] {today_str} already resolved. Skipping CPBL fetch.")
-            continue
-
-        # 一次性讀取已記錄的場次編號
-        col_b_cache = sheet.col_values(2)
-        col_c_cache = sheet.col_values(3)
-        existing_snos = {
-            str(sno)
-            for sno, date_val in zip(col_b_cache, col_c_cache)
-            if sno and str(year) in str(date_val)
-        }
-
-        unresolved_snos = _unresolved_game_snos_for_date(
-            status_sheet, today_str, kind_code
-        )
-        candidates = [
-            {"GameSno": game_sno, "GameDate": today_str}
-            for game_sno in unresolved_snos
-        ]
-
-        if not candidates:
-            session = get_session()
-            try:
-                games = fetch_schedule(year, current_month, kind_code, session)
-            except Exception as e:
-                errors.append(f"fetch_schedule({kind_code}): {e}")
-                continue
-
-            # 第一次看到今天賽程時，先建立 expected list。之後 cron 可直接讀狀態表。
-            today_games = [
-                game for game in games if _game_date_str(game) == today_str
-            ]
-            if not today_games:
-                _upsert_status(
-                    status_sheet,
-                    today_str,
-                    kind_code,
-                    NO_GAMES_SENTINEL,
-                    "無賽事",
-                    True,
-                )
-                print(f"[{kind_code}] No games scheduled for {today_str}.")
-                continue
-
-            for game in today_games:
-                game_sno = str(game.get("GameSno"))
-                if not game_sno:
-                    continue
-                schedule_status = game.get("GameStatusChi", "")
-                resolved = game_sno in existing_snos or is_non_finished_terminal_status(
-                    schedule_status
-                )
-                if game_sno in existing_snos and not schedule_status:
-                    schedule_status = "比賽結束"
-                _upsert_status(
-                    status_sheet,
-                    today_str,
-                    kind_code,
-                    game_sno,
-                    schedule_status,
-                    resolved,
-                )
-
-            candidates = []
-            for game in today_games:
-                game_sno = str(game.get("GameSno"))
-                if not game_sno or game_sno in existing_snos:
-                    continue
-                if is_non_finished_terminal_status(game.get("GameStatusChi", "")):
-                    continue
-                candidates.append(game)
-        else:
-            session = get_session()
-
-        print(f"[{kind_code}] {len(candidates)} unresolved game(s) to check.")
-
-        # 只對候選場次發 HTTP 請求
-        for game in candidates:
-            game_sno = str(game.get("GameSno"))
-            game_date_str = _game_date_str(game) or today_str
-            if game_sno in existing_snos:
-                _upsert_status(
-                    status_sheet,
-                    game_date_str,
-                    kind_code,
-                    game_sno,
-                    "比賽結束",
-                    True,
-                )
-                continue
-
-            print(f"Processing GameSno {game_sno} ({kind_code})...")
-            try:
-                data = fetch_game_data(game_sno, year, kind_code, session)
-                if not data:
-                    continue
-                game_detail = _extract_game_detail(data, game_sno)
-                status = game_detail.get("GameStatusChi", "") if game_detail else ""
-                if status and status != "比賽結束":
-                    _upsert_status(
-                        status_sheet,
-                        game_date_str,
-                        kind_code,
-                        game_sno,
-                        status,
-                        is_terminal_game_status(status),
-                    )
-                    if is_terminal_game_status(status):
-                        print(f"Game {game_sno} terminal status: {status}.")
-                    else:
-                        print(f"Game {game_sno} still unresolved: {status}.")
-                    continue
-                written = process_and_update_sheet(
-                    data, game_sno, year, kind_code, session, sheet
-                )
-                if written:
-                    existing_snos.add(game_sno)
-                    _upsert_status(
-                        status_sheet,
-                        game_date_str,
-                        kind_code,
-                        game_sno,
-                        "比賽結束",
-                        True,
-                    )
-            except Exception as e:
-                errors.append(f"game {game_sno} ({kind_code}): {e}")
-                continue
-
-            time.sleep(2)  # 避免打 API 太快
-
-        if _all_games_resolved_for_date(status_sheet, today_str, kind_code):
-            updated_any_kind = True
-
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Run finished.")
-
-    if updated_any_kind:
-        try:
-            update_huizi(year=year)
-        except Exception as e:
-            errors.append(f"update_huizi: {e}")
-    else:
-        print("No newly resolved CPBL game day. Skipping 彙資 update.")
-
-    if errors:
-        print(f"\n[ERROR] {len(errors)} failure(s) occurred:")
-        for err in errors:
-            print(f"  - {err}")
-        raise RuntimeError("; ".join(errors))
 
 
 def main(game_sno: str, year: str, kind_code="A"):
@@ -801,7 +609,7 @@ def main(game_sno: str, year: str, kind_code="A"):
 if __name__ == "__main__":
     # GitHub Actions cron 觸發時執行此入口
     try:
-        run_once(kind_codes=["A"])
+        CpblScheduleService(module=sys.modules[__name__]).run_once(kind_codes=["A"])
         send_telegram("CPBL schedule update completed successfully.")
     except Exception as e:
         send_telegram(f"CPBL schedule update failed: {e}")

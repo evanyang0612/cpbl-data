@@ -15,15 +15,23 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import gspread
-import requests
-from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
+
+from baseball.npb_services import (
+    NpbAnalysisService,
+    NpbHuiziService,
+    NpbPredictionService,
+    NpbSailuService,
+    NpbUpdateService,
+)
+from baseball.sheets import GoogleSheetsClient
 
 load_dotenv()
 
 # --- Configuration ---
 NPB_SPREADSHEET_KEY = "1XBATQ-ZQVE7saISTw_EYEXg3qFFAn5aeLDPdGI1_8Rg"
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
+_sheets_client = GoogleSheetsClient(credentials_file=CREDENTIALS_FILE)
 
 BASE_URL = "https://baseball.yahoo.co.jp/npb/"
 NPB_OFFICIAL_BASE_URL = "https://npb.jp"
@@ -133,9 +141,10 @@ HUIZI_SHEET_NAME = "彙資"
 PREDICTION_SHEET_NAME = "預測紀錄"
 PREDICTION_SPREADSHEET_KEY = "1-L5RvjhN3OFiXfrDUVxBa8W0EqYIaLQtxizSi-yP8b0"
 ANALYSIS_SEASON = 2026
-PREDICTION_STARTING_BALANCE = 100.0
+PREDICTION_STARTING_BALANCE = 0.0
 PREDICTION_DEFAULT_STAKE = 10.0
 PREDICTION_SALT_BYTES = 18
+PREDICTION_PROMPT_SENTINEL = "__prompt_prediction__"
 PREDICTION_MARKET_ALIASES = {
     "half": "half_winner",
     "half-winner": "half_winner",
@@ -303,16 +312,7 @@ def col_to_letter(col: int) -> str:
 
 
 def get_worksheet(sheet_name: str, spreadsheet_key: str = NPB_SPREADSHEET_KEY):
-    scope = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
-    if creds_json:
-        creds = Credentials.from_service_account_info(
-            json.loads(creds_json), scopes=scope
-        )
-    else:
-        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
-    client = gspread.authorize(creds)
-    return client.open_by_key(spreadsheet_key).worksheet(sheet_name)
+    return _sheets_client.worksheet(spreadsheet_key, sheet_name)
 
 
 def is_exhibition_game_id(game_id: str) -> bool:
@@ -444,6 +444,24 @@ def _prediction_normalize_team(value: str) -> str:
     return text
 
 
+def _prediction_team_options() -> str:
+    return ", ".join(NPB_TEAMS.keys())
+
+
+def validate_prediction_home_team(value: str) -> str:
+    team = _prediction_normalize_team(value)
+    if team in NPB_TEAMS:
+        return team
+    raise ValueError(f"Home team must be one of: {_prediction_team_options()}.")
+
+
+def _prediction_display_team(value: str) -> str:
+    team = _prediction_normalize_team(value)
+    if team in NPB_TEAMS:
+        return f"{team} ({NPB_TEAMS[team]['name']})"
+    return str(value or "")
+
+
 def normalize_prediction_market(market: str) -> str:
     normalized = str(market or "final_winner").strip().lower().replace(" ", "_")
     if normalized in PREDICTION_MARKET_ALIASES:
@@ -468,6 +486,19 @@ def _prediction_side(value: str) -> str:
     if normalized in aliases:
         return aliases[normalized]
     raise ValueError("Total predictions require pick over/under or greater/less.")
+
+
+def validate_prediction_pick(pick: str, market: str) -> str:
+    market = normalize_prediction_market(market)
+    if market in {"final_total", "half_total"}:
+        return _prediction_side(pick)
+
+    team = _prediction_normalize_team(pick)
+    if team in NPB_TEAMS:
+        return team
+    raise ValueError(
+        f"Winner predictions require a valid NPB team: {_prediction_team_options()}."
+    )
 
 
 def _prediction_int(value) -> int:
@@ -537,54 +568,6 @@ def prediction_outcome_for_game(
     raise ValueError(f"Unsupported prediction market: {market}")
 
 
-def _post_to_x(text: str, reply_to_tweet_id: str | None = None) -> str:
-    """
-    Create an X/Twitter post through the current X API v2 POST /2/tweets endpoint.
-
-    Supported credentials:
-      - X_USER_ACCESS_TOKEN: OAuth 2.0 user access token with tweet.write scope.
-      - Or OAuth 1.0a: X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN,
-        X_ACCESS_TOKEN_SECRET.
-    """
-    payload = {"text": text}
-    if reply_to_tweet_id:
-        payload["reply"] = {"in_reply_to_tweet_id": str(reply_to_tweet_id)}
-
-    bearer = os.getenv("X_USER_ACCESS_TOKEN")
-    if bearer:
-        response = requests.post(
-            "https://api.x.com/2/tweets",
-            json=payload,
-            headers={"Authorization": f"Bearer {bearer}"},
-            timeout=20,
-        )
-    else:
-        api_key = os.getenv("X_API_KEY") or os.getenv("X_CONSUMER_KEY")
-        api_secret = os.getenv("X_API_SECRET") or os.getenv("X_CONSUMER_SECRET")
-        access_token = os.getenv("X_ACCESS_TOKEN")
-        access_token_secret = os.getenv("X_ACCESS_TOKEN_SECRET")
-        if not all([api_key, api_secret, access_token, access_token_secret]):
-            raise RuntimeError(
-                "Missing X credentials. Set X_USER_ACCESS_TOKEN or OAuth 1.0a "
-                "X_API_KEY/X_API_SECRET/X_ACCESS_TOKEN/X_ACCESS_TOKEN_SECRET. "
-                "X_CONSUMER_KEY/X_CONSUMER_SECRET are also accepted aliases."
-            )
-        from requests_oauthlib import OAuth1Session
-
-        oauth = OAuth1Session(
-            api_key,
-            client_secret=api_secret,
-            resource_owner_key=access_token,
-            resource_owner_secret=access_token_secret,
-        )
-        response = oauth.post("https://api.x.com/2/tweets", json=payload, timeout=20)
-
-    if response.status_code >= 400:
-        raise RuntimeError(f"X post failed: HTTP {response.status_code} {response.text}")
-    data = response.json()
-    return str(data.get("data", {}).get("id", ""))
-
-
 def _prediction_headers() -> list[str]:
     return [
         "prediction_id",
@@ -611,17 +594,14 @@ def _prediction_headers() -> list[str]:
     ]
 
 
+def _prediction_has_header(row: list[str]) -> bool:
+    headers = _prediction_headers()
+    normalized = [str(value).strip() for value in row]
+    return all(header in normalized for header in headers)
+
+
 def _prediction_sheet():
-    scope = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
-    if creds_json:
-        creds = Credentials.from_service_account_info(
-            json.loads(creds_json), scopes=scope
-        )
-    else:
-        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
-    client = gspread.authorize(creds)
-    spreadsheet = client.open_by_key(PREDICTION_SPREADSHEET_KEY)
+    spreadsheet = _sheets_client.spreadsheet(PREDICTION_SPREADSHEET_KEY)
     try:
         return spreadsheet.worksheet(PREDICTION_SHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
@@ -630,10 +610,15 @@ def _prediction_sheet():
 
 def _prediction_rows(sheet, *, ensure_header: bool = True) -> list[list[str]]:
     rows = sheet.get_all_values()
+    headers = _prediction_headers()
     if not rows:
         if ensure_header:
-            sheet.append_row(_prediction_headers(), value_input_option="USER_ENTERED")
-        return [_prediction_headers()]
+            sheet.append_row(headers, value_input_option="USER_ENTERED")
+        return [headers]
+    if not _prediction_has_header(rows[0]):
+        if ensure_header:
+            sheet.insert_row(headers, index=1, value_input_option="USER_ENTERED")
+        return [headers] + rows
     return rows
 
 
@@ -647,6 +632,32 @@ def _last_prediction_balance(rows: list[list[str]]) -> float:
         if len(row) > balance_idx and str(row[balance_idx]).strip():
             return _prediction_float(row[balance_idx], PREDICTION_STARTING_BALANCE)
     return PREDICTION_STARTING_BALANCE
+
+
+def _prediction_balance_before_formula(headers: list[str], row_num: int):
+    if row_num <= 2:
+        return PREDICTION_STARTING_BALANCE
+    balance_after_col = col_to_letter(headers.index("balance_after") + 1)
+    return f"={balance_after_col}{row_num - 1}"
+
+
+def _prediction_balance_after_formula(headers: list[str], row_num: int) -> str:
+    outcome_col = col_to_letter(headers.index("outcome") + 1)
+    rate_col = col_to_letter(headers.index("rate") + 1)
+    stake_col = col_to_letter(headers.index("stake") + 1)
+    status_col = col_to_letter(headers.index("status") + 1)
+    balance_before_col = col_to_letter(headers.index("balance_before") + 1)
+    outcome_ref = f"{outcome_col}{row_num}"
+    rate_ref = f"{rate_col}{row_num}"
+    stake_ref = f"{stake_col}{row_num}"
+    status_ref = f"{status_col}{row_num}"
+    before_ref = f"{balance_before_col}{row_num}"
+    return (
+        f'=IF({outcome_ref}="win",{before_ref}+{stake_ref}*{rate_ref},'
+        f'IF({outcome_ref}="loss",{before_ref}-{stake_ref},'
+        f'IF(OR({outcome_ref}="push",{outcome_ref}="void",'
+        f'{status_ref}="pending",{outcome_ref}=""),{before_ref},{before_ref})))'
+    )
 
 
 def _prediction_stats_from_rows(rows: list[list[str]]) -> dict:
@@ -728,64 +739,266 @@ def create_npb_prediction(
     away_team: str = "",
     home_team: str = "",
     sheet=None,
-    post: bool = True,
+    post: bool = False,
     dry_run: bool = False,
 ) -> dict:
-    sheet = sheet or (None if dry_run else _prediction_sheet())
-    rows = (
-        _prediction_rows(sheet, ensure_header=not dry_run)
-        if sheet
-        else [_prediction_headers()]
-    )
-    balance_before = _last_prediction_balance(rows)
-    prediction_id = secrets.token_hex(8)
-    created_at = _prediction_now()
-    market = normalize_prediction_market(market)
-    posts = build_prediction_posts(
+    return NpbPredictionService(module=sys.modules[__name__]).create_prediction(
         game_id,
         pick,
-        float(rate),
-        float(stake),
+        rate,
         market=market,
         line=line,
-        predicted_at=created_at,
+        stake=stake,
+        game_date=game_date,
+        away_team=away_team,
+        home_team=home_team,
+        sheet=sheet,
+        post=post,
+        dry_run=dry_run,
     )
-    commitment_post_id = ""
-    if post and not dry_run:
-        commitment_post_id = _post_to_x(posts["commitment_post"])
 
-    balance_after = calculate_prediction_balance(balance_before, stake, rate, "pending")
-    row = [
-        prediction_id,
-        game_id,
-        game_date,
-        away_team,
-        home_team,
-        market,
-        pick,
-        "" if line is None else float(line),
-        float(rate),
-        float(stake),
-        "pending",
-        "",
-        balance_before,
-        balance_after,
-        commitment_post_id,
-        "",
-        posts["commitment_hash"],
-        posts["salt"],
-        posts["reveal_post"],
-        created_at,
-        "",
-    ]
-    if not dry_run:
-        sheet.append_row(row, value_input_option="USER_ENTERED")
+
+def _prompt_text(label: str, *, default: str = "", required: bool = True) -> str:
+    suffix = f" [{default}]" if default != "" else ""
+    while True:
+        value = input(f"{label}{suffix}: ").strip()
+        if value:
+            return value
+        if default != "":
+            return default
+        if not required:
+            return ""
+        print(f"{label} is required.")
+
+
+def _prompt_float(label: str, *, default: float | None = None) -> float:
+    suffix = f" [{default}]" if default is not None else ""
+    while True:
+        value = input(f"{label}{suffix}: ").strip()
+        if not value and default is not None:
+            return float(default)
+        try:
+            return float(value)
+        except ValueError:
+            print(f"{label} must be a number.")
+
+
+def _prompt_market(default: str = "final_winner") -> str:
+    options = ["final_winner", "half_winner", "final_total", "half_total"]
+    print("Market options:")
+    for idx, market in enumerate(options, start=1):
+        print(f"  {idx}. {market}")
+    while True:
+        value = _prompt_text("Market", default=default)
+        if value.isdigit() and 1 <= int(value) <= len(options):
+            return options[int(value) - 1]
+        try:
+            return normalize_prediction_market(value)
+        except ValueError as exc:
+            print(exc)
+
+
+def _prompt_pick(market: str, *, default: str = "") -> str:
+    while True:
+        value = _prompt_text(
+            "Pick (team for winner, over/under for total)",
+            default=default,
+        )
+        try:
+            return validate_prediction_pick(value, market)
+        except ValueError as exc:
+            print(exc)
+
+
+def _prompt_home_team(default: str = "") -> str:
+    print(f"Home team options: {_prediction_team_options()}")
+    while True:
+        value = _prompt_text("Home team", default=default)
+        try:
+            return validate_prediction_home_team(value)
+        except ValueError as exc:
+            print(exc)
+
+
+def _prediction_status_allows_predict(text: str) -> bool:
+    status = str(text or "").strip()
+    if not status:
+        return False
+    blocked = ("試合終了", "中止", "ノーゲーム", "延期", "試合中")
+    if any(word in status for word in blocked):
+        return False
+    if re.search(r"\d+\s*回[表裏]", status):
+        return False
+    return True
+
+
+def _prediction_starter_from_status(text: str) -> str:
+    match = re.search(r"先発\s*[:：]\s*([^,\s　/／]+)", str(text or ""))
+    return match.group(1).strip() if match else ""
+
+
+def _prediction_parse_game_context(
+    game_id: str,
+    game_date: str,
+    html: str,
+) -> dict:
+    soup = bs(html, "html.parser")
+    teams = [el.get_text(" ", strip=True) for el in soup.find_all(class_="bb-gameScoreTable__team")]
+    away_team = _prediction_normalize_team(teams[0]) if len(teams) >= 1 else ""
+    home_team = _prediction_normalize_team(teams[1]) if len(teams) >= 2 else ""
+
+    starters = []
+    for score_tbl in soup.find_all(class_="bb-scoreTable")[:2]:
+        row = score_tbl.find(class_="bb-scoreTable__row")
+        player_el = row.find(class_="bb-scoreTable__data--player") if row else None
+        starters.append(player_el.get_text(" ", strip=True) if player_el else "")
+    while len(starters) < 2:
+        starters.append("")
+
     return {
-        "prediction_id": prediction_id,
-        "balance_before": balance_before,
-        "balance_after": balance_after,
-        "commitment_post_id": commitment_post_id,
-        **posts,
+        "game_id": str(game_id),
+        "game_date": game_date,
+        "away_team": away_team,
+        "home_team": home_team,
+        "away_starter": starters[0],
+        "home_starter": starters[1],
+    }
+
+
+def _prediction_print_game_context(context: dict) -> None:
+    print("Prediction game:")
+    print(f"  Date: {context.get('game_date', '')}")
+    print(f"  Game ID: {context.get('game_id', '')}")
+    print(f"  Away: {_prediction_display_team(context.get('away_team', ''))}")
+    print(f"  Home: {_prediction_display_team(context.get('home_team', ''))}")
+    print(f"  Away starter: {context.get('away_starter') or 'unknown'}")
+    print(f"  Home starter: {context.get('home_starter') or 'unknown'}")
+
+
+async def resolve_prediction_game_by_home_team(
+    home_team: str,
+    session: aiohttp.ClientSession,
+    *,
+    today: date | None = None,
+) -> dict:
+    home_key = _prediction_normalize_team(home_team)
+    if home_key not in NPB_TEAMS:
+        raise ValueError(f"Unknown home team: {home_team}")
+
+    start = today or datetime.now().date()
+    end = start + timedelta(days=1)
+    time_keys = {
+        start.strftime("%Y-%m"),
+        end.strftime("%Y-%m"),
+    }
+    candidates: list[tuple[date, str, str]] = []
+
+    for time_key in sorted(time_keys):
+        html = await _fetch(
+            session, f"{BASE_URL}teams/{NPB_TEAMS[home_key]['id']}/schedule?month={time_key}"
+        )
+        if not html:
+            continue
+        soup = bs(html, "html.parser")
+        month_base = datetime.strptime(f"{time_key}-01", "%Y-%m-%d").date()
+        for data in soup.find_all(class_="bb-calendarTable__data"):
+            date_el = data.find(class_="bb-calendarTable__date")
+            status = data.find(class_="bb-calendarTable__status")
+            if not date_el or not status:
+                continue
+            try:
+                game_date = month_base.replace(day=int(date_el.get_text(strip=True)))
+            except (TypeError, ValueError):
+                continue
+            if game_date < start or game_date > end:
+                continue
+            status_text = status.get_text(" ", strip=True)
+            if not _prediction_status_allows_predict(status_text):
+                continue
+            href = status.get("href") or ""
+            match = re.search(r"npb/game/([^/]+)", href)
+            if match:
+                candidates.append((game_date, match.group(1), status_text))
+
+    for game_date, game_id, status_text in sorted(candidates):
+        for path in ("stats", "top"):
+            html = await _fetch(session, f"{BASE_URL}game/{game_id}/{path}")
+            if not html:
+                continue
+            context = _prediction_parse_game_context(
+                game_id, game_date.strftime("%Y-%m-%d"), html
+            )
+            if context["home_team"] == home_key:
+                context["home_starter"] = context[
+                    "home_starter"
+                ] or _prediction_starter_from_status(status_text)
+                return context
+
+    raise ValueError(
+        f"No unstarted today/tomorrow game found with {home_key} as home team."
+    )
+
+
+async def _prediction_resolve_cli_game(values: dict, *, confirm: bool = False) -> dict:
+    async with aiohttp.ClientSession() as session:
+        context = await resolve_prediction_game_by_home_team(
+            values["home_team_lookup"], session
+        )
+    _prediction_print_game_context(context)
+    if confirm:
+        answer = input("Use this game? [Y/n]: ").strip().lower()
+        if answer in {"n", "no", "不要", "否"}:
+            raise ValueError("Prediction cancelled.")
+
+    values = dict(values)
+    values["game_id"] = context["game_id"]
+    values["game_date"] = values["game_date"] or context["game_date"]
+    values["away_team"] = values["away_team"] or context["away_team"]
+    values["home_team"] = values["home_team"] or context["home_team"]
+    return values
+
+
+def _prediction_cli_values(args) -> dict:
+    interactive = args.create_prediction == PREDICTION_PROMPT_SENTINEL
+    home_team_lookup = (
+        _prompt_home_team()
+        if interactive
+        else validate_prediction_home_team(args.create_prediction or "")
+    )
+    market = _prompt_market(args.market or "final_winner") if interactive else args.market
+    market = normalize_prediction_market(market or "final_winner")
+    pick = (
+        _prompt_pick(market, default=args.pick or "")
+        if interactive
+        else (validate_prediction_pick(args.pick, market) if args.pick else "")
+    )
+    line = args.line
+    if market in {"half_total", "final_total"} and line is None:
+        line = _prompt_float("Line")
+    rate = args.rate if args.rate is not None else _prompt_float("Rate")
+    stake = (
+        _prompt_float("Stake", default=PREDICTION_DEFAULT_STAKE)
+        if interactive and args.stake is None
+        else (
+            args.stake
+            if args.stake is not None
+            else PREDICTION_DEFAULT_STAKE
+        )
+    )
+    game_date = args.game_date
+    away_team = args.away_team
+    home_team = args.home_team
+    return {
+        "home_team_lookup": home_team_lookup,
+        "game_id": "",
+        "market": market,
+        "pick": pick,
+        "line": line,
+        "rate": rate,
+        "stake": stake,
+        "game_date": game_date,
+        "away_team": away_team,
+        "home_team": home_team,
     }
 
 
@@ -794,117 +1007,26 @@ def resolve_npb_predictions_for_game(
     data: dict,
     *,
     sheet=None,
-    post: bool = True,
+    post: bool = False,
     dry_run: bool = False,
 ) -> int:
-    sheet = sheet or _prediction_sheet()
-    rows = _prediction_rows(sheet)
-    headers = rows[0]
-    index = {name: idx for idx, name in enumerate(headers)}
-    required = {
-        "game_id",
-        "market",
-        "pick",
-        "line",
-        "rate",
-        "stake",
-        "status",
-        "outcome",
-        "balance_before",
-        "balance_after",
-        "commitment_post_id",
-        "reveal_post_id",
-        "reveal_post",
-        "salt",
-        "created_at",
-        "resolved_at",
-    }
-    missing = required - set(index)
-    if missing:
-        raise ValueError(f"{PREDICTION_SHEET_NAME} missing columns: {sorted(missing)}")
-
-    resolved = 0
-    running_balance = _last_prediction_balance(rows)
-    for row_num, row in enumerate(rows[1:], start=2):
-        row = row + [""] * (len(headers) - len(row))
-        if row[index["game_id"]] != str(game_id) or row[index["status"]] != "pending":
-            continue
-
-        market = row[index["market"]] or "final_winner"
-        pick = row[index["pick"]]
-        line = row[index["line"]] or None
-        rate = _prediction_float(row[index["rate"]])
-        stake = _prediction_float(row[index["stake"]], PREDICTION_DEFAULT_STAKE)
-        outcome = prediction_outcome_for_game(data, pick, market=market, line=line)
-        balance_before = running_balance
-        balance_after = calculate_prediction_balance(
-            balance_before, stake, rate, outcome
-        )
-        stats = _prediction_stats_after(rows, outcome, balance_after)
-        payload = _prediction_payload(
-            game_id,
-            pick,
-            rate,
-            stake,
-            market=market,
-            line=line,
-            predicted_at=row[index["created_at"]] or None,
-        )
-        reveal_text = prediction_reveal_text(payload, row[index["salt"]])
-        reveal_post = build_prediction_reveal_post(
-            game_id,
-            reveal_text,
-            outcome,
-            stats,
-        )
-        reveal_post_id = ""
-        if post and not dry_run:
-            reveal_post_id = _post_to_x(
-                reveal_post,
-                reply_to_tweet_id=row[index["commitment_post_id"]] or None,
-            )
-
-        running_balance = balance_after
-        resolved_at = _prediction_now()
-        if not dry_run:
-            updates = [
-                ("status", "resolved"),
-                ("outcome", outcome),
-                ("balance_before", balance_before),
-                ("balance_after", balance_after),
-                ("reveal_post_id", reveal_post_id),
-                ("reveal_post", reveal_post),
-                ("resolved_at", resolved_at),
-            ]
-            for col_name, value in updates:
-                sheet.update_cell(row_num, index[col_name] + 1, value)
-                row[index[col_name]] = str(value)
-            rows[row_num - 1] = row
-        resolved += 1
-    return resolved
+    return NpbPredictionService(module=sys.modules[__name__]).resolve_for_game(
+        game_id, data, sheet=sheet, post=post, dry_run=dry_run
+    )
 
 
 async def update_npb_prediction_reveals(
     session: aiohttp.ClientSession,
     game_ids: list[str],
     *,
-    post: bool = True,
+    post: bool = False,
     dry_run: bool = False,
 ) -> int:
-    if not game_ids:
-        return 0
-    total = 0
-    sheet = _prediction_sheet()
-    for gid in game_ids:
-        data = await get_schedule_game_data(gid, session, retry=False)
-        if not data:
-            continue
-        total += resolve_npb_predictions_for_game(
-            gid, data, sheet=sheet, post=post, dry_run=dry_run
-        )
-    if total:
-        print(f"[prediction] Revealed {total} prediction(s).")
-    return total
+    return await NpbPredictionService(
+        module=sys.modules[__name__]
+    ).reveal_predictions_for_games(
+        session, game_ids, post=post, dry_run=dry_run
+    )
 
 
 # --- Scraping ---
@@ -2717,128 +2839,7 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
     This function detects those placeholders and writes only B–AY into them,
     letting the existing formulas handle everything from AZ onwards.
     """
-    print("\n=== 賽錄 update ===")
-    sheet = get_worksheet(SAILU_SHEET_NAME, SAILU_SPREADSHEET_KEY)
-    target_sheet = get_worksheet(SAILU_SHEET_NAME, SAILU_TARGET_SPREADSHEET_KEY)
-    exhibition_sheet = get_worksheet(EXHIBITION_SHEET_NAME, SAILU_SPREADSHEET_KEY)
-
-    # Games already recorded
-    existing_ids = set(v for v in sheet.col_values(2)[1:] if v)
-    target_existing_ids = set(v for v in target_sheet.col_values(2)[1:] if v)
-    existing_exhibition = _existing_exhibition_identities(exhibition_sheet)
-    print(
-        f"[sailu] {len(_placeholder_rows(sheet))} source placeholder row(s) available."
-    )
-    print(
-        f"[sailu] {len(_placeholder_rows(target_sheet))} target placeholder row(s) available."
-    )
-
-    # Collect recently finished game IDs across all teams (last 3 per team)
-    all_ids: set[str] = set()
-    tasks = {
-        key: get_last_n_game_ids(info["id"], 3, session)
-        for key, info in NPB_TEAMS.items()
-    }
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-    for key, result in zip(tasks.keys(), results):
-        if isinstance(result, Exception):
-            print(f"  [sailu] get_last_n_game_ids({key}): {result}")
-        else:
-            all_ids.update(result)
-
-    new_ids = sorted(gid for gid in all_ids if gid not in existing_ids)
-    if not new_ids:
-        print("[sailu] No new games to add.")
-        return []
-
-    print(f"[sailu] {len(new_ids)} new game(s): {new_ids}")
-
-    # Scrape full box score for each new game
-    new_games: list[tuple[str, dict]] = []
-    for i in range(0, len(new_ids), MAX_CONCURRENT):
-        batch = new_ids[i : i + MAX_CONCURRENT]
-        scraped = await asyncio.gather(
-            *[get_sailu_game_data(gid, session) for gid in batch],
-            return_exceptions=True,
-        )
-        for gid, data in zip(batch, scraped):
-            if isinstance(data, Exception):
-                print(f"  [sailu] get_sailu_game_data({gid}): {data}")
-            elif data:
-                new_games.append((gid, data))
-            else:
-                print(f"  [sailu] No data for {gid} (game may not be finished yet)")
-        if i + MAX_CONCURRENT < len(new_ids):
-            await asyncio.sleep(2)
-
-    if not new_games:
-        print("[sailu] Nothing to write.")
-        return []
-
-    new_games.sort(key=lambda x: x[0])  # sort by game ID (encodes date + sequence)
-
-    regular_games = [
-        (gid, data) for gid, data in new_games if not is_exhibition_game_id(gid)
-    ]
-    exhibition_games = [
-        (gid, data) for gid, data in new_games if is_exhibition_game_id(gid)
-    ]
-
-    source_regular_games = [
-        (gid, data) for gid, data in regular_games if gid not in existing_ids
-    ]
-    target_regular_games = [
-        (gid, data) for gid, data in regular_games if gid not in target_existing_ids
-    ]
-
-    filled, overflow = _write_regular_sailu_games(sheet, source_regular_games)
-    if overflow:
-        print(
-            f"[sailu] WARNING: {len(overflow)} source game(s) skipped — no placeholder rows left: "
-            + str([gid for gid, _ in overflow])
-            + "\n  → Add more pre-populated formula rows to 賽錄 and re-run."
-        )
-
-    target_filled, target_overflow = _write_regular_sailu_games(
-        target_sheet,
-        target_regular_games,
-        auto_extend_target=True,
-    )
-    if target_overflow:
-        print(
-            f"[sailu-target] WARNING: {len(target_overflow)} game(s) skipped: "
-            + str([gid for gid, _ in target_overflow])
-        )
-
-    exhibition_rows = []
-    exhibition_written = 0
-    for gid, data in exhibition_games:
-        ident = _exhibition_identity(data)
-        if ident in existing_exhibition:
-            print(f"  [exhibition] skip existing ← {gid}")
-            continue
-        exhibition_rows.append(_exhibition_row(data))
-        existing_exhibition.add(ident)
-        exhibition_written += 1
-
-    if exhibition_rows:
-        exhibition_sheet.append_rows(
-            exhibition_rows,
-            value_input_option="USER_ENTERED",
-            table_range="A:AB",
-        )
-        print(
-            f"[exhibition] Appended {exhibition_written} row(s) to '{EXHIBITION_SHEET_NAME}'."
-        )
-    else:
-        print("[exhibition] No new games to add.")
-
-    print(
-        f"[sailu] Done. Filled {filled} source row(s) and {target_filled} target row(s)."
-    )
-    source_written_ids = [gid for gid, _ in source_regular_games[:filled]]
-    target_written_ids = [gid for gid, _ in target_regular_games[:target_filled]]
-    return list(dict.fromkeys(source_written_ids + target_written_ids))
+    return await NpbSailuService(module=sys.modules[__name__]).update(session)
 
 
 def _analysis_identity(data: dict) -> tuple[str, str, str]:
@@ -3019,94 +3020,13 @@ async def update_analysis_sheet(
     Daily runs use game IDs already written to the target date's 賽錄 rows;
     full_season=True is only for manual historical repair/backfill.
     """
-    print(f"\n=== {ANALYSIS_SHEET_NAME} update ({year}) ===")
-    sheet = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
-    rows = sheet.get_all_values()
-    season_rows = [row for row in rows[2:] if _analysis_row_year(row) == year]
-    existing = {
-        ident for row in season_rows if (ident := _analysis_identity_from_row(row))
-    }
-    last_seq = _last_analysis_seq(rows)
-
-    if full_season:
-        candidate_ids = list(
-            reversed(sorted(await get_finished_game_ids_for_season(year, session)))
-        )
-        print(
-            f"[analysis] Full-season scan found {len(candidate_ids)} finished game ID(s)."
-        )
-    else:
-        source_ids = (
-            game_ids if game_ids is not None else _sailu_game_ids_for_date(target_date)
-        )
-        candidate_ids = []
-        for gid in source_ids:
-            if gid and gid not in candidate_ids:
-                candidate_ids.append(gid)
-        if game_ids is not None:
-            target_label = "provided game IDs"
-        else:
-            target_label = _date_key(target_date)
-        print(
-            f"[analysis] {target_label} has {len(candidate_ids)} candidate game ID(s)."
-        )
-
-    if not candidate_ids:
-        print("[analysis] No candidate games found.")
-        return 0
-
-    if full_season and len(existing) >= len(candidate_ids):
-        print(
-            "[analysis] Sheet already has all finished games by count; "
-            "skipping box-score scrape."
-        )
-        return 0
-
-    new_games: list[tuple[str, dict]] = []
-    for i in range(0, len(candidate_ids), MAX_CONCURRENT):
-        batch = candidate_ids[i : i + MAX_CONCURRENT]
-        scraped = await asyncio.gather(
-            *[get_schedule_game_data(gid, session, retry=full_season) for gid in batch],
-            return_exceptions=True,
-        )
-        for gid, data in zip(batch, scraped):
-            if isinstance(data, Exception):
-                print(f"  [analysis] get_schedule_game_data({gid}): {data}")
-            elif data:
-                if target_date and data["日期"] != _date_key(target_date):
-                    continue
-                ident = _analysis_identity(data)
-                if ident not in existing:
-                    new_games.append((gid, data))
-                    existing.add(ident)
-                    print(f"  [analysis] missing ← {gid} {ident}")
-            else:
-                print(f"  [analysis] No data for {gid}")
-        if i + MAX_CONCURRENT < len(candidate_ids):
-            await asyncio.sleep(2)
-
-    if not new_games:
-        print("[analysis] No new games to append.")
-        return 0
-
-    new_games.sort(key=lambda x: (x[1]["日期"], x[0]))
-    inserted = 0
-    for gid, data in new_games:
-        row_values = _analysis_row(last_seq + inserted + 1, data)
-        insert_at = _analysis_insert_index(rows, data["日期"])
-        sheet.insert_row(
-            row_values,
-            index=insert_at,
-            value_input_option="USER_ENTERED",
-            inherit_from_before=True,
-        )
-        rows.insert(insert_at - 1, [str(v) for v in row_values])
-        inserted += 1
-        print(f"  [analysis] inserted row {insert_at} ← {gid}")
-        await asyncio.sleep(1)
-
-    print(f"[analysis] Inserted {inserted} row(s) into {ANALYSIS_SHEET_NAME}.")
-    return inserted
+    return await NpbAnalysisService(module=sys.modules[__name__]).update(
+        session,
+        year=year,
+        game_ids=game_ids,
+        target_date=target_date,
+        full_season=full_season,
+    )
 
 
 def repair_analysis_leagues(year: int = ANALYSIS_SEASON) -> int:
@@ -3116,35 +3036,7 @@ def repair_analysis_leagues(year: int = ANALYSIS_SEASON) -> int:
     Existing rows do not keep Yahoo game IDs, so this repair uses the same visible
     team columns that identify the row: I=away team and L=home team.
     """
-    print(f"\n=== {ANALYSIS_SHEET_NAME} league repair ({year}) ===")
-    sheet = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
-    rows = sheet.get_all_values()
-    updates = []
-
-    for row_num, row in enumerate(rows[2:], start=3):
-        if _analysis_row_year(row) != year:
-            continue
-        away_team = row[8] if len(row) > 8 else ""
-        home_team = row[11] if len(row) > 11 else ""
-        game_type = _analysis_game_type_from_teams(away_team, home_team)
-        if not game_type:
-            print(
-                f"  [analysis] row {row_num}: "
-                f"skipped unknown team {away_team}/{home_team}"
-            )
-            continue
-        current = row[3] if len(row) > 3 else ""
-        if current == game_type:
-            continue
-        updates.append({"range": f"D{row_num}", "values": [[game_type]]})
-
-    if not updates:
-        print("[analysis] No league cells need repair.")
-        return 0
-
-    sheet.batch_update(updates, value_input_option="USER_ENTERED")
-    print(f"[analysis] Repaired {len(updates)} league cell(s).")
-    return len(updates)
+    return NpbAnalysisService(module=sys.modules[__name__]).repair_leagues(year)
 
 
 def update_huizi_sheet(today: datetime | str | None = None):
@@ -3154,36 +3046,7 @@ def update_huizi_sheet(today: datetime | str | None = None):
     彙資 keeps the same 83-column shape and reserves rows 3-8 for the date's six
     possible NPB games.
     """
-    if isinstance(today, str):
-        today = datetime.strptime(today, "%Y-%m-%d")
-    else:
-        today = today or datetime.now()
-    today_str = f"{today.year}/{today.month}/{today.day}"
-    print(f"\n=== {HUIZI_SHEET_NAME} update ({today_str}) ===")
-
-    analysis = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
-    huizi = get_worksheet(HUIZI_SHEET_NAME, NPB_SPREADSHEET_KEY)
-    rows = analysis.get_all_values()
-    today_rows = [row[:83] for row in rows[2:] if len(row) > 1 and row[1] == today_str]
-
-    if not today_rows:
-        print(f"[huizi] No finished games for {today_str}; keeping existing data.")
-        return 0
-
-    huizi.batch_clear(["B3:CE8"])
-    values = []
-    for row in today_rows[:6]:
-        padded = row + [""] * (83 - len(row))
-        values.append(padded[1:83])
-
-    end_row = 2 + len(values)
-    huizi.update(
-        range_name=f"B3:CE{end_row}",
-        values=values,
-        value_input_option="USER_ENTERED",
-    )
-    print(f"[huizi] Updated {len(values)} today game row(s).")
-    return len(values)
+    return NpbHuiziService(module=sys.modules[__name__]).update(today)
 
 
 # --- Sheet building ---
@@ -3503,117 +3366,9 @@ def update_league_sheet(
 
 
 async def run_once(matchup_date: str | None = None):
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
-    errors = []
-    matchup_start_date = _resolve_matchup_start_date(matchup_date)
-    print(f"Matchup start date: {matchup_start_date:%Y-%m-%d}")
-
-    async with aiohttp.ClientSession(headers=headers) as session:
-        for league, sheet_name in LEAGUE_SHEETS.items():
-            league_teams = {k: v for k, v in NPB_TEAMS.items() if v["league"] == league}
-            print(f"\n=== {league} ({sheet_name}) ===")
-
-            # 1. Determine team order from next game matchups
-            try:
-                matchups = await get_next_matchups(
-                    league, session, start_date=matchup_start_date
-                )
-            except Exception as e:
-                errors.append(f"get_next_matchups({league}): {e}")
-                teams = list(league_teams.keys())
-                matchups = [(teams[i * 2], teams[i * 2 + 1]) for i in range(3)]
-
-            print(f"Matchup order: {matchups}")
-
-            # 2. Fetch last 10 game IDs for each team
-            all_game_ids: dict[str, list[str]] = {}
-            for team_key, team_info in league_teams.items():
-                try:
-                    ids = await get_last_n_game_ids(
-                        team_info["id"], GAMES_COUNT, session
-                    )
-                    all_game_ids[team_key] = ids
-                    print(f"  {team_key}: {len(ids)} game IDs found")
-                except Exception as e:
-                    errors.append(f"get_last_n_game_ids({team_key}): {e}")
-                    all_game_ids[team_key] = []
-
-            # 3. Fetch game details (deduplicated across teams)
-            game_cache: dict[str, dict] = {}
-            unique_ids = {gid for ids in all_game_ids.values() for gid in ids}
-            id_list = list(unique_ids)
-
-            for i in range(0, len(id_list), MAX_CONCURRENT):
-                batch = id_list[i : i + MAX_CONCURRENT]
-                results = await asyncio.gather(
-                    *[get_game_info(gid, session) for gid in batch],
-                    return_exceptions=True,
-                )
-                for gid, result in zip(batch, results):
-                    if isinstance(result, Exception):
-                        errors.append(f"get_game_info({gid}): {result}")
-                    elif result:
-                        game_cache[gid] = result
-                if i + MAX_CONCURRENT < len(id_list):
-                    await asyncio.sleep(2)
-
-            # 4. Build per-team game lists from cache
-            all_games: dict[str, list[dict]] = {}
-            for team_key, team_info in league_teams.items():
-                team_name = team_info["name"]
-                game_list = []
-                for gid in all_game_ids[team_key]:
-                    cached = game_cache.get(gid)
-                    if cached and team_name in cached:
-                        game_list.append(cached[team_name])
-                all_games[team_key] = game_list
-                print(f"  {team_key}: {len(game_list)} games with data")
-
-            # 5. Write to sheet
-            try:
-                update_league_sheet(sheet_name, matchups, all_games)
-            except Exception as e:
-                errors.append(f"update_league_sheet({sheet_name}): {e}")
-
-        # Update 賽錄 in the analysis spreadsheet
-        new_sailu_ids = []
-        try:
-            new_sailu_ids = await update_sailu_sheet(session)
-        except Exception as e:
-            errors.append(f"update_sailu_sheet: {e}")
-
-        # Update the newly written finished games in 分析表紀錄, then refresh 彙資.
-        huizi_date = None
-        try:
-            analysis_game_ids = new_sailu_ids or _sailu_game_ids_for_date()
-            await update_analysis_sheet(session, game_ids=analysis_game_ids)
-            sailu_dates = _sailu_dates_for_game_ids(new_sailu_ids)
-            if not sailu_dates and analysis_game_ids:
-                sailu_dates = _sailu_dates_for_game_ids(analysis_game_ids)
-            if sailu_dates:
-                huizi_date = sailu_dates[-1]
-            await update_npb_prediction_reveals(session, analysis_game_ids)
-        except Exception as e:
-            errors.append(f"update_analysis_sheet: {e}")
-
-        try:
-            update_huizi_sheet(huizi_date)
-        except Exception as e:
-            errors.append(f"update_huizi_sheet: {e}")
-
-    if errors:
-        print(f"\n[ERROR] {len(errors)} failure(s):")
-        for err in errors:
-            print(f"  - {err}")
-        sys.exit(1)
-    else:
-        print("\nDone.")
+    return await NpbUpdateService(module=sys.modules[__name__]).run_once(
+        matchup_date=matchup_date
+    )
 
 
 if __name__ == "__main__":
@@ -3638,66 +3393,81 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--create-prediction",
-        metavar="GAME_ID",
-        help="Create an NPB prediction commitment for a Yahoo game ID.",
+        "--predict",
+        nargs="?",
+        const=PREDICTION_PROMPT_SENTINEL,
+        metavar="HOME_TEAM",
+        dest="create_prediction",
+        help="Create an NPB prediction commitment by home team. Omit HOME_TEAM for prompts.",
     )
     parser.add_argument(
+        "-p",
         "--pick",
         help="Team for winner markets, or over/under for total markets.",
     )
     parser.add_argument(
+        "-m",
         "--market",
         default="final_winner",
         choices=["half_winner", "final_winner", "half_total", "final_total"],
         help="Prediction market. Defaults to final_winner.",
     )
     parser.add_argument(
+        "-l",
         "--line",
         type=float,
         help="Score line for half_total/final_total predictions.",
     )
     parser.add_argument(
+        "-r",
         "--rate",
         type=float,
         help="Prediction return rate, e.g. 0.92.",
     )
     parser.add_argument(
+        "-s",
         "--stake",
         type=float,
-        default=PREDICTION_DEFAULT_STAKE,
+        default=None,
         help=f"Stake size for the prediction. Defaults to {PREDICTION_DEFAULT_STAKE}.",
     )
     parser.add_argument("--game-date", default="", help="Optional prediction game date.")
     parser.add_argument("--away-team", default="", help="Optional prediction away team.")
     parser.add_argument("--home-team", default="", help="Optional prediction home team.")
     parser.add_argument(
-        "--no-twitter",
-        action="store_true",
-        help="Record the prediction without posting to X/Twitter.",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Build prediction output without posting or writing to Google Sheets.",
+        help="Build prediction output without writing to Google Sheets.",
     )
     args = parser.parse_args()
 
-    if args.create_prediction:
-        if not args.pick or args.rate is None:
+    if args.create_prediction is not None:
+        try:
+            values = _prediction_cli_values(args)
+            values = asyncio.run(
+                _prediction_resolve_cli_game(
+                    values,
+                    confirm=args.create_prediction == PREDICTION_PROMPT_SENTINEL,
+                )
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if not values["game_id"]:
+            parser.error("--create-prediction could not resolve a game ID")
+        if not values["pick"] or values["rate"] is None:
             parser.error("--create-prediction requires --pick and --rate")
-        if args.market in {"half_total", "final_total"} and args.line is None:
+        if values["market"] in {"half_total", "final_total"} and values["line"] is None:
             parser.error("--market half_total/final_total requires --line")
         result = create_npb_prediction(
-            args.create_prediction,
-            args.pick,
-            args.rate,
-            market=args.market,
-            line=args.line,
-            stake=args.stake,
-            game_date=args.game_date,
-            away_team=args.away_team,
-            home_team=args.home_team,
-            post=not args.no_twitter,
+            values["game_id"],
+            values["pick"],
+            values["rate"],
+            market=values["market"],
+            line=values["line"],
+            stake=values["stake"],
+            game_date=values["game_date"],
+            away_team=values["away_team"],
+            home_team=values["home_team"],
             dry_run=args.dry_run,
         )
         print(result["commitment_post"])
@@ -3705,4 +3475,8 @@ if __name__ == "__main__":
     elif args.repair_analysis_leagues:
         repair_analysis_leagues(args.analysis_year)
     else:
-        asyncio.run(run_once(matchup_date=args.matchup_date))
+        asyncio.run(
+            NpbUpdateService(module=sys.modules[__name__]).run_once(
+                matchup_date=args.matchup_date
+            )
+        )
