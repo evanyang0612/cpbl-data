@@ -18,9 +18,12 @@ import gspread
 from dotenv import load_dotenv
 
 from baseball.npb_services import (
+    _NpbPredictionLogic,
     NpbAnalysisService,
     NpbHuiziService,
+    NpbLeagueSheetService,
     NpbPredictionService,
+    NpbRowsService,
     NpbSailuService,
     NpbUpdateService,
 )
@@ -217,8 +220,7 @@ NPB_FIELDS = {
 
 def _display_field_name(venue: str) -> str:
     """Format venue names for compact NPB display sheets."""
-    field = NPB_FIELDS.get(venue, venue)
-    return f"{field[0]} {field[1]}" if len(field) == 2 else field
+    return NpbLeagueSheetService(module=sys.modules[__name__]).display_field_name(venue)
 
 
 ANALYSIS_FIELDS = {
@@ -294,21 +296,12 @@ BLOCK_ROWS = 13
 
 def hex_to_rgb(hex_color: str) -> dict:
     """Convert a 6-char hex color string to a Sheets API RGB dict (0.0–1.0 floats)."""
-    h = hex_color.lstrip("#")
-    return {
-        "red": int(h[0:2], 16) / 255,
-        "green": int(h[2:4], 16) / 255,
-        "blue": int(h[4:6], 16) / 255,
-    }
+    return NpbLeagueSheetService.hex_to_rgb(hex_color)
 
 
 def col_to_letter(col: int) -> str:
     """Convert 1-indexed column number to letter(s). e.g. 2→B, 15→O, 28→AB"""
-    result = ""
-    while col > 0:
-        col, rem = divmod(col - 1, 26)
-        result = chr(65 + rem) + result
-    return result
+    return NpbLeagueSheetService.col_to_letter(col)
 
 
 def get_worksheet(sheet_name: str, spreadsheet_key: str = NPB_SPREADSHEET_KEY):
@@ -332,21 +325,15 @@ def prediction_reveal_text(payload: dict, salt: str) -> str:
     """
     Build the exact text followers hash with any standard SHA-256 verifier.
     """
-    canonical_payload = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return f"{canonical_payload}|salt={salt}"
+    return _NpbPredictionLogic(module=sys.modules[__name__]).reveal_text(payload, salt)
 
 
 def hash_prediction_reveal(reveal_text: str) -> str:
-    return hashlib.sha256(reveal_text.encode("utf-8")).hexdigest()
+    return _NpbPredictionLogic(module=sys.modules[__name__]).hash_reveal(reveal_text)
 
 
 def _prediction_now() -> str:
-    return datetime.now().replace(microsecond=0).isoformat()
+    return _NpbPredictionLogic(module=sys.modules[__name__]).now()
 
 
 def _prediction_payload(
@@ -358,17 +345,15 @@ def _prediction_payload(
     line: float | None = None,
     predicted_at: str | None = None,
 ) -> dict:
-    payload = {
-        "g": str(game_id),
-        "m": normalize_prediction_market(market),
-        "p": str(pick),
-        "r": float(rate),
-        "s": float(stake),
-        "t": predicted_at or _prediction_now(),
-    }
-    if line is not None:
-        payload["l"] = float(line)
-    return payload
+    return _NpbPredictionLogic(module=sys.modules[__name__]).payload(
+        game_id,
+        pick,
+        rate,
+        stake,
+        market=market,
+        line=line,
+        predicted_at=predicted_at,
+    )
 
 
 def build_prediction_posts(
@@ -382,349 +367,144 @@ def build_prediction_posts(
     salt: str | None = None,
     predicted_at: str | None = None,
 ) -> dict:
-    salt = salt or secrets.token_urlsafe(PREDICTION_SALT_BYTES)
-    payload = _prediction_payload(
-        game_id, pick, rate, stake, market=market, line=line, predicted_at=predicted_at
+    return _NpbPredictionLogic(module=sys.modules[__name__]).build_posts(
+        game_id,
+        pick,
+        rate,
+        stake,
+        market=market,
+        line=line,
+        salt=salt,
+        predicted_at=predicted_at,
     )
-    reveal_text = prediction_reveal_text(payload, salt)
-    commitment_hash = hash_prediction_reveal(reveal_text)
-    commitment_post = (
-        f"NPB prediction locked before first pitch\n"
-        f"Game {game_id}\n"
-        f"SHA-256: {commitment_hash}\n"
-        f"Reveal after final."
-    )
-    reveal_post = f"NPB prediction reveal\nGame {game_id}\nVerify SHA-256 of:\n{reveal_text}"
-    if len(commitment_post) > 280:
-        raise ValueError("Prediction commitment post is longer than 280 characters.")
-    if len(reveal_post) > 280:
-        raise ValueError("Prediction reveal post is longer than 280 characters.")
-    return {
-        "salt": salt,
-        "payload": payload,
-        "reveal_text": reveal_text,
-        "commitment_hash": commitment_hash,
-        "commitment_post": commitment_post,
-        "reveal_post": reveal_post,
-    }
 
 
 def calculate_prediction_balance(
     balance_before: float, stake: float, rate: float, outcome: str
 ) -> float:
-    outcome = str(outcome).lower()
-    if outcome == "win":
-        return round(float(balance_before) + float(stake) * float(rate), 4)
-    if outcome == "loss":
-        return round(float(balance_before) - float(stake), 4)
-    if outcome in {"push", "void", "pending"}:
-        return round(float(balance_before), 4)
-    raise ValueError(f"Unsupported prediction outcome: {outcome}")
-
-
-def _prediction_float(value, default: float = 0.0) -> float:
-    try:
-        return float(str(value).strip())
-    except (TypeError, ValueError):
-        return default
-
-
-def _prediction_normalize_team(value: str) -> str:
-    text = str(value or "").replace(" ", "")
-    aliases = {"横浜": "DeNA", "橫濱": "DeNA"}
-    text = aliases.get(text, text)
-    for raw, info in NPB_TEAMS.items():
-        candidates = {
-            raw.replace(" ", ""),
-            display_team_name(raw).replace(" ", ""),
-            str(info["name"]).replace(" ", ""),
-        }
-        if text in candidates:
-            return raw
-    return text
-
-
-def _prediction_team_options() -> str:
-    return ", ".join(NPB_TEAMS.keys())
-
-
-def validate_prediction_home_team(value: str) -> str:
-    team = _prediction_normalize_team(value)
-    if team in NPB_TEAMS:
-        return team
-    raise ValueError(f"Home team must be one of: {_prediction_team_options()}.")
-
-
-def _prediction_display_team(value: str) -> str:
-    team = _prediction_normalize_team(value)
-    if team in NPB_TEAMS:
-        return f"{team} ({NPB_TEAMS[team]['name']})"
-    return str(value or "")
-
-
-def normalize_prediction_market(market: str) -> str:
-    normalized = str(market or "final_winner").strip().lower().replace(" ", "_")
-    if normalized in PREDICTION_MARKET_ALIASES:
-        return PREDICTION_MARKET_ALIASES[normalized]
-    raise ValueError(f"Unsupported prediction market: {market}")
-
-
-def _prediction_side(value: str) -> str:
-    normalized = str(value or "").strip().lower()
-    aliases = {
-        "over": "over",
-        "greater": "over",
-        "gt": "over",
-        ">": "over",
-        "大": "over",
-        "under": "under",
-        "less": "under",
-        "lt": "under",
-        "<": "under",
-        "小": "under",
-    }
-    if normalized in aliases:
-        return aliases[normalized]
-    raise ValueError("Total predictions require pick over/under or greater/less.")
-
-
-def validate_prediction_pick(pick: str, market: str) -> str:
-    market = normalize_prediction_market(market)
-    if market in {"final_total", "half_total"}:
-        return _prediction_side(pick)
-
-    team = _prediction_normalize_team(pick)
-    if team in NPB_TEAMS:
-        return team
-    raise ValueError(
-        f"Winner predictions require a valid NPB team: {_prediction_team_options()}."
+    return _NpbPredictionLogic.calculate_balance(
+        balance_before, stake, rate, outcome
     )
 
 
+def _prediction_float(value, default: float = 0.0) -> float:
+    return _NpbPredictionLogic.to_float(value, default)
+
+
+def _prediction_normalize_team(value: str) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).normalize_team(value)
+
+
+def _prediction_team_options() -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).team_options()
+
+
+def validate_prediction_home_team(value: str) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).validate_home_team(value)
+
+
+def _prediction_display_team(value: str) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).display_team(value)
+
+
+def normalize_prediction_market(market: str) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).normalize_market(market)
+
+
+def _prediction_side(value: str) -> str:
+    return _NpbPredictionLogic.prediction_side(value)
+
+
+def validate_prediction_pick(pick: str, market: str) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).validate_pick(pick, market)
+
+
 def _prediction_int(value) -> int:
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return 0
+    return _NpbPredictionLogic.to_int(value)
 
 
 def _prediction_innings_total(values: list, innings: int = 5) -> int:
-    return sum(_prediction_int(v) for v in values[:innings])
+    return _NpbPredictionLogic(module=sys.modules[__name__]).innings_total(
+        values, innings
+    )
 
 
 def _prediction_winner_outcome(
     data: dict, pick: str, *, half: bool = False
 ) -> str:
-    if half:
-        away_score = _prediction_innings_total(data.get("away_innings", []), 5)
-        home_score = _prediction_innings_total(data.get("home_innings", []), 5)
-    else:
-        away_score = int(data["客總分"])
-        home_score = int(data["主總分"])
-    if away_score == home_score:
-        return "push"
-
-    away = _prediction_normalize_team(data.get("客隊原名") or data.get("客隊"))
-    home = _prediction_normalize_team(data.get("主隊原名") or data.get("主隊"))
-    winner = away if away_score > home_score else home
-    picked = _prediction_normalize_team(pick)
-    return "win" if picked == winner else "loss"
+    return _NpbPredictionLogic(module=sys.modules[__name__]).winner_outcome(
+        data, pick, half=half
+    )
 
 
 def _prediction_total_outcome(
     data: dict, pick: str, line: float, *, half: bool = False
 ) -> str:
-    if half:
-        total = _prediction_innings_total(data.get("away_innings", []), 5)
-        total += _prediction_innings_total(data.get("home_innings", []), 5)
-    else:
-        total = int(data["客總分"]) + int(data["主總分"])
-
-    line = float(line)
-    if total == line:
-        return "push"
-    side = _prediction_side(pick)
-    if side == "over":
-        return "win" if total > line else "loss"
-    return "win" if total < line else "loss"
+    return _NpbPredictionLogic(module=sys.modules[__name__]).total_outcome(
+        data, pick, line, half=half
+    )
 
 
 def prediction_outcome_for_game(
     data: dict, pick: str, market: str = "final_winner", line: float | None = None
 ) -> str:
-    market = normalize_prediction_market(market)
-    if market == "final_winner":
-        return _prediction_winner_outcome(data, pick, half=False)
-    if market == "half_winner":
-        return _prediction_winner_outcome(data, pick, half=True)
-    if market == "final_total":
-        if line is None:
-            raise ValueError("final_total predictions require a line.")
-        return _prediction_total_outcome(data, pick, line, half=False)
-    if market == "half_total":
-        if line is None:
-            raise ValueError("half_total predictions require a line.")
-        return _prediction_total_outcome(data, pick, line, half=True)
-    raise ValueError(f"Unsupported prediction market: {market}")
+    return _NpbPredictionLogic(module=sys.modules[__name__]).outcome_for_game(
+        data, pick, market=market, line=line
+    )
 
 
 def _prediction_headers() -> list[str]:
-    return [
-        "prediction_id",
-        "game_id",
-        "game_date",
-        "away_team",
-        "home_team",
-        "market",
-        "pick",
-        "line",
-        "rate",
-        "stake",
-        "status",
-        "outcome",
-        "balance_before",
-        "balance_after",
-        "commitment_post_id",
-        "reveal_post_id",
-        "commitment_hash",
-        "salt",
-        "reveal_post",
-        "created_at",
-        "resolved_at",
-    ]
+    return _NpbPredictionLogic.headers()
 
 
 def _prediction_has_header(row: list[str]) -> bool:
-    headers = _prediction_headers()
-    normalized = [str(value).strip() for value in row]
-    return all(header in normalized for header in headers)
+    return _NpbPredictionLogic(module=sys.modules[__name__]).has_header(row)
 
 
 def _prediction_sheet():
-    spreadsheet = _sheets_client.spreadsheet(PREDICTION_SPREADSHEET_KEY)
-    try:
-        return spreadsheet.worksheet(PREDICTION_SHEET_NAME)
-    except gspread.exceptions.WorksheetNotFound:
-        return spreadsheet.get_worksheet(0)
+    return _NpbPredictionLogic(module=sys.modules[__name__]).sheet()
 
 
 def _prediction_rows(sheet, *, ensure_header: bool = True) -> list[list[str]]:
-    rows = sheet.get_all_values()
-    headers = _prediction_headers()
-    if not rows:
-        if ensure_header:
-            sheet.append_row(headers, value_input_option="USER_ENTERED")
-        return [headers]
-    if not _prediction_has_header(rows[0]):
-        if ensure_header:
-            sheet.insert_row(headers, index=1, value_input_option="USER_ENTERED")
-        return [headers] + rows
-    return rows
+    return _NpbPredictionLogic(module=sys.modules[__name__]).rows(
+        sheet, ensure_header=ensure_header
+    )
 
 
 def _last_prediction_balance(rows: list[list[str]]) -> float:
-    headers = rows[0] if rows else _prediction_headers()
-    try:
-        balance_idx = headers.index("balance_after")
-    except ValueError:
-        return PREDICTION_STARTING_BALANCE
-    for row in reversed(rows[1:]):
-        if len(row) > balance_idx and str(row[balance_idx]).strip():
-            return _prediction_float(row[balance_idx], PREDICTION_STARTING_BALANCE)
-    return PREDICTION_STARTING_BALANCE
+    return _NpbPredictionLogic(module=sys.modules[__name__]).last_balance(rows)
 
 
 def _prediction_balance_before_formula(headers: list[str], row_num: int):
-    if row_num <= 2:
-        return PREDICTION_STARTING_BALANCE
-    balance_after_col = col_to_letter(headers.index("balance_after") + 1)
-    return f"={balance_after_col}{row_num - 1}"
+    return _NpbPredictionLogic(module=sys.modules[__name__]).balance_before_formula(
+        headers, row_num
+    )
 
 
 def _prediction_balance_after_formula(headers: list[str], row_num: int) -> str:
-    outcome_col = col_to_letter(headers.index("outcome") + 1)
-    rate_col = col_to_letter(headers.index("rate") + 1)
-    stake_col = col_to_letter(headers.index("stake") + 1)
-    status_col = col_to_letter(headers.index("status") + 1)
-    balance_before_col = col_to_letter(headers.index("balance_before") + 1)
-    outcome_ref = f"{outcome_col}{row_num}"
-    rate_ref = f"{rate_col}{row_num}"
-    stake_ref = f"{stake_col}{row_num}"
-    status_ref = f"{status_col}{row_num}"
-    before_ref = f"{balance_before_col}{row_num}"
-    return (
-        f'=IF({outcome_ref}="win",{before_ref}+{stake_ref}*{rate_ref},'
-        f'IF({outcome_ref}="loss",{before_ref}-{stake_ref},'
-        f'IF(OR({outcome_ref}="push",{outcome_ref}="void",'
-        f'{status_ref}="pending",{outcome_ref}=""),{before_ref},{before_ref})))'
+    return _NpbPredictionLogic(module=sys.modules[__name__]).balance_after_formula(
+        headers, row_num
     )
 
 
 def _prediction_stats_from_rows(rows: list[list[str]]) -> dict:
-    headers = rows[0] if rows else _prediction_headers()
-    index = {name: idx for idx, name in enumerate(headers)}
-    wins = losses = pushes = 0
-    for row in rows[1:]:
-        row = row + [""] * (len(headers) - len(row))
-        if row[index.get("status", -1)] != "resolved":
-            continue
-        outcome = str(row[index.get("outcome", -1)]).lower()
-        if outcome == "win":
-            wins += 1
-        elif outcome == "loss":
-            losses += 1
-        elif outcome == "push":
-            pushes += 1
-
-    graded = wins + losses
-    win_rate = round((wins / graded) * 100, 1) if graded else 0.0
-    return {
-        "wins": wins,
-        "losses": losses,
-        "pushes": pushes,
-        "graded": graded,
-        "win_rate": win_rate,
-        "balance": _last_prediction_balance(rows),
-    }
+    return _NpbPredictionLogic(module=sys.modules[__name__]).stats_from_rows(rows)
 
 
 def _prediction_stats_after(
     rows: list[list[str]], outcome: str, balance_after: float
 ) -> dict:
-    stats = _prediction_stats_from_rows(rows)
-    outcome = str(outcome).lower()
-    if outcome == "win":
-        stats["wins"] += 1
-    elif outcome == "loss":
-        stats["losses"] += 1
-    elif outcome == "push":
-        stats["pushes"] += 1
-    stats["graded"] = stats["wins"] + stats["losses"]
-    stats["win_rate"] = (
-        round((stats["wins"] / stats["graded"]) * 100, 1)
-        if stats["graded"]
-        else 0.0
+    return _NpbPredictionLogic(module=sys.modules[__name__]).stats_after(
+        rows, outcome, balance_after
     )
-    stats["balance"] = round(float(balance_after), 4)
-    return stats
 
 
 def build_prediction_reveal_post(
     game_id: str, reveal_text: str, outcome: str, stats: dict
 ) -> str:
-    record = f"{stats['wins']}-{stats['losses']}-{stats['pushes']}"
-    text = (
-        f"NPB prediction reveal\n"
-        f"Game {game_id}\n"
-        f"Result: {str(outcome).upper()}\n"
-        f"Record: {record} | Win rate: {stats['win_rate']}%\n"
-        f"Balance: {stats['balance']}\n"
-        f"Verify SHA-256 of:\n"
-        f"{reveal_text}"
+    return _NpbPredictionLogic(module=sys.modules[__name__]).build_reveal_post(
+        game_id, reveal_text, outcome, stats
     )
-    if len(text) > 280:
-        raise ValueError("Prediction reveal post is longer than 280 characters.")
-    return text
 
 
 def create_npb_prediction(
@@ -2320,193 +2100,67 @@ def _schedule_row(seq: int, data: dict) -> list:
       CP–DE(94–109) 客打擊 (16)
       DF–DU(110–125) 主打擊 (16)
     """
-    ai = data["away_innings"]
-    hi = data["home_innings"]
-
-    asp = data["客先發投球"]  # list[13]
-    atp = data["客總投球"]  # list[13]
-    hsp = data["主先發投球"]  # list[13]
-    htp = data["主總投球"]  # list[13]
-    ab = data["客打擊"]  # list[16]
-    hb = data["主打擊"]  # list[16]
-
-    return [
-        data["賽事編號"],  # A  賽事編號
-        seq,  # B  場次
-        data["日期"],  # C  日期
-        data["客隊"],  # D  客隊
-        data["客隊先發"],  # E  客隊先發
-        data["主隊"],  # F  主隊
-        data["主隊先發"],  # G  主隊先發
-        data["球場"],  # H  球場
-        data["主審"],  # I  主審
-        *ai,  # J–U  客1–12
-        data["客總分"],  # V   客總分
-        data["客總安打"],  # W   客總安打
-        data["客總失誤"],  # X   安總失誤
-        *hi,  # Y–AJ 主1–12
-        data["主總分"],  # AK  主總分
-        data["主總安打"],  # AL  主總安打
-        data["主總失誤"],  # AM  主總失誤
-        *asp,  # AN–AZ 客先發投球 (13)
-        *atp,  # BA–BM 客總投球 (13)
-        *hsp,  # BN–BZ 主先發投球 (13)
-        *htp,  # CA–CM 主總投球 (13)
-        data["客投別"],  # CN  客投左右
-        data["主投別"],  # CO  主投左右
-        *ab,  # CP–DE 客打擊 (16)
-        *hb,  # DF–DU 主打擊 (16)
-    ]  # 125 values total — DV onwards are formula columns, left untouched
+    return NpbRowsService(module=sys.modules[__name__]).schedule_row(seq, data)
 
 
 def _analysis_date(date_str: str) -> str:
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
-    return f"{dt.year}/{dt.month}/{dt.day}"
+    return NpbRowsService.analysis_date(date_str)
 
 
 def _analysis_game_type(data: dict) -> str:
-    away = data.get("客隊原名", "")
-    home = data.get("主隊原名", "")
-    if not away or not home:
-        return "例行賽"
-    away_league = _analysis_team_league(away)
-    home_league = _analysis_team_league(home)
-    if not away_league or not home_league:
-        return "例行賽"
-    if away_league != home_league:
-        return "交流戰"
-    return home_league
+    return NpbRowsService(module=sys.modules[__name__]).analysis_game_type(data)
 
 
 def _analysis_team_league(team_name: str) -> str | None:
-    normalized = str(team_name or "").replace(" ", "")
-    if not normalized:
-        return None
-
-    aliases = {"横浜": "DeNA", "橫濱": "DeNA"}
-    raw = aliases.get(normalized, normalized)
-    if raw in NPB_TEAMS:
-        return NPB_TEAMS[raw]["league"]
-
-    for key, info in NPB_TEAMS.items():
-        if normalized == str(info["name"]).replace(" ", ""):
-            return info["league"]
-        if normalized == display_team_name(key).replace(" ", ""):
-            return info["league"]
-    return None
+    return NpbRowsService(module=sys.modules[__name__]).analysis_team_league(team_name)
 
 
 def _analysis_game_type_from_teams(away_team: str, home_team: str) -> str | None:
-    away_league = _analysis_team_league(away_team)
-    home_league = _analysis_team_league(home_team)
-    if not home_league:
-        return None
-    if away_league and away_league != home_league:
-        return "交流戰"
-    return home_league
+    return NpbRowsService(module=sys.modules[__name__]).analysis_game_type_from_teams(
+        away_team, home_team
+    )
 
 
 def _analysis_day_night(game_time: str) -> str:
-    m = re.match(r"^(\d{1,2}):(\d{2})$", str(game_time or ""))
-    if not m:
-        return ""
-    return "夜" if int(m.group(1)) >= 17 else "日"
+    return NpbRowsService.analysis_day_night(game_time)
 
 
 def _analysis_team_name(team_name: str) -> str:
-    return display_team_name(team_name)
+    return NpbRowsService(module=sys.modules[__name__]).analysis_team_name(team_name)
 
 
 def _analysis_field(data: dict) -> str:
-    raw = data.get("球場原名") or data.get("球場") or ""
-    if not raw:
-        return ""
-
-    home = data.get("主隊原名") or data.get("主場隊伍") or ""
-    home_fields = NPB_TEAM_HOME_FIELDS.get(home)
-    if home_fields is not None and raw not in home_fields:
-        return "地方球場"
-
-    return ANALYSIS_FIELDS.get(raw, "地方球場")
+    return NpbRowsService(module=sys.modules[__name__]).analysis_field(data)
 
 
 def _analysis_hand(hand: str) -> str:
-    if not hand:
-        return ""
-    return hand if hand.endswith("投") else f"{hand}投"
+    return NpbRowsService.analysis_hand(hand)
 
 
 def _analysis_marks(away_score: int, home_score: int) -> tuple[str, str]:
-    if away_score > home_score:
-        return "○", "●"
-    if away_score < home_score:
-        return "●", "○"
-    return "△", "△"
+    return NpbRowsService.analysis_marks(away_score, home_score)
 
 
 def _analysis_innings(vals: list) -> tuple[list, str]:
-    innings = ["" if str(v) in ("", "×") else v for v in vals[:9]]
-    extras = []
-    for v in vals[9:12]:
-        if str(v).isdigit():
-            extras.append(int(v))
-    return innings, (sum(extras) if extras else "")
+    return NpbRowsService.analysis_innings(vals)
 
 
 def _analysis_total_bases(batting: list) -> int:
-    hits = int(batting[2] or 0)
-    doubles = int(batting[4] or 0)
-    triples = int(batting[5] or 0)
-    homers = int(batting[6] or 0)
-    return hits + doubles + triples * 2 + homers * 3
+    return NpbRowsService.analysis_total_bases(batting)
 
 
 def _analysis_long_hits(batting: list) -> int:
-    return int(batting[4] or 0) + int(batting[5] or 0) + int(batting[6] or 0)
+    return NpbRowsService(module=sys.modules[__name__]).analysis_long_hits(batting)
 
 
 def _analysis_qs(starter_pitch: list):
-    ip_raw = str(starter_pitch[0] or "")
-    try:
-        parts = ip_raw.split(".")
-        partial = 0
-        if len(parts) > 1:
-            frac = parts[1]
-            if frac.startswith("3333"):
-                partial = 1
-            elif frac.startswith("6667"):
-                partial = 2
-            else:
-                partial = int(frac[:1] or 0)
-        outs = int(parts[0]) * 3 + partial
-    except (TypeError, ValueError):
-        outs = 0
-    try:
-        earned_runs = int(starter_pitch[12] or 0)
-    except (TypeError, ValueError):
-        earned_runs = 0
-
-    if outs >= 21 and earned_runs <= 3:
-        return "QS"
-    if outs >= 18 and earned_runs <= 2:
-        return "QS"
-    if outs >= 15 and earned_runs <= 1:
-        return "QS"
-    return "x"
+    return NpbRowsService.analysis_qs(starter_pitch)
 
 
 def _analysis_starter_block(starter_pitch: list) -> list:
-    return [
-        starter_pitch[0],  # 局數
-        starter_pitch[1],  # 打數 / faced batters
-        starter_pitch[4],  # 安打
-        starter_pitch[5],  # HR
-        starter_pitch[6] + starter_pitch[7],  # 四球 + 死球
-        starter_pitch[11],  # 失点
-        starter_pitch[12],  # 責失
-        starter_pitch[4] + starter_pitch[5] * 3,  # 被壘打, minimum from H/HR
-        _analysis_qs(starter_pitch),  # QS
-    ]
+    return NpbRowsService(module=sys.modules[__name__]).analysis_starter_block(
+        starter_pitch
+    )
 
 
 def _analysis_team_total_block(
@@ -2517,78 +2171,18 @@ def _analysis_team_total_block(
     earned_runs: int,
     errors: int,
 ) -> list:
-    return [
-        opposing_pitch[0],  # 局数
-        opposing_pitch[2],  # 用球数
-        opposing_batting[0],  # 打 数
-        opposing_batting[2],  # 安打
-        opposing_batting[6],  # HR
-        opposing_batting[10],  # 三振
-        opposing_batting[8] + opposing_batting[9],  # 四死
-        score,  # 失点 / 得点 from this team's view
+    return NpbRowsService(module=sys.modules[__name__]).analysis_team_total_block(
+        opposing_pitch,
+        opposing_batting,
+        own_batting,
+        score,
         earned_runs,
         errors,
-        own_batting[7],  # 併打
-        own_batting[13],  # 盜壘
-        own_batting[14],  # 盜壘刺
-        _analysis_total_bases(own_batting),
-        _analysis_long_hits(own_batting),
-    ]
+    )
 
 
 def _analysis_row(seq: int, data: dict) -> list:
-    away_score = int(data["客總分"])
-    home_score = int(data["主總分"])
-    away_mark, home_mark = _analysis_marks(away_score, home_score)
-    away_innings, away_ot = _analysis_innings(data["away_innings"])
-    home_innings, home_ot = _analysis_innings(data["home_innings"])
-
-    away_bat = data["客打擊"]
-    home_bat = data["主打擊"]
-    away_starter_view = _analysis_starter_block(data["客先發投球"])
-    home_starter_view = _analysis_starter_block(data["主先發投球"])
-    away_total_view = _analysis_team_total_block(
-        data["客總投球"],
-        home_bat,
-        away_bat,
-        home_score,
-        data["客總投球"][12],
-        data["客總失誤"],
-    )
-    home_total_view = _analysis_team_total_block(
-        data["主總投球"],
-        away_bat,
-        home_bat,
-        away_score,
-        data["主總投球"][12],
-        data["主總失誤"],
-    )
-
-    return [
-        seq,
-        _analysis_date(data["日期"]),
-        _analysis_day_night(data.get("時間", "")),
-        _analysis_game_type(data),
-        data["主審"],
-        _analysis_hand(data["客投別"]),
-        _analysis_hand(data["主投別"]),
-        away_mark,
-        _analysis_team_name(data.get("客隊原名", data["客隊"])),
-        away_score,
-        home_score,
-        _analysis_team_name(data.get("主隊原名", data["主隊"])),
-        home_mark,
-        _analysis_field(data),
-        *away_innings,
-        away_ot,
-        *home_innings,
-        home_ot,
-        *away_starter_view,
-        *away_total_view,
-        "",
-        *home_starter_view,
-        *home_total_view,
-    ]
+    return NpbRowsService(module=sys.modules[__name__]).analysis_row(seq, data)
 
 
 def _sailu_row(seq: int, data: dict) -> list:
@@ -2596,148 +2190,27 @@ def _sailu_row(seq: int, data: dict) -> list:
     Convert a game data dict to a 賽錄 sheet row covering columns A–AY (51 values).
     Columns AZ onwards are all formula-driven in the sheet and are left untouched.
     """
-    ai = data["away_innings"]
-    hi = data["home_innings"]
-    return [
-        seq,  # A   編號
-        data["賽事編號"],  # B   賽事編號
-        data["客場隊伍"],  # C   客場隊伍
-        data["客場先發"],  # D   客場先發
-        data["主場隊伍"],  # E   主場隊伍
-        data["主場先發"],  # F   主場先發
-        data["時間"],  # G   時間
-        data["球場"],  # H   球場
-        data["主審"],  # I   主審
-        ai[0],
-        ai[1],
-        ai[2],
-        ai[3],  # J–M  客1–4
-        ai[4],
-        ai[5],
-        ai[6],
-        ai[7],  # N–Q  客5–8
-        ai[8],
-        ai[9],
-        ai[10],
-        ai[11],  # R–U  客9–12
-        data["客總分"],  # V   客總分
-        data["客安打"],  # W   客安打
-        data["客失誤"],  # X   客失誤
-        hi[0],
-        hi[1],
-        hi[2],
-        hi[3],  # Y–AB 主1–4
-        hi[4],
-        hi[5],
-        hi[6],
-        hi[7],  # AC–AF 主5–8
-        hi[8],
-        hi[9],
-        hi[10],
-        hi[11],  # AG–AJ 主9–12
-        data["主總"],  # AK  主總
-        data["主安打"],  # AL  主安打
-        data["主失誤"],  # AM  主失誤
-        data["賽事狀態"],  # AN  賽事狀態
-        data["日期"],  # AO  日期
-        data["客隊代號"],  # AP  客隊代號
-        data["主隊代號"],  # AQ  主隊代號
-        data["客投別"],  # AR  客投別
-        data["主投別"],  # AS  主投別
-        data["客投局"],  # AT  客投局
-        data["主投局"],  # AU  主投局
-        data["客責失"],  # AV  客責失
-        data["客QS"],  # AW  客QS
-        data["主責失"],  # AX  主責失
-        data["主QS"],  # AY  主QS
-    ]
+    return NpbRowsService(module=sys.modules[__name__]).sailu_row(seq, data)
 
 
 def _sailu_formula_row(row_num: int) -> list[str]:
     """Build AZ:BT formula cells for one 賽錄 row."""
-    return [
-        f"=SUM(J{row_num}:L{row_num})",
-        f"=SUM(Y{row_num}:AA{row_num})",
-        f"=SUM(J{row_num}:N{row_num})",
-        f"=SUM(Y{row_num}:AC{row_num})",
-        f"=SUM(J{row_num}:O{row_num})",
-        f"=SUM(Y{row_num}:AD{row_num})",
-        f"=SUM(J{row_num}:P{row_num})",
-        f"=SUM(Y{row_num}:AE{row_num})",
-        '=IF(客總分="","",IF(客總分=主總分,"平",IF(客總分>主總分,"勝","敗")))',
-        '=IF(BH{0}="","",IF(BH{0}="平","平",IF(BH{0}="勝","敗","勝")))'.format(row_num),
-        '=IF(BH{0}="勝",客總分-主總分,IF(BH{0}="敗",主總分-客總分,0))'.format(row_num),
-        '=IF(MOD(AT{0},1)=0,AT{0},IF(RIGHT(AT{0},1)="1",(AT{0}-0.1)+1/3,(AT{0}-0.2)+2/3))'.format(
-            row_num
-        ),
-        '=IF(MOD(AU{0},1)=0,AU{0},IF(RIGHT(AU{0},1)="1",(AU{0}-0.1)+1/3,(AU{0}-0.2)+2/3))'.format(
-            row_num
-        ),
-        '=IF(客總分="","",客總5+主總5)',
-        '=IF(客總分="","",客總分+主總分)',
-        f'=IF(J{row_num}="","",SUM(J{row_num}:R{row_num}))',
-        f'=IF(J{row_num}="","",SUM(Y{row_num}:AG{row_num}))',
-        f'=IF(S{row_num}="","",SUM(S{row_num}:U{row_num}))',
-        f'=IF(AH{row_num}="","",SUM(AH{row_num}:AJ{row_num}))',
-        '=IF(AO{0}="","",IF(AND(客先局>=5,主總7<=3,主總6<=2,主總5<=1),1,IF(AND(客先局>=5,主總6<=2,主總5<=1),1,IF(AND(客先局>=5,主總5<=1),1,""))))'.format(
-            row_num
-        ),
-        '=IF(AO{0}="","",IF(AND(主先局>=5,客總7<=3,客總6<=2,客總5<=1),1,IF(AND(主先局>=5,客總6<=2,客總5<=1),1,IF(AND(主先局>=5,客總5<=1),1,""))))'.format(
-            row_num
-        ),
-    ]
+    return NpbRowsService.sailu_formula_row(row_num)
 
 
 def _chunked(seq: list, size: int):
-    for i in range(0, len(seq), size):
-        yield seq[i : i + size]
+    yield from NpbRowsService.chunked(seq, size)
 
 
 def _placeholder_rows(sheet) -> list[int]:
-    col_a = sheet.col_values(1)[1:]
-    col_b = sheet.col_values(2)[1:]
-    return [
-        i + 2
-        for i, a in enumerate(col_a)
-        if a and not (col_b[i] if i < len(col_b) else "")
-    ]
+    return NpbRowsService.placeholder_rows(sheet)
 
 
 def _ensure_target_sailu_capacity(sheet, needed_rows: int) -> list[int]:
     """Extend target 賽錄 with numbered placeholder rows and formulas if needed."""
-    placeholder_rows = _placeholder_rows(sheet)
-    if len(placeholder_rows) >= needed_rows:
-        return placeholder_rows
-
-    missing = needed_rows - len(placeholder_rows)
-    start_row = sheet.row_count + 1
-    sheet.add_rows(missing)
-
-    prev_seq = int(sheet.acell(f"A{start_row - 1}").value)
-    seq_values = [[prev_seq + offset + 1] for offset in range(missing)]
-    formula_values = [
-        _sailu_formula_row(row_num) for row_num in range(start_row, start_row + missing)
-    ]
-
-    for offset, chunk in enumerate(_chunked(seq_values, 200)):
-        chunk_start = start_row + offset * 200
-        chunk_end = chunk_start + len(chunk) - 1
-        sheet.update(
-            f"A{chunk_start}:A{chunk_end}",
-            chunk,
-            value_input_option="USER_ENTERED",
-        )
-
-    for offset, chunk in enumerate(_chunked(formula_values, 200)):
-        chunk_start = start_row + offset * 200
-        chunk_end = chunk_start + len(chunk) - 1
-        sheet.update(
-            f"AZ{chunk_start}:BT{chunk_end}",
-            chunk,
-            value_input_option="USER_ENTERED",
-        )
-
-    return _placeholder_rows(sheet)
+    return NpbRowsService(module=sys.modules[__name__]).ensure_target_sailu_capacity(
+        sheet, needed_rows
+    )
 
 
 def _write_regular_sailu_games(
@@ -2747,87 +2220,22 @@ def _write_regular_sailu_games(
     auto_extend_target: bool = False,
 ):
     """Write regular-season 賽錄 rows into placeholder rows, optionally extending them."""
-    if not games:
-        return 0, []
-
-    placeholder_rows = (
-        _ensure_target_sailu_capacity(sheet, len(games))
-        if auto_extend_target
-        else _placeholder_rows(sheet)
+    return NpbRowsService(module=sys.modules[__name__]).write_regular_sailu_games(
+        sheet, games, auto_extend_target=auto_extend_target
     )
-
-    filled = 0
-    for (gid, data), row_num in zip(games, placeholder_rows):
-        row_values = _sailu_row(0, data)[1:]  # drop col A; keep existing sequence
-        sheet.update(
-            f"B{row_num}:AY{row_num}", [row_values], value_input_option="USER_ENTERED"
-        )
-        print(f"  [sailu] Row {row_num} ← {gid}")
-        filled += 1
-
-    return filled, games[len(placeholder_rows) :]
 
 
 def _exhibition_row(data: dict) -> list[str]:
     """Convert scraped game data into 熱身賽紀錄's compact 28-column layout."""
-    away_score = int(data["客總分"])
-    home_score = int(data["主總"])
-    if away_score > home_score:
-        away_mark, home_mark = "○", "●"
-    elif away_score < home_score:
-        away_mark, home_mark = "●", "○"
-    else:
-        away_mark = home_mark = "△"
-
-    def _cell(v: str) -> str:
-        return "" if v in ("", "×") else str(v)
-
-    def _ot_total(vals: list) -> str:
-        nums = [int(v) for v in vals if str(v).isdigit()]
-        return str(sum(nums)) if nums else ""
-
-    away_innings = [_cell(v) for v in data["away_innings"][:9]]
-    home_innings = [_cell(v) for v in data["home_innings"][:9]]
-    away_ot = _ot_total(data["away_innings"][9:12])
-    home_ot = _ot_total(data["home_innings"][9:12])
-    dt = datetime.strptime(data["日期"], "%Y-%m-%d")
-
-    return [
-        f"{dt.year}/{dt.month}/{dt.day}",
-        away_mark,
-        display_team_name(data["客場隊伍"]),
-        str(away_score),
-        str(home_score),
-        display_team_name(data["主場隊伍"]),
-        home_mark,
-        data["球場"],
-        *away_innings,
-        away_ot,
-        *home_innings,
-        home_ot,
-    ]
+    return NpbRowsService(module=sys.modules[__name__]).exhibition_row(data)
 
 
 def _exhibition_identity(data: dict) -> tuple[str, str, str]:
-    return (
-        data["日期"],
-        display_team_name(data["客場隊伍"]),
-        display_team_name(data["主場隊伍"]),
-    )
+    return NpbRowsService(module=sys.modules[__name__]).exhibition_identity(data)
 
 
 def _existing_exhibition_identities(sheet) -> set[tuple[str, str, str]]:
-    rows = sheet.get_all_values()[1:]
-    identities: set[tuple[str, str, str]] = set()
-    for row in rows:
-        if len(row) < 6 or not row[0]:
-            continue
-        try:
-            dt = datetime.strptime(row[0], "%Y/%m/%d").strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-        identities.add((dt, row[2], row[5]))
-    return identities
+    return NpbRowsService.existing_exhibition_identities(sheet)
 
 
 async def update_sailu_sheet(session: aiohttp.ClientSession):
@@ -2843,47 +2251,23 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
 
 
 def _analysis_identity(data: dict) -> tuple[str, str, str]:
-    return (
-        _analysis_date(data["日期"]),
-        _analysis_team_name(data.get("客隊原名", data["客隊"])),
-        _analysis_team_name(data.get("主隊原名", data["主隊"])),
-    )
+    return NpbRowsService(module=sys.modules[__name__]).analysis_identity(data)
 
 
 def _analysis_identity_from_row(row: list[str]) -> tuple[str, str, str] | None:
-    if len(row) < 12 or not row[1] or not row[8] or not row[11]:
-        return None
-    return (row[1], row[8], row[11])
+    return NpbRowsService.analysis_identity_from_row(row)
 
 
 def _analysis_row_year(row: list[str]) -> int | None:
-    if len(row) < 2 or not row[1]:
-        return None
-    try:
-        return datetime.strptime(row[1], "%Y/%m/%d").year
-    except ValueError:
-        return None
+    return NpbRowsService.analysis_row_year(row)
 
 
 def _analysis_row_date(row: list[str]) -> datetime | None:
-    if len(row) < 2 or not row[1]:
-        return None
-    try:
-        return datetime.strptime(row[1], "%Y/%m/%d")
-    except ValueError:
-        return None
+    return NpbRowsService.analysis_row_date(row)
 
 
 def _last_analysis_seq(rows: list[list[str]]) -> int:
-    last_seq = 0
-    for row in rows[2:]:
-        if not row:
-            continue
-        try:
-            last_seq = max(last_seq, int(row[0]))
-        except (TypeError, ValueError):
-            continue
-    return last_seq
+    return NpbRowsService.last_analysis_seq(rows)
 
 
 def _analysis_insert_index(rows: list[list[str]], date_str: str) -> int:
@@ -2891,15 +2275,9 @@ def _analysis_insert_index(rows: list[list[str]], date_str: str) -> int:
     Return the 1-based worksheet row where a new analysis row should be inserted.
     Rows 1-2 are headers; data stays sorted by game date.
     """
-    game_date = datetime.strptime(date_str, "%Y-%m-%d")
-    insert_at = len(rows) + 1
-    for row_num, row in enumerate(rows[2:], start=3):
-        row_date = _analysis_row_date(row)
-        if row_date and row_date > game_date:
-            return row_num
-        if row_date:
-            insert_at = row_num + 1
-    return insert_at
+    return NpbRowsService(module=sys.modules[__name__]).analysis_insert_index(
+        rows, date_str
+    )
 
 
 def _season_months(year: int) -> list[str]:
@@ -3060,95 +2438,14 @@ def build_block_values(team_key: str, games: list[dict]) -> list[list]:
       row 11:   近十場 平均
       row 12:   近五場 平均
     """
-    display_name = NPB_TEAMS[team_key]["name"]
-
-    header = [
-        display_name,
-        "球 隊",
-        "對 戰",
-        "球 場",
-        "実 点",
-        "得 点",
-        "失 点",
-        "実 失",
-        "安 打",
-        "三 振",
-        "四 死",
-        "本 打",
-    ]
-
-    # Sort by date, keep last GAMES_COUNT
-    sorted_games = sorted(
-        games,
-        key=lambda g: datetime.strptime(g["日期"], "%Y/%m/%d"),
-    )[-GAMES_COUNT:]
-
-    rows = [header]
-
-    for i in range(GAMES_COUNT):
-        if i < len(sorted_games):
-            g = sorted_games[i]
-            date = datetime.strptime(g["日期"], "%Y/%m/%d")
-            date_str = (
-                date.strftime("%#m/%#d")
-                if platform.system() == "Windows"
-                else date.strftime("%-m/%-d")
-            )
-            row = [
-                date_str,
-                g.get("對戰球隊", ""),
-                g.get("對戰先發", ""),
-                _display_field_name(g.get("球場", "")),
-                g.get("実分", 0),
-                g.get("得分", 0),
-                g.get("失分", 0),
-                g.get("実失", 0),
-                g.get("安打", 0),
-                g.get("三振", 0),
-                g.get("四球", 0) + g.get("死球", 0),
-                g.get("全壘打", 0),
-            ]
-        else:
-            row = [""] * 12
-        rows.append(row)
-
-    def avg_row(label: str, game_list: list[dict]) -> list:
-        if not game_list:
-            return ["", "", label, "平 均"] + [""] * 8
-        n = len(game_list)
-
-        def r(v):
-            return round(v / n, 1)
-
-        return [
-            "",
-            "",
-            label,
-            "平 均",
-            r(sum(g.get("実分", 0) for g in game_list)),
-            r(sum(g.get("得分", 0) for g in game_list)),
-            r(sum(g.get("失分", 0) for g in game_list)),
-            r(sum(g.get("実失", 0) for g in game_list)),
-            r(sum(g.get("安打", 0) for g in game_list)),
-            r(sum(g.get("三振", 0) for g in game_list)),
-            r(sum(g.get("四球", 0) + g.get("死球", 0) for g in game_list)),
-            r(sum(g.get("全壘打", 0) for g in game_list)),
-        ]
-
-    rows.append(avg_row("近十場", sorted_games))
-    rows.append(avg_row("近五場", sorted_games[-5:]))
-
-    return rows  # 13 rows × 12 cols
+    return NpbLeagueSheetService(module=sys.modules[__name__]).build_block_values(
+        team_key, games
+    )
 
 
 def _pitcher_font_size(name: str) -> int:
     """10pt default; shrink longer pitcher names to fit the narrow column."""
-    n = len(name.replace(" ", ""))
-    if n > 7:
-        return 6
-    if n > 5:
-        return 8
-    return 10
+    return NpbLeagueSheetService.pitcher_font_size(name)
 
 
 def _pitcher_font_requests(
@@ -3159,142 +2456,39 @@ def _pitcher_font_requests(
     Also resets empty rows to default (10) so stale small fonts don't linger.
     Pitcher column = col_start + 2 (1-indexed) → col_start + 1 (0-indexed).
     """
-    sorted_games = sorted(
-        games, key=lambda g: datetime.strptime(g["日期"], "%Y/%m/%d")
-    )[-GAMES_COUNT:]
-
-    pitcher_col = col_start + 1  # 0-indexed (col_start is 1-indexed)
-    requests = []
-
-    for i in range(GAMES_COUNT):
-        name = sorted_games[i].get("對戰先發", "") if i < len(sorted_games) else ""
-        row_0idx = game_start_row - 1 + i
-        requests.append(
-            {
-                "repeatCell": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "startRowIndex": row_0idx,
-                        "endRowIndex": row_0idx + 1,
-                        "startColumnIndex": pitcher_col,
-                        "endColumnIndex": pitcher_col + 1,
-                    },
-                    "cell": {
-                        "userEnteredFormat": {
-                            "textFormat": {"fontSize": _pitcher_font_size(name)}
-                        }
-                    },
-                    "fields": "userEnteredFormat.textFormat.fontSize",
-                }
-            }
-        )
-
-    return requests
+    return NpbLeagueSheetService(module=sys.modules[__name__]).pitcher_font_requests(
+        sheet_id, games, game_start_row, col_start
+    )
 
 
 def _to_number(value) -> Optional[float]:
-    if value in ("", None):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return NpbLeagueSheetService.to_number(value)
 
 
 def _font_color_request(
     sheet_id: int, row_0idx: int, col_0idx: int, hex_color: str
 ) -> dict:
-    return {
-        "repeatCell": {
-            "range": {
-                "sheetId": sheet_id,
-                "startRowIndex": row_0idx,
-                "endRowIndex": row_0idx + 1,
-                "startColumnIndex": col_0idx,
-                "endColumnIndex": col_0idx + 1,
-            },
-            "cell": {
-                "userEnteredFormat": {
-                    "textFormat": {"foregroundColor": hex_to_rgb(hex_color)}
-                }
-            },
-            "fields": "userEnteredFormat.textFormat.foregroundColor",
-        }
-    }
+    return NpbLeagueSheetService(module=sys.modules[__name__]).font_color_request(
+        sheet_id, row_0idx, col_0idx, hex_color
+    )
 
 
 def _game_font_color_requests(
     sheet_id: int, games: list[dict], game_start_row: int, col_start: int
 ) -> list[dict]:
     """Colour game-row score and hit cells to match the CPBL 近十場 rules."""
-    sorted_games = sorted(
-        games, key=lambda g: datetime.strptime(g["日期"], "%Y/%m/%d")
-    )[-GAMES_COUNT:]
-
-    runs_col = col_start + 4  # 0-indexed 得点; col_start is 1-indexed
-    allowed_col = col_start + 5  # 0-indexed 失点
-    hits_col = col_start + 7  # 0-indexed 安打
-    requests = []
-
-    for i in range(GAMES_COUNT):
-        row_0idx = game_start_row - 1 + i
-        runs_color = DEFAULT_FONT
-        allowed_color = DEFAULT_FONT
-        hits_color = DEFAULT_FONT
-
-        if i < len(sorted_games):
-            game = sorted_games[i]
-            runs = _to_number(game.get("得分"))
-            allowed = _to_number(game.get("失分"))
-            hits = _to_number(game.get("安打"))
-
-            if runs is not None and allowed is not None:
-                if runs > allowed:
-                    runs_color = SCORE_WIN_FONT
-                elif allowed > runs:
-                    allowed_color = SCORE_LOSS_FONT
-                else:
-                    runs_color = SCORE_TIE_FONT
-                    allowed_color = SCORE_TIE_FONT
-
-            if hits is not None and hits >= 10:
-                hits_color = HITS_10_PLUS_FONT
-
-        requests.append(_font_color_request(sheet_id, row_0idx, runs_col, runs_color))
-        requests.append(
-            _font_color_request(sheet_id, row_0idx, allowed_col, allowed_color)
-        )
-        requests.append(_font_color_request(sheet_id, row_0idx, hits_col, hits_color))
-
-    return requests
+    return NpbLeagueSheetService(module=sys.modules[__name__]).game_font_color_requests(
+        sheet_id, games, game_start_row, col_start
+    )
 
 
 def _header_format_request(
     sheet_id: int, team_key: str, header_row: int, col_start: int
 ) -> dict:
     """Build a Sheets API repeatCell request to colour one header row."""
-    info = NPB_TEAMS[team_key]
-    return {
-        "repeatCell": {
-            "range": {
-                "sheetId": sheet_id,
-                "startRowIndex": header_row - 1,  # 0-indexed, inclusive
-                "endRowIndex": header_row,  # exclusive
-                "startColumnIndex": col_start - 1,  # 0-indexed, inclusive
-                "endColumnIndex": col_start + 11,  # exclusive (12 cols)
-            },
-            "cell": {
-                "userEnteredFormat": {
-                    "backgroundColor": hex_to_rgb(info["fill"]),
-                    "textFormat": {
-                        "bold": True,
-                        "foregroundColor": hex_to_rgb(info["font"]),
-                    },
-                }
-            },
-            "fields": "userEnteredFormat(backgroundColor,textFormat)",
-        }
-    }
+    return NpbLeagueSheetService(module=sys.modules[__name__]).header_format_request(
+        sheet_id, team_key, header_row, col_start
+    )
 
 
 def update_league_sheet(
@@ -3306,60 +2500,9 @@ def update_league_sheet(
     Write all 6 team blocks into one sheet.
     matchups[i] = (away_key, home_key) → away goes to top block i, home to bottom block i.
     """
-    sheet = get_worksheet(sheet_name)
-    value_updates = []
-    format_requests = []
-
-    for col_idx, (away_key, home_key) in enumerate(matchups[:3]):
-        col_start = BLOCK_COLS[col_idx]
-        col_end = col_start + 11
-        col_start_l = col_to_letter(col_start)
-        col_end_l = col_to_letter(col_end)
-
-        # Top block (away team)
-        away_games = all_games.get(away_key, [])
-        top_values = build_block_values(away_key, away_games)
-        value_updates.append(
-            {
-                "range": f"{col_start_l}{TOP_HEADER_ROW}:{col_end_l}{TOP_AVG5_ROW}",
-                "values": top_values,
-            }
-        )
-        format_requests.append(
-            _header_format_request(sheet.id, away_key, TOP_HEADER_ROW, col_start)
-        )
-        format_requests.extend(
-            _pitcher_font_requests(sheet.id, away_games, TOP_GAME_START, col_start)
-        )
-        format_requests.extend(
-            _game_font_color_requests(sheet.id, away_games, TOP_GAME_START, col_start)
-        )
-
-        # Bottom block (home team)
-        home_games = all_games.get(home_key, [])
-        bottom_values = build_block_values(home_key, home_games)
-        value_updates.append(
-            {
-                "range": f"{col_start_l}{BOTTOM_HEADER_ROW}:{col_end_l}{BOTTOM_AVG5_ROW}",
-                "values": bottom_values,
-            }
-        )
-        format_requests.append(
-            _header_format_request(sheet.id, home_key, BOTTOM_HEADER_ROW, col_start)
-        )
-        format_requests.extend(
-            _pitcher_font_requests(sheet.id, home_games, BOTTOM_GAME_START, col_start)
-        )
-        format_requests.extend(
-            _game_font_color_requests(
-                sheet.id, home_games, BOTTOM_GAME_START, col_start
-            )
-        )
-
-    # Write values first, then apply formatting in one batch API call
-    sheet.batch_update(value_updates, value_input_option="USER_ENTERED")
-    sheet.spreadsheet.batch_update({"requests": format_requests})
-    print(f"[{sheet_name}] Updated {len(value_updates)} blocks with header colours.")
+    return NpbLeagueSheetService(module=sys.modules[__name__]).update_league_sheet(
+        sheet_name, matchups, all_games
+    )
 
 
 # --- Main ---
