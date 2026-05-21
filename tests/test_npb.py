@@ -6,12 +6,14 @@ Covers: hex_to_rgb, col_to_letter, _pitcher_font_size, build_block_values,
 """
 
 import asyncio
+from argparse import Namespace
 from datetime import date, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from bs4 import BeautifulSoup as bs
 
+from baseball.npb_services import NpbPredictionService
 from npb import (
     DEFAULT_FONT,
     HITS_10_PLUS_FONT,
@@ -27,17 +29,43 @@ from npb import (
     _parse_official_caught_stealing,
     _parse_batting_table,
     _resolve_matchup_start_date,
+    _schedule_status_for_game,
     _pitcher_font_requests,
     _pitcher_font_size,
+    _prediction_cli_values,
     build_block_values,
+    build_prediction_text,
+    calculate_prediction_balance,
     col_to_letter,
+    create_npb_prediction,
     get_game_info,
     get_last_n_game_ids,
     get_next_scheduled_game,
     hex_to_rgb,
+    prediction_outcome_for_game,
+    resolve_prediction_game_by_home_team,
+    resolve_npb_predictions_for_game,
     GAMES_COUNT,
     NPB_TEAMS,
+    PREDICTION_PROMPT_SENTINEL,
 )
+
+PREDICTION_HEADERS = [
+    "prediction_id",
+    "game_id",
+    "game_date",
+    "market",
+    "pick",
+    "line",
+    "rate",
+    "stake",
+    "status",
+    "outcome",
+    "balance_before",
+    "balance_after",
+    "created_at",
+    "resolved_at",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +224,682 @@ SAMPLE_GAMES = [
     _make_game("2025/04/01", "燕 子", "原", "東 京", 2, 2, 3, 3, 7, 9, 4, 0, 0),
     _make_game("2025/04/02", "中 日", "小澤", "名古屋", 0, 0, 2, 2, 3, 5, 1, 0, 0),
 ]
+
+
+class FakePredictionSheet:
+    def __init__(self, rows=None):
+        self.rows = [list(row) for row in (rows or [])]
+        self.appended = []
+        self.updated_cells = []
+
+    def get_all_values(self):
+        return [list(row) for row in self.rows]
+
+    def append_row(self, row, value_input_option=None):
+        self.rows.append(list(row))
+        self.appended.append(list(row))
+
+    def insert_row(self, row, index=1, value_input_option=None):
+        self.rows.insert(index - 1, list(row))
+        self.appended.append(list(row))
+
+    def update_cell(self, row, col, value):
+        while len(self.rows) < row:
+            self.rows.append([])
+        while len(self.rows[row - 1]) < col:
+            self.rows[row - 1].append("")
+        self.rows[row - 1][col - 1] = value
+        self.updated_cells.append((row, col, value))
+
+
+def _balance_after_formula(row_num):
+    return (
+        f'=IF(J{row_num}="win",K{row_num}+H{row_num}*G{row_num},'
+        f'IF(J{row_num}="loss",K{row_num}-H{row_num},'
+        f'IF(OR(J{row_num}="push",J{row_num}="void",'
+        f'I{row_num}="pending",J{row_num}=""),K{row_num},K{row_num})))'
+    )
+
+
+# ---------------------------------------------------------------------------
+# NPB prediction ledger
+# ---------------------------------------------------------------------------
+
+
+class TestPredictionLedger:
+    def test_build_prediction_text_summarizes_pick_without_hash_fields(self):
+        result = build_prediction_text(
+            "2021038658",
+            "巨人",
+            0.92,
+            10,
+        )
+
+        assert result == (
+            "NPB prediction\n"
+            "Game 2021038658\n"
+            "Market: final_winner\n"
+            "Pick: 巨人\n"
+            "Rate: 0.92\n"
+            "Stake: 10.0"
+        )
+        assert "SHA-256" not in result
+        assert "salt" not in result
+
+    def test_balance_math_matches_stake_rate_example(self):
+        assert calculate_prediction_balance(0, 10, 0.92, "win") == 9.2
+        assert calculate_prediction_balance(0, 10, 0.92, "loss") == -10
+        assert calculate_prediction_balance(0, 10, 0.92, "push") == 0
+
+    def test_prediction_outcome_compares_pick_to_final_winner(self):
+        data = {
+            "賽事狀態": "試合終了",
+            "客隊原名": "阪神",
+            "客隊": "阪 神",
+            "主隊原名": "巨人",
+            "主隊": "巨 人",
+            "客總分": 2,
+            "主總分": 4,
+            "away_innings": [0, 0, 1, 1, 0, "", "", "", "", "", "", ""],
+            "home_innings": [1, 1, 0, 0, 2, "", "", "", "", "", "", ""],
+        }
+
+        assert prediction_outcome_for_game(data, "巨 人") == "win"
+        assert prediction_outcome_for_game(data, "阪神") == "loss"
+        assert prediction_outcome_for_game(data, "巨人", market="half_winner") == "win"
+        assert (
+            prediction_outcome_for_game(data, "over", market="half_total", line=5.5)
+            == "win"
+        )
+        assert (
+            prediction_outcome_for_game(data, "under", market="final_total", line=6.5)
+            == "win"
+        )
+
+    def test_prediction_outcome_handicap_final(self):
+        # 客 2, 主 4
+        data = {
+            "賽事狀態": "試合終了",
+            "客隊原名": "阪神",
+            "客隊": "阪神",
+            "主隊原名": "巨人",
+            "主隊": "巨人",
+            "客總分": 2,
+            "主總分": 4,
+            "away_innings": [0, 0, 1, 1, 0, "", "", "", "", "", "", ""],
+            "home_innings": [1, 1, 0, 0, 2, "", "", "", "", "", "", ""],
+        }
+        # 主隊 +0.5: 4+0.5=4.5 > 2 → win
+        assert prediction_outcome_for_game(data, "巨人", market="final_handicap", line=0.5) == "win"
+        # 客隊 +0.5: 2+0.5=2.5 < 4 → loss
+        assert prediction_outcome_for_game(data, "阪神", market="final_handicap", line=0.5) == "loss"
+        # 主隊 -0.5: 4-0.5=3.5 > 2 → win
+        assert prediction_outcome_for_game(data, "巨人", market="final_handicap", line=-0.5) == "win"
+        # 主隊 -3.5: 4-3.5=0.5 < 2 → loss
+        assert prediction_outcome_for_game(data, "巨人", market="final_handicap", line=-3.5) == "loss"
+        # push: 客隊 +2: 2+2=4 == 4 → push
+        assert prediction_outcome_for_game(data, "阪神", market="final_handicap", line=2) == "push"
+
+    def test_prediction_outcome_handicap_half(self):
+        # 前5局: 客 0+0+1+1+0=2, 主 1+1+0+0+2=4
+        data = {
+            "賽事狀態": "試合終了",
+            "客隊原名": "阪神",
+            "客隊": "阪神",
+            "主隊原名": "巨人",
+            "主隊": "巨人",
+            "客總分": 2,
+            "主總分": 4,
+            "away_innings": [0, 0, 1, 1, 0, "", "", "", "", "", "", ""],
+            "home_innings": [1, 1, 0, 0, 2, "", "", "", "", "", "", ""],
+        }
+        # 主隊 +0.5: 4+0.5=4.5 > 2 → win
+        assert prediction_outcome_for_game(data, "巨人", market="half_handicap", line=0.5) == "win"
+        # 客隊 +0.5: 2+0.5=2.5 < 4 → loss
+        assert prediction_outcome_for_game(data, "阪神", market="half_handicap", line=0.5) == "loss"
+
+    def test_prediction_outcome_handicap_requires_line(self):
+        data = {
+            "客隊原名": "阪神",
+            "客隊": "阪神",
+            "主隊原名": "巨人",
+            "主隊": "巨人",
+            "客總分": 2,
+            "主總分": 4,
+            "away_innings": [],
+            "home_innings": [],
+        }
+        with pytest.raises(ValueError, match="line"):
+            prediction_outcome_for_game(data, "巨人", market="final_handicap")
+        with pytest.raises(ValueError, match="line"):
+            prediction_outcome_for_game(data, "巨人", market="half_handicap")
+
+    def test_create_prediction_records_pending_row_without_external_posts(self):
+        sheet = FakePredictionSheet([])
+
+        result = create_npb_prediction(
+            "2021038658",
+            "巨人",
+            0.92,
+            stake=10,
+            game_date="2026-05-11",
+            away_team="阪神",
+            home_team="巨人",
+            sheet=sheet,
+            post=False,
+        )
+
+        assert len(sheet.rows) == 2
+        headers = sheet.rows[0]
+        row = sheet.rows[1]
+        assert row[headers.index("game_id")] == "2021038658"
+        assert row[headers.index("status")] == "pending"
+        assert row[headers.index("balance_before")] == 0.0
+        assert row[headers.index("balance_after")] == _balance_after_formula(2)
+        assert "SHA-256" not in result["prediction_text"]
+
+    def test_create_prediction_inserts_missing_header_above_existing_rows(self):
+        sheet = FakePredictionSheet(
+            [
+                [
+                    "p1",
+                    "2021038658",
+                    "2026-05-11",
+                    "final_winner",
+                    "巨人",
+                    "",
+                    "0.92",
+                    "10",
+                    "pending",
+                    "",
+                    "0",
+                    "0",
+                    "2026-05-11T12:00:00",
+                    "",
+                ],
+            ]
+        )
+
+        create_npb_prediction(
+            "2021038659",
+            "阪神",
+            0.92,
+            stake=10,
+            sheet=sheet,
+            post=False,
+        )
+
+        headers = sheet.rows[0]
+        assert headers == PREDICTION_HEADERS
+        assert sheet.rows[1][0] == "p1"
+
+    def test_prediction_cli_prompts_for_missing_values(self, monkeypatch):
+        answers = iter(
+            [
+                "巨人",
+                "3",
+                "under",
+                "8.5",
+                "0.92",
+                "",
+            ]
+        )
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+        args = Namespace(
+            create_prediction=PREDICTION_PROMPT_SENTINEL,
+            market="final_winner",
+            pick=None,
+            line=None,
+            rate=None,
+            stake=None,
+            game_date="",
+            away_team="",
+            home_team="",
+        )
+
+        values = _prediction_cli_values(args)
+
+        assert values == {
+            "home_team_lookup": "巨人",
+            "game_id": "",
+            "market": "final_total",
+            "pick": "under",
+            "line": 8.5,
+            "rate": 0.92,
+            "stake": 10.0,
+            "game_date": "",
+            "away_team": "",
+            "home_team": "",
+        }
+
+    def test_prediction_cli_reprompts_invalid_pick(self, monkeypatch):
+        answers = iter(
+            [
+                "巨人",
+                "1",
+                "not-a-team",
+                "巨人",
+                "0.92",
+                "",
+            ]
+        )
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+        args = Namespace(
+            create_prediction=PREDICTION_PROMPT_SENTINEL,
+            market="final_winner",
+            pick=None,
+            line=None,
+            rate=None,
+            stake=None,
+            game_date="",
+            away_team="",
+            home_team="",
+        )
+
+        values = _prediction_cli_values(args)
+
+        assert values["pick"] == "巨人"
+
+    def test_prediction_cli_reprompts_invalid_home_team(self, monkeypatch, capsys):
+        answers = iter(
+            [
+                "not-a-team",
+                "巨人",
+                "1",
+                "巨人",
+                "0.92",
+                "",
+            ]
+        )
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+        args = Namespace(
+            create_prediction=PREDICTION_PROMPT_SENTINEL,
+            market="final_winner",
+            pick=None,
+            line=None,
+            rate=None,
+            stake=None,
+            game_date="",
+            away_team="",
+            home_team="",
+        )
+
+        values = _prediction_cli_values(args)
+
+        output = capsys.readouterr().out
+        assert "Home team options:" in output
+        assert "Home team must be one of:" in output
+        assert values["home_team_lookup"] == "巨人"
+
+    def test_resolve_prediction_updates_outcome_and_balance(self):
+        headers = PREDICTION_HEADERS
+        sheet = FakePredictionSheet(
+            [
+                headers,
+                [
+                    "p1",
+                    "2021038658",
+                    "2026-05-11",
+                    "final_winner",
+                    "巨人",
+                    "",
+                    "0.92",
+                    "10",
+                    "pending",
+                    "",
+                    "0",
+                    "0",
+                    "2026-05-11T12:00:00",
+                    "",
+                ],
+            ]
+        )
+        data = {
+            "賽事狀態": "試合終了",
+            "客隊原名": "阪神",
+            "客隊": "阪 神",
+            "主隊原名": "巨人",
+            "主隊": "巨 人",
+            "客總分": 2,
+            "主總分": 4,
+            "away_innings": [0, 0, 1, 1, 0, "", "", "", "", "", "", ""],
+            "home_innings": [1, 1, 0, 0, 2, "", "", "", "", "", "", ""],
+        }
+
+        assert (
+            resolve_npb_predictions_for_game(
+                "2021038658", data, sheet=sheet, post=False
+            )
+            == 1
+        )
+
+        row = sheet.rows[1]
+        assert row[headers.index("status")] == "resolved"
+        assert row[headers.index("outcome")] == "win"
+        assert row[headers.index("balance_before")] == 0.0
+        assert row[headers.index("balance_after")] == _balance_after_formula(2)
+
+    def test_resolve_prediction_keeps_in_progress_game_pending(self):
+        headers = PREDICTION_HEADERS
+        sheet = FakePredictionSheet(
+            [
+                headers,
+                [
+                    "p1",
+                    "2021038658",
+                    "2026-05-17",
+                    "final_winner",
+                    "巨人",
+                    "",
+                    "0.92",
+                    "10",
+                    "pending",
+                    "",
+                    "0",
+                    "0",
+                    "2026-05-17T12:00:00",
+                    "",
+                ],
+            ]
+        )
+        data = {
+            "賽事狀態": "5回表",
+            "客隊原名": "阪神",
+            "客隊": "阪 神",
+            "主隊原名": "巨人",
+            "主隊": "巨 人",
+            "客總分": 2,
+            "主總分": 4,
+        }
+
+        assert (
+            resolve_npb_predictions_for_game(
+                "2021038658", data, sheet=sheet, post=False
+            )
+            == 0
+        )
+
+        row = sheet.rows[1]
+        assert row[headers.index("status")] == "pending"
+        assert row[headers.index("outcome")] == ""
+        assert row[headers.index("resolved_at")] == ""
+
+    def test_create_prediction_balance_formula_references_previous_row(self):
+        headers = PREDICTION_HEADERS
+        sheet = FakePredictionSheet(
+            [
+                headers,
+                [
+                    "p1",
+                    "2021038658",
+                    "2026-05-11",
+                    "final_winner",
+                    "巨人",
+                    "",
+                    "0.92",
+                    "10",
+                    "resolved",
+                    "win",
+                    "0",
+                    "9.2",
+                    "2026-05-11T12:00:00",
+                    "2026-05-11T15:00:00",
+                ],
+            ]
+        )
+
+        create_npb_prediction(
+            "2021038659",
+            "阪神",
+            0.92,
+            stake=10,
+            sheet=sheet,
+            post=False,
+        )
+
+        row = sheet.rows[2]
+        assert row[headers.index("balance_before")] == "=L2"
+        assert row[headers.index("balance_after")] == _balance_after_formula(3)
+
+    def test_resolve_prediction_backfills_empty_game_date(self):
+        headers = PREDICTION_HEADERS
+        sheet = FakePredictionSheet(
+            [
+                headers,
+                [
+                    "p1",
+                    "2021038658",
+                    "",
+                    "final_winner",
+                    "巨人",
+                    "",
+                    "0.92",
+                    "10",
+                    "pending",
+                    "",
+                    "0",
+                    "0",
+                    "2026-05-11T12:00:00",
+                    "",
+                ],
+            ]
+        )
+        data = {
+            "日期": "2026-05-11",
+            "賽事狀態": "試合終了",
+            "客隊原名": "阪神",
+            "客隊": "阪 神",
+            "主隊原名": "巨人",
+            "主隊": "巨 人",
+            "客總分": 2,
+            "主總分": 4,
+            "away_innings": [0, 0, 1, 1, 0, "", "", "", "", "", "", ""],
+            "home_innings": [1, 1, 0, 0, 2, "", "", "", "", "", "", ""],
+        }
+
+        resolve_npb_predictions_for_game("2021038658", data, sheet=sheet, post=False)
+
+        row = sheet.rows[1]
+        assert row[headers.index("game_date")] == "2026-05-11"
+
+    def test_reveal_predictions_scans_pending_ids_when_no_game_ids_provided(self):
+        headers = PREDICTION_HEADERS
+        sheet = FakePredictionSheet(
+            [
+                headers,
+                [
+                    "p1",
+                    "pending-game",
+                    "",
+                    "final_winner",
+                    "巨人",
+                    "",
+                    "0.92",
+                    "10",
+                    "pending",
+                    "",
+                    "0",
+                    "0",
+                    "2026-05-11T12:00:00",
+                    "",
+                ],
+            ]
+        )
+        fetched = []
+
+        class FakeModule:
+            @staticmethod
+            def _prediction_sheet():
+                return sheet
+
+            @staticmethod
+            def _prediction_rows(prediction_sheet):
+                return prediction_sheet.get_all_values()
+
+            @staticmethod
+            async def get_schedule_game_data(gid, _session, retry=False):
+                fetched.append((gid, retry))
+                return None
+
+        resolved = asyncio.run(
+            NpbPredictionService(module=FakeModule).reveal_predictions_for_games(
+                AsyncMock(), []
+            )
+        )
+
+        assert resolved == 0
+        assert fetched == [("pending-game", False)]
+
+    def test_reveal_predictions_skips_unfinished_schedule_status(self):
+        headers = PREDICTION_HEADERS
+        sheet = FakePredictionSheet(
+            [
+                headers,
+                [
+                    "p1",
+                    "live-game",
+                    "2026-05-17",
+                    "final_winner",
+                    "巨人",
+                    "",
+                    "0.92",
+                    "10",
+                    "pending",
+                    "",
+                    "0",
+                    "0",
+                    "2026-05-17T12:00:00",
+                    "",
+                ],
+            ]
+        )
+
+        class FakeModule:
+            @staticmethod
+            def _prediction_sheet():
+                return sheet
+
+            @staticmethod
+            def _prediction_rows(prediction_sheet):
+                return prediction_sheet.get_all_values()
+
+            @staticmethod
+            async def get_schedule_game_data(gid, _session, retry=False):
+                return {
+                    "賽事編號": gid,
+                    "賽事狀態": "5回表",
+                    "客隊": "阪 神",
+                    "主隊": "巨 人",
+                    "客總分": 2,
+                    "主總分": 4,
+                }
+
+        resolved = asyncio.run(
+            NpbPredictionService(module=FakeModule).reveal_predictions_for_games(
+                AsyncMock(), []
+            )
+        )
+
+        assert resolved == 0
+        assert sheet.rows[1][headers.index("status")] == "pending"
+        assert sheet.rows[1][headers.index("resolved_at")] == ""
+
+    def test_reveal_predictions_keeps_unknown_schedule_status_pending(self):
+        headers = PREDICTION_HEADERS
+        sheet = FakePredictionSheet(
+            [
+                headers,
+                [
+                    "p1",
+                    "finished-game",
+                    "2026-05-17",
+                    "final_winner",
+                    "巨人",
+                    "",
+                    "0.92",
+                    "10",
+                    "pending",
+                    "",
+                    "0",
+                    "0",
+                    "2026-05-17T12:00:00",
+                    "",
+                ],
+            ]
+        )
+
+        class FakeModule:
+            PREDICTION_DEFAULT_STAKE = 10.0
+            PREDICTION_STARTING_BALANCE = 0.0
+
+            @staticmethod
+            def col_to_letter(col_num):
+                return col_to_letter(col_num)
+
+            @staticmethod
+            def display_team_name(team_name):
+                return NPB_TEAMS[team_name]["name"]
+
+            @staticmethod
+            def _prediction_sheet():
+                return sheet
+
+            @staticmethod
+            def _prediction_rows(prediction_sheet):
+                return prediction_sheet.get_all_values()
+
+            @staticmethod
+            async def get_schedule_game_data(gid, _session, retry=False):
+                return {
+                    "賽事編號": gid,
+                    "賽事狀態": "",
+                    "客隊原名": "阪神",
+                    "客隊": "阪 神",
+                    "主隊原名": "巨人",
+                    "主隊": "巨 人",
+                    "客總分": 2,
+                    "主總分": 4,
+                }
+
+        FakeModule.NPB_TEAMS = NPB_TEAMS
+        FakeModule.PREDICTION_MARKET_ALIASES = {
+            "final_winner": "final_winner",
+        }
+
+        resolved = asyncio.run(
+            NpbPredictionService(module=FakeModule).reveal_predictions_for_games(
+                AsyncMock(), []
+            )
+        )
+
+        assert resolved == 0
+        assert sheet.rows[1][headers.index("status")] == "pending"
+        assert sheet.rows[1][headers.index("outcome")] == ""
+
+
+class TestScheduleStatusForGame:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _mock_session(self):
+        return AsyncMock()
+
+    def test_finds_status_when_game_link_is_not_on_status_element(self):
+        html = _cal_html(
+            {
+                "day": "20",
+                "status": "試合終了",
+                "links": ["/npb/game/2021038881/top"],
+            }
+        )
+        with patch("npb._fetch_once", new=AsyncMock(return_value=html)):
+            result = self._run(
+                _schedule_status_for_game(
+                    "2021038881", "2026-05-20", self._mock_session()
+                )
+            )
+
+        assert result == "試合終了"
 
 
 class TestBuildBlockValues:
@@ -1068,6 +1772,120 @@ class TestGetNextScheduledGame:
                     get_next_scheduled_game(1, self._mock_session())
                 )
         assert game_id == "future01"
+
+
+# ---------------------------------------------------------------------------
+# resolve_prediction_game_by_home_team
+# ---------------------------------------------------------------------------
+
+
+class TestResolvePredictionGameByHomeTeam:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _mock_session(self):
+        return AsyncMock()
+
+    def test_resolves_today_home_team_game_and_starters(self):
+        schedule_html = _cal_html(
+            {
+                "day": "12",
+                "status": "18:00",
+                "href": "/npb/game/2026051201/top",
+            }
+        )
+        game_html = """
+        <html><body>
+          <span class="bb-gameScoreTable__team">ヤクルト</span>
+          <span class="bb-gameScoreTable__team">巨人</span>
+          <div class="bb-scoreTable"><div class="bb-scoreTable__row">
+            <span class="bb-scoreTable__data--player">小川泰弘</span>
+          </div></div>
+          <div class="bb-scoreTable"><div class="bb-scoreTable__row">
+            <span class="bb-scoreTable__data--player">戸郷翔征</span>
+          </div></div>
+        </body></html>
+        """
+
+        async def fake_fetch(_session, url):
+            if "teams/1/schedule" in url:
+                return schedule_html
+            if "game/2026051201/" in url:
+                return game_html
+            return None
+
+        with patch("npb._fetch", new=fake_fetch):
+            result = self._run(
+                resolve_prediction_game_by_home_team(
+                    "巨人", self._mock_session(), today=date(2026, 5, 12)
+                )
+            )
+
+        assert result == {
+            "game_id": "2026051201",
+            "game_date": "2026-05-12",
+            "away_team": "ヤクルト",
+            "home_team": "巨人",
+            "away_starter": "小川泰弘",
+            "home_starter": "戸郷翔征",
+        }
+
+    def test_rejects_when_requested_team_is_not_home(self):
+        schedule_html = _cal_html(
+            {
+                "day": "13",
+                "status": "18:00",
+                "href": "/npb/game/2026051301/top",
+            }
+        )
+        game_html = """
+        <html><body>
+          <span class="bb-gameScoreTable__team">巨人</span>
+          <span class="bb-gameScoreTable__team">ヤクルト</span>
+        </body></html>
+        """
+
+        async def fake_fetch(_session, url):
+            if "teams/1/schedule" in url:
+                return schedule_html
+            if "game/2026051301/" in url:
+                return game_html
+            return None
+
+        with patch("npb._fetch", new=fake_fetch):
+            with pytest.raises(ValueError, match="No unstarted today/tomorrow"):
+                self._run(
+                    resolve_prediction_game_by_home_team(
+                        "巨人", self._mock_session(), today=date(2026, 5, 12)
+                    )
+                )
+
+    def test_skips_finished_and_in_progress_schedule_entries(self):
+        schedule_html = _cal_html(
+            {
+                "day": "12",
+                "status": "3回表",
+                "href": "/npb/game/live01/top",
+            },
+            {
+                "day": "13",
+                "status": "試合終了",
+                "href": "/npb/game/done01/top",
+            },
+        )
+
+        async def fake_fetch(_session, url):
+            if "teams/1/schedule" in url:
+                return schedule_html
+            return "<html><body></body></html>"
+
+        with patch("npb._fetch", new=fake_fetch):
+            with pytest.raises(ValueError, match="No unstarted today/tomorrow"):
+                self._run(
+                    resolve_prediction_game_by_home_team(
+                        "巨人", self._mock_session(), today=date(2026, 5, 12)
+                    )
+                )
 
 
 # ---------------------------------------------------------------------------

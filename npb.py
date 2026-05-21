@@ -6,6 +6,7 @@ import platform
 import asyncio
 import argparse
 import aiohttp
+import secrets
 from bs4 import BeautifulSoup as bs
 from copy import deepcopy
 from datetime import date, datetime, timedelta
@@ -13,14 +14,26 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import gspread
-from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
+
+from baseball.npb_services import (
+    _NpbPredictionLogic,
+    NpbAnalysisService,
+    NpbHuiziService,
+    NpbLeagueSheetService,
+    NpbPredictionService,
+    NpbRowsService,
+    NpbSailuService,
+    NpbUpdateService,
+)
+from baseball.sheets import GoogleSheetsClient
 
 load_dotenv()
 
 # --- Configuration ---
 NPB_SPREADSHEET_KEY = "1XBATQ-ZQVE7saISTw_EYEXg3qFFAn5aeLDPdGI1_8Rg"
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
+_sheets_client = GoogleSheetsClient(credentials_file=CREDENTIALS_FILE)
 
 BASE_URL = "https://baseball.yahoo.co.jp/npb/"
 NPB_OFFICIAL_BASE_URL = "https://npb.jp"
@@ -127,7 +140,34 @@ SAILU_SHEET_NAME = "賽錄"
 EXHIBITION_SHEET_NAME = "熱身賽紀錄"
 ANALYSIS_SHEET_NAME = "分析表紀錄"
 HUIZI_SHEET_NAME = "彙資"
+PREDICTION_SHEET_NAME = "預測紀錄"
+PREDICTION_SPREADSHEET_KEY = "1-L5RvjhN3OFiXfrDUVxBa8W0EqYIaLQtxizSi-yP8b0"
 ANALYSIS_SEASON = 2026
+PREDICTION_STARTING_BALANCE = 0.0
+PREDICTION_DEFAULT_STAKE = 10.0
+PREDICTION_PROMPT_SENTINEL = "__prompt_prediction__"
+PREDICTION_MARKET_ALIASES = {
+    "half": "half_winner",
+    "half-winner": "half_winner",
+    "half_winner": "half_winner",
+    "final": "final_winner",
+    "winner": "final_winner",
+    "final-winner": "final_winner",
+    "final_winner": "final_winner",
+    "half-total": "half_total",
+    "half_total": "half_total",
+    "final-total": "final_total",
+    "total": "final_total",
+    "final_total": "final_total",
+    "handicap": "final_handicap",
+    "final_handicap": "final_handicap",
+    "final-handicap": "final_handicap",
+    "讓分": "final_handicap",
+    "half_handicap": "half_handicap",
+    "half-handicap": "half_handicap",
+    "half_handicap": "half_handicap",
+    "半場讓分": "half_handicap",
+}
 
 OFFICIAL_TEAM_NAME_MAP = {
     "読売": "巨人",
@@ -186,8 +226,7 @@ NPB_FIELDS = {
 
 def _display_field_name(venue: str) -> str:
     """Format venue names for compact NPB display sheets."""
-    field = NPB_FIELDS.get(venue, venue)
-    return f"{field[0]} {field[1]}" if len(field) == 2 else field
+    return NpbLeagueSheetService(module=sys.modules[__name__]).display_field_name(venue)
 
 
 ANALYSIS_FIELDS = {
@@ -263,34 +302,16 @@ BLOCK_ROWS = 13
 
 def hex_to_rgb(hex_color: str) -> dict:
     """Convert a 6-char hex color string to a Sheets API RGB dict (0.0–1.0 floats)."""
-    h = hex_color.lstrip("#")
-    return {
-        "red": int(h[0:2], 16) / 255,
-        "green": int(h[2:4], 16) / 255,
-        "blue": int(h[4:6], 16) / 255,
-    }
+    return NpbLeagueSheetService.hex_to_rgb(hex_color)
 
 
 def col_to_letter(col: int) -> str:
     """Convert 1-indexed column number to letter(s). e.g. 2→B, 15→O, 28→AB"""
-    result = ""
-    while col > 0:
-        col, rem = divmod(col - 1, 26)
-        result = chr(65 + rem) + result
-    return result
+    return NpbLeagueSheetService.col_to_letter(col)
 
 
 def get_worksheet(sheet_name: str, spreadsheet_key: str = NPB_SPREADSHEET_KEY):
-    scope = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
-    if creds_json:
-        creds = Credentials.from_service_account_info(
-            json.loads(creds_json), scopes=scope
-        )
-    else:
-        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
-    client = gspread.authorize(creds)
-    return client.open_by_key(spreadsheet_key).worksheet(sheet_name)
+    return _sheets_client.worksheet(spreadsheet_key, sheet_name)
 
 
 def is_exhibition_game_id(game_id: str) -> bool:
@@ -301,6 +322,474 @@ def is_exhibition_game_id(game_id: str) -> bool:
 def display_team_name(team_name: str) -> str:
     """Match existing sheet naming conventions."""
     return "横浜" if team_name == "DeNA" else team_name
+
+
+# --- NPB prediction ledger ---
+
+
+def _prediction_now() -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).now()
+
+
+def _prediction_payload(
+    game_id: str,
+    pick: str,
+    rate: float,
+    stake: float,
+    market: str = "final_winner",
+    line: float | None = None,
+    predicted_at: str | None = None,
+) -> dict:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).payload(
+        game_id,
+        pick,
+        rate,
+        stake,
+        market=market,
+        line=line,
+        predicted_at=predicted_at,
+    )
+
+
+def build_prediction_text(
+    game_id: str,
+    pick: str,
+    rate: float,
+    stake: float = PREDICTION_DEFAULT_STAKE,
+    *,
+    market: str = "final_winner",
+    line: float | None = None,
+) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).prediction_text(
+        game_id,
+        pick,
+        rate,
+        stake,
+        market=market,
+        line=line,
+    )
+
+
+def calculate_prediction_balance(
+    balance_before: float, stake: float, rate: float, outcome: str
+) -> float:
+    return _NpbPredictionLogic.calculate_balance(
+        balance_before, stake, rate, outcome
+    )
+
+
+def _prediction_float(value, default: float = 0.0) -> float:
+    return _NpbPredictionLogic.to_float(value, default)
+
+
+def _prediction_normalize_team(value: str) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).normalize_team(value)
+
+
+def _prediction_team_options() -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).team_options()
+
+
+def validate_prediction_home_team(value: str) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).validate_home_team(value)
+
+
+def _prediction_display_team(value: str) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).display_team(value)
+
+
+def normalize_prediction_market(market: str) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).normalize_market(market)
+
+
+def _prediction_side(value: str) -> str:
+    return _NpbPredictionLogic.prediction_side(value)
+
+
+def validate_prediction_pick(pick: str, market: str) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).validate_pick(pick, market)
+
+
+def _prediction_int(value) -> int:
+    return _NpbPredictionLogic.to_int(value)
+
+
+def _prediction_innings_total(values: list, innings: int = 5) -> int:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).innings_total(
+        values, innings
+    )
+
+
+def _prediction_winner_outcome(
+    data: dict, pick: str, *, half: bool = False
+) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).winner_outcome(
+        data, pick, half=half
+    )
+
+
+def _prediction_total_outcome(
+    data: dict, pick: str, line: float, *, half: bool = False
+) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).total_outcome(
+        data, pick, line, half=half
+    )
+
+
+def prediction_outcome_for_game(
+    data: dict, pick: str, market: str = "final_winner", line: float | None = None
+) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).outcome_for_game(
+        data, pick, market=market, line=line
+    )
+
+
+def _prediction_headers() -> list[str]:
+    return _NpbPredictionLogic.headers()
+
+
+def _prediction_has_header(row: list[str]) -> bool:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).has_header(row)
+
+
+def _prediction_sheet():
+    return _NpbPredictionLogic(module=sys.modules[__name__]).sheet()
+
+
+def _prediction_rows(sheet, *, ensure_header: bool = True) -> list[list[str]]:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).rows(
+        sheet, ensure_header=ensure_header
+    )
+
+
+def _last_prediction_balance(rows: list[list[str]]) -> float:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).last_balance(rows)
+
+
+def _prediction_balance_before_formula(headers: list[str], row_num: int):
+    return _NpbPredictionLogic(module=sys.modules[__name__]).balance_before_formula(
+        headers, row_num
+    )
+
+
+def _prediction_balance_after_formula(headers: list[str], row_num: int) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).balance_after_formula(
+        headers, row_num
+    )
+
+
+def _prediction_stats_from_rows(rows: list[list[str]]) -> dict:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).stats_from_rows(rows)
+
+
+def _prediction_stats_after(
+    rows: list[list[str]], outcome: str, balance_after: float
+) -> dict:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).stats_after(
+        rows, outcome, balance_after
+    )
+
+
+def create_npb_prediction(
+    game_id: str,
+    pick: str,
+    rate: float,
+    *,
+    market: str = "final_winner",
+    line: float | None = None,
+    stake: float = PREDICTION_DEFAULT_STAKE,
+    game_date: str = "",
+    away_team: str = "",
+    home_team: str = "",
+    sheet=None,
+    post: bool = False,
+    dry_run: bool = False,
+) -> dict:
+    return NpbPredictionService(module=sys.modules[__name__]).create_prediction(
+        game_id,
+        pick,
+        rate,
+        market=market,
+        line=line,
+        stake=stake,
+        game_date=game_date,
+        away_team=away_team,
+        home_team=home_team,
+        sheet=sheet,
+        post=post,
+        dry_run=dry_run,
+    )
+
+
+def _prompt_text(label: str, *, default: str = "", required: bool = True) -> str:
+    suffix = f" [{default}]" if default != "" else ""
+    while True:
+        value = input(f"{label}{suffix}: ").strip()
+        if value:
+            return value
+        if default != "":
+            return default
+        if not required:
+            return ""
+        print(f"{label} is required.")
+
+
+def _prompt_float(label: str, *, default: float | None = None) -> float:
+    suffix = f" [{default}]" if default is not None else ""
+    while True:
+        value = input(f"{label}{suffix}: ").strip()
+        if not value and default is not None:
+            return float(default)
+        try:
+            return float(value)
+        except ValueError:
+            print(f"{label} must be a number.")
+
+
+def _prompt_market(default: str = "final_winner") -> str:
+    options = ["final_winner", "half_winner", "final_total", "half_total", "final_handicap", "half_handicap"]
+    print("Market options:")
+    for idx, market in enumerate(options, start=1):
+        print(f"  {idx}. {market}")
+    while True:
+        value = _prompt_text("Market", default=default)
+        if value.isdigit() and 1 <= int(value) <= len(options):
+            return options[int(value) - 1]
+        try:
+            return normalize_prediction_market(value)
+        except ValueError as exc:
+            print(exc)
+
+
+def _prompt_pick(market: str, *, default: str = "") -> str:
+    while True:
+        value = _prompt_text(
+            "Pick (team for winner, over/under for total)",
+            default=default,
+        )
+        try:
+            return validate_prediction_pick(value, market)
+        except ValueError as exc:
+            print(exc)
+
+
+def _prompt_home_team(default: str = "") -> str:
+    print(f"Home team options: {_prediction_team_options()}")
+    while True:
+        value = _prompt_text("Home team", default=default)
+        try:
+            return validate_prediction_home_team(value)
+        except ValueError as exc:
+            print(exc)
+
+
+def _prediction_status_allows_predict(text: str) -> bool:
+    status = str(text or "").strip()
+    if not status:
+        return False
+    blocked = ("試合終了", "中止", "ノーゲーム", "延期", "試合中")
+    if any(word in status for word in blocked):
+        return False
+    if re.search(r"\d+\s*回[表裏]", status):
+        return False
+    return True
+
+
+def _prediction_starter_from_status(text: str) -> str:
+    match = re.search(r"先発\s*[:：]\s*([^,\s　/／]+)", str(text or ""))
+    return match.group(1).strip() if match else ""
+
+
+def _prediction_parse_game_context(
+    game_id: str,
+    game_date: str,
+    html: str,
+) -> dict:
+    soup = bs(html, "html.parser")
+    teams = [el.get_text(" ", strip=True) for el in soup.find_all(class_="bb-gameScoreTable__team")]
+    away_team = _prediction_normalize_team(teams[0]) if len(teams) >= 1 else ""
+    home_team = _prediction_normalize_team(teams[1]) if len(teams) >= 2 else ""
+
+    starters = []
+    for score_tbl in soup.find_all(class_="bb-scoreTable")[:2]:
+        row = score_tbl.find(class_="bb-scoreTable__row")
+        player_el = row.find(class_="bb-scoreTable__data--player") if row else None
+        starters.append(player_el.get_text(" ", strip=True) if player_el else "")
+    while len(starters) < 2:
+        starters.append("")
+
+    return {
+        "game_id": str(game_id),
+        "game_date": game_date,
+        "away_team": away_team,
+        "home_team": home_team,
+        "away_starter": starters[0],
+        "home_starter": starters[1],
+    }
+
+
+def _prediction_print_game_context(context: dict) -> None:
+    print("Prediction game:")
+    print(f"  Date: {context.get('game_date', '')}")
+    print(f"  Game ID: {context.get('game_id', '')}")
+    print(f"  Away: {_prediction_display_team(context.get('away_team', ''))}")
+    print(f"  Home: {_prediction_display_team(context.get('home_team', ''))}")
+    print(f"  Away starter: {context.get('away_starter') or 'unknown'}")
+    print(f"  Home starter: {context.get('home_starter') or 'unknown'}")
+
+
+async def resolve_prediction_game_by_home_team(
+    home_team: str,
+    session: aiohttp.ClientSession,
+    *,
+    today: date | None = None,
+) -> dict:
+    home_key = _prediction_normalize_team(home_team)
+    if home_key not in NPB_TEAMS:
+        raise ValueError(f"Unknown home team: {home_team}")
+
+    start = today or datetime.now().date()
+    end = start + timedelta(days=1)
+    time_keys = {
+        start.strftime("%Y-%m"),
+        end.strftime("%Y-%m"),
+    }
+    candidates: list[tuple[date, str, str]] = []
+
+    for time_key in sorted(time_keys):
+        html = await _fetch(
+            session, f"{BASE_URL}teams/{NPB_TEAMS[home_key]['id']}/schedule?month={time_key}"
+        )
+        if not html:
+            continue
+        soup = bs(html, "html.parser")
+        month_base = datetime.strptime(f"{time_key}-01", "%Y-%m-%d").date()
+        for data in soup.find_all(class_="bb-calendarTable__data"):
+            date_el = data.find(class_="bb-calendarTable__date")
+            status = data.find(class_="bb-calendarTable__status")
+            if not date_el or not status:
+                continue
+            try:
+                game_date = month_base.replace(day=int(date_el.get_text(strip=True)))
+            except (TypeError, ValueError):
+                continue
+            if game_date < start or game_date > end:
+                continue
+            status_text = status.get_text(" ", strip=True)
+            if not _prediction_status_allows_predict(status_text):
+                continue
+            href = status.get("href") or ""
+            match = re.search(r"npb/game/([^/]+)", href)
+            if match:
+                candidates.append((game_date, match.group(1), status_text))
+
+    for game_date, game_id, status_text in sorted(candidates):
+        for path in ("stats", "top"):
+            html = await _fetch(session, f"{BASE_URL}game/{game_id}/{path}")
+            if not html:
+                continue
+            context = _prediction_parse_game_context(
+                game_id, game_date.strftime("%Y-%m-%d"), html
+            )
+            if context["home_team"] == home_key:
+                context["home_starter"] = context[
+                    "home_starter"
+                ] or _prediction_starter_from_status(status_text)
+                return context
+
+    raise ValueError(
+        f"No unstarted today/tomorrow game found with {home_key} as home team."
+    )
+
+
+async def _prediction_resolve_cli_game(values: dict, *, confirm: bool = False) -> dict:
+    async with aiohttp.ClientSession() as session:
+        context = await resolve_prediction_game_by_home_team(
+            values["home_team_lookup"], session
+        )
+    _prediction_print_game_context(context)
+    if confirm:
+        answer = input("Use this game? [Y/n]: ").strip().lower()
+        if answer in {"n", "no", "不要", "否"}:
+            raise ValueError("Prediction cancelled.")
+
+    values = dict(values)
+    values["game_id"] = context["game_id"]
+    values["game_date"] = values["game_date"] or context["game_date"]
+    values["away_team"] = values["away_team"] or context["away_team"]
+    values["home_team"] = values["home_team"] or context["home_team"]
+    return values
+
+
+def _prediction_cli_values(args) -> dict:
+    interactive = args.create_prediction == PREDICTION_PROMPT_SENTINEL
+    home_team_lookup = (
+        _prompt_home_team()
+        if interactive
+        else validate_prediction_home_team(args.create_prediction or "")
+    )
+    market = _prompt_market(args.market or "final_winner") if interactive else args.market
+    market = normalize_prediction_market(market or "final_winner")
+    pick = (
+        _prompt_pick(market, default=args.pick or "")
+        if interactive
+        else (validate_prediction_pick(args.pick, market) if args.pick else "")
+    )
+    line = args.line
+    if market in {"half_total", "final_total", "final_handicap", "half_handicap"} and line is None:
+        line = _prompt_float("Line")
+    rate = args.rate if args.rate is not None else _prompt_float("Rate")
+    stake = (
+        _prompt_float("Stake", default=PREDICTION_DEFAULT_STAKE)
+        if interactive and args.stake is None
+        else (
+            args.stake
+            if args.stake is not None
+            else PREDICTION_DEFAULT_STAKE
+        )
+    )
+    game_date = args.game_date
+    away_team = args.away_team
+    home_team = args.home_team
+    return {
+        "home_team_lookup": home_team_lookup,
+        "game_id": "",
+        "market": market,
+        "pick": pick,
+        "line": line,
+        "rate": rate,
+        "stake": stake,
+        "game_date": game_date,
+        "away_team": away_team,
+        "home_team": home_team,
+    }
+
+
+def resolve_npb_predictions_for_game(
+    game_id: str,
+    data: dict,
+    *,
+    sheet=None,
+    post: bool = False,
+    dry_run: bool = False,
+) -> int:
+    return NpbPredictionService(module=sys.modules[__name__]).resolve_for_game(
+        game_id, data, sheet=sheet, post=post, dry_run=dry_run
+    )
+
+
+async def update_npb_prediction_reveals(
+    session: aiohttp.ClientSession,
+    game_ids: list[str],
+    *,
+    post: bool = False,
+    dry_run: bool = False,
+) -> int:
+    return await NpbPredictionService(
+        module=sys.modules[__name__]
+    ).reveal_predictions_for_games(
+        session, game_ids, post=post, dry_run=dry_run
+    )
 
 
 # --- Scraping ---
@@ -1330,6 +1819,7 @@ async def get_schedule_game_data(
     if not m:
         return None
     date_str = datetime.strptime(m.group(1), "%Y年%m月%d日").strftime("%Y-%m-%d")
+    schedule_status = await _schedule_status_for_game(game_id, date_str, session)
 
     # ── Venue ──────────────────────────────────────────────────────────────
     venue_el = soup.find(class_="bb-gameRound--stadium")
@@ -1539,6 +2029,7 @@ async def get_schedule_game_data(
     return {
         "賽事編號": game_id,
         "日期": date_str,
+        "賽事狀態": schedule_status,
         "客隊原名": away_raw,
         "客隊": away_name,
         "客隊先發": away_starter,
@@ -1570,6 +2061,30 @@ async def get_schedule_game_data(
     }
 
 
+async def _schedule_status_for_game(
+    game_id: str, date_str: str, session: aiohttp.ClientSession
+) -> str:
+    for league in ("first", "second"):
+        html = await _fetch_once(
+            session, f"{BASE_URL}schedule/{league}/all?date={date_str}"
+        )
+        if not html:
+            continue
+        soup = bs(html, "html.parser")
+        game_path = f"/npb/game/{game_id}/"
+        for entry in soup.find_all(class_="bb-calendarTable__data"):
+            if not entry.find("a", href=lambda href: href and game_path in href):
+                continue
+            status = entry.find(class_="bb-calendarTable__status")
+            if status:
+                return status.get_text(" ", strip=True)
+        for status in soup.find_all(class_="bb-calendarTable__status"):
+            href = status.get("href", "")
+            if game_path in href:
+                return status.get_text(" ", strip=True)
+    return ""
+
+
 def _schedule_row(seq: int, data: dict) -> list:
     """
     Convert a game data dict (from get_schedule_game_data) into a 125-value row
@@ -1594,193 +2109,67 @@ def _schedule_row(seq: int, data: dict) -> list:
       CP–DE(94–109) 客打擊 (16)
       DF–DU(110–125) 主打擊 (16)
     """
-    ai = data["away_innings"]
-    hi = data["home_innings"]
-
-    asp = data["客先發投球"]  # list[13]
-    atp = data["客總投球"]  # list[13]
-    hsp = data["主先發投球"]  # list[13]
-    htp = data["主總投球"]  # list[13]
-    ab = data["客打擊"]  # list[16]
-    hb = data["主打擊"]  # list[16]
-
-    return [
-        data["賽事編號"],  # A  賽事編號
-        seq,  # B  場次
-        data["日期"],  # C  日期
-        data["客隊"],  # D  客隊
-        data["客隊先發"],  # E  客隊先發
-        data["主隊"],  # F  主隊
-        data["主隊先發"],  # G  主隊先發
-        data["球場"],  # H  球場
-        data["主審"],  # I  主審
-        *ai,  # J–U  客1–12
-        data["客總分"],  # V   客總分
-        data["客總安打"],  # W   客總安打
-        data["客總失誤"],  # X   安總失誤
-        *hi,  # Y–AJ 主1–12
-        data["主總分"],  # AK  主總分
-        data["主總安打"],  # AL  主總安打
-        data["主總失誤"],  # AM  主總失誤
-        *asp,  # AN–AZ 客先發投球 (13)
-        *atp,  # BA–BM 客總投球 (13)
-        *hsp,  # BN–BZ 主先發投球 (13)
-        *htp,  # CA–CM 主總投球 (13)
-        data["客投別"],  # CN  客投左右
-        data["主投別"],  # CO  主投左右
-        *ab,  # CP–DE 客打擊 (16)
-        *hb,  # DF–DU 主打擊 (16)
-    ]  # 125 values total — DV onwards are formula columns, left untouched
+    return NpbRowsService(module=sys.modules[__name__]).schedule_row(seq, data)
 
 
 def _analysis_date(date_str: str) -> str:
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
-    return f"{dt.year}/{dt.month}/{dt.day}"
+    return NpbRowsService.analysis_date(date_str)
 
 
 def _analysis_game_type(data: dict) -> str:
-    away = data.get("客隊原名", "")
-    home = data.get("主隊原名", "")
-    if not away or not home:
-        return "例行賽"
-    away_league = _analysis_team_league(away)
-    home_league = _analysis_team_league(home)
-    if not away_league or not home_league:
-        return "例行賽"
-    if away_league != home_league:
-        return "交流戰"
-    return home_league
+    return NpbRowsService(module=sys.modules[__name__]).analysis_game_type(data)
 
 
 def _analysis_team_league(team_name: str) -> str | None:
-    normalized = str(team_name or "").replace(" ", "")
-    if not normalized:
-        return None
-
-    aliases = {"横浜": "DeNA", "橫濱": "DeNA"}
-    raw = aliases.get(normalized, normalized)
-    if raw in NPB_TEAMS:
-        return NPB_TEAMS[raw]["league"]
-
-    for key, info in NPB_TEAMS.items():
-        if normalized == str(info["name"]).replace(" ", ""):
-            return info["league"]
-        if normalized == display_team_name(key).replace(" ", ""):
-            return info["league"]
-    return None
+    return NpbRowsService(module=sys.modules[__name__]).analysis_team_league(team_name)
 
 
 def _analysis_game_type_from_teams(away_team: str, home_team: str) -> str | None:
-    away_league = _analysis_team_league(away_team)
-    home_league = _analysis_team_league(home_team)
-    if not home_league:
-        return None
-    if away_league and away_league != home_league:
-        return "交流戰"
-    return home_league
+    return NpbRowsService(module=sys.modules[__name__]).analysis_game_type_from_teams(
+        away_team, home_team
+    )
 
 
 def _analysis_day_night(game_time: str) -> str:
-    m = re.match(r"^(\d{1,2}):(\d{2})$", str(game_time or ""))
-    if not m:
-        return ""
-    return "夜" if int(m.group(1)) >= 17 else "日"
+    return NpbRowsService.analysis_day_night(game_time)
 
 
 def _analysis_team_name(team_name: str) -> str:
-    return display_team_name(team_name)
+    return NpbRowsService(module=sys.modules[__name__]).analysis_team_name(team_name)
 
 
 def _analysis_field(data: dict) -> str:
-    raw = data.get("球場原名") or data.get("球場") or ""
-    if not raw:
-        return ""
-
-    home = data.get("主隊原名") or data.get("主場隊伍") or ""
-    home_fields = NPB_TEAM_HOME_FIELDS.get(home)
-    if home_fields is not None and raw not in home_fields:
-        return "地方球場"
-
-    return ANALYSIS_FIELDS.get(raw, "地方球場")
+    return NpbRowsService(module=sys.modules[__name__]).analysis_field(data)
 
 
 def _analysis_hand(hand: str) -> str:
-    if not hand:
-        return ""
-    return hand if hand.endswith("投") else f"{hand}投"
+    return NpbRowsService.analysis_hand(hand)
 
 
 def _analysis_marks(away_score: int, home_score: int) -> tuple[str, str]:
-    if away_score > home_score:
-        return "○", "●"
-    if away_score < home_score:
-        return "●", "○"
-    return "△", "△"
+    return NpbRowsService.analysis_marks(away_score, home_score)
 
 
 def _analysis_innings(vals: list) -> tuple[list, str]:
-    innings = ["" if str(v) in ("", "×") else v for v in vals[:9]]
-    extras = []
-    for v in vals[9:12]:
-        if str(v).isdigit():
-            extras.append(int(v))
-    return innings, (sum(extras) if extras else "")
+    return NpbRowsService.analysis_innings(vals)
 
 
 def _analysis_total_bases(batting: list) -> int:
-    hits = int(batting[2] or 0)
-    doubles = int(batting[4] or 0)
-    triples = int(batting[5] or 0)
-    homers = int(batting[6] or 0)
-    return hits + doubles + triples * 2 + homers * 3
+    return NpbRowsService.analysis_total_bases(batting)
 
 
 def _analysis_long_hits(batting: list) -> int:
-    return int(batting[4] or 0) + int(batting[5] or 0) + int(batting[6] or 0)
+    return NpbRowsService(module=sys.modules[__name__]).analysis_long_hits(batting)
 
 
 def _analysis_qs(starter_pitch: list):
-    ip_raw = str(starter_pitch[0] or "")
-    try:
-        parts = ip_raw.split(".")
-        partial = 0
-        if len(parts) > 1:
-            frac = parts[1]
-            if frac.startswith("3333"):
-                partial = 1
-            elif frac.startswith("6667"):
-                partial = 2
-            else:
-                partial = int(frac[:1] or 0)
-        outs = int(parts[0]) * 3 + partial
-    except (TypeError, ValueError):
-        outs = 0
-    try:
-        earned_runs = int(starter_pitch[12] or 0)
-    except (TypeError, ValueError):
-        earned_runs = 0
-
-    if outs >= 21 and earned_runs <= 3:
-        return "QS"
-    if outs >= 18 and earned_runs <= 2:
-        return "QS"
-    if outs >= 15 and earned_runs <= 1:
-        return "QS"
-    return "x"
+    return NpbRowsService.analysis_qs(starter_pitch)
 
 
 def _analysis_starter_block(starter_pitch: list) -> list:
-    return [
-        starter_pitch[0],  # 局數
-        starter_pitch[1],  # 打數 / faced batters
-        starter_pitch[4],  # 安打
-        starter_pitch[5],  # HR
-        starter_pitch[6] + starter_pitch[7],  # 四球 + 死球
-        starter_pitch[11],  # 失点
-        starter_pitch[12],  # 責失
-        starter_pitch[4] + starter_pitch[5] * 3,  # 被壘打, minimum from H/HR
-        _analysis_qs(starter_pitch),  # QS
-    ]
+    return NpbRowsService(module=sys.modules[__name__]).analysis_starter_block(
+        starter_pitch
+    )
 
 
 def _analysis_team_total_block(
@@ -1791,78 +2180,18 @@ def _analysis_team_total_block(
     earned_runs: int,
     errors: int,
 ) -> list:
-    return [
-        opposing_pitch[0],  # 局数
-        opposing_pitch[2],  # 用球数
-        opposing_batting[0],  # 打 数
-        opposing_batting[2],  # 安打
-        opposing_batting[6],  # HR
-        opposing_batting[10],  # 三振
-        opposing_batting[8] + opposing_batting[9],  # 四死
-        score,  # 失点 / 得点 from this team's view
+    return NpbRowsService(module=sys.modules[__name__]).analysis_team_total_block(
+        opposing_pitch,
+        opposing_batting,
+        own_batting,
+        score,
         earned_runs,
         errors,
-        own_batting[7],  # 併打
-        own_batting[13],  # 盜壘
-        own_batting[14],  # 盜壘刺
-        _analysis_total_bases(own_batting),
-        _analysis_long_hits(own_batting),
-    ]
+    )
 
 
 def _analysis_row(seq: int, data: dict) -> list:
-    away_score = int(data["客總分"])
-    home_score = int(data["主總分"])
-    away_mark, home_mark = _analysis_marks(away_score, home_score)
-    away_innings, away_ot = _analysis_innings(data["away_innings"])
-    home_innings, home_ot = _analysis_innings(data["home_innings"])
-
-    away_bat = data["客打擊"]
-    home_bat = data["主打擊"]
-    away_starter_view = _analysis_starter_block(data["客先發投球"])
-    home_starter_view = _analysis_starter_block(data["主先發投球"])
-    away_total_view = _analysis_team_total_block(
-        data["客總投球"],
-        home_bat,
-        away_bat,
-        home_score,
-        data["客總投球"][12],
-        data["客總失誤"],
-    )
-    home_total_view = _analysis_team_total_block(
-        data["主總投球"],
-        away_bat,
-        home_bat,
-        away_score,
-        data["主總投球"][12],
-        data["主總失誤"],
-    )
-
-    return [
-        seq,
-        _analysis_date(data["日期"]),
-        _analysis_day_night(data.get("時間", "")),
-        _analysis_game_type(data),
-        data["主審"],
-        _analysis_hand(data["客投別"]),
-        _analysis_hand(data["主投別"]),
-        away_mark,
-        _analysis_team_name(data.get("客隊原名", data["客隊"])),
-        away_score,
-        home_score,
-        _analysis_team_name(data.get("主隊原名", data["主隊"])),
-        home_mark,
-        _analysis_field(data),
-        *away_innings,
-        away_ot,
-        *home_innings,
-        home_ot,
-        *away_starter_view,
-        *away_total_view,
-        "",
-        *home_starter_view,
-        *home_total_view,
-    ]
+    return NpbRowsService(module=sys.modules[__name__]).analysis_row(seq, data)
 
 
 def _sailu_row(seq: int, data: dict) -> list:
@@ -1870,148 +2199,27 @@ def _sailu_row(seq: int, data: dict) -> list:
     Convert a game data dict to a 賽錄 sheet row covering columns A–AY (51 values).
     Columns AZ onwards are all formula-driven in the sheet and are left untouched.
     """
-    ai = data["away_innings"]
-    hi = data["home_innings"]
-    return [
-        seq,  # A   編號
-        data["賽事編號"],  # B   賽事編號
-        data["客場隊伍"],  # C   客場隊伍
-        data["客場先發"],  # D   客場先發
-        data["主場隊伍"],  # E   主場隊伍
-        data["主場先發"],  # F   主場先發
-        data["時間"],  # G   時間
-        data["球場"],  # H   球場
-        data["主審"],  # I   主審
-        ai[0],
-        ai[1],
-        ai[2],
-        ai[3],  # J–M  客1–4
-        ai[4],
-        ai[5],
-        ai[6],
-        ai[7],  # N–Q  客5–8
-        ai[8],
-        ai[9],
-        ai[10],
-        ai[11],  # R–U  客9–12
-        data["客總分"],  # V   客總分
-        data["客安打"],  # W   客安打
-        data["客失誤"],  # X   客失誤
-        hi[0],
-        hi[1],
-        hi[2],
-        hi[3],  # Y–AB 主1–4
-        hi[4],
-        hi[5],
-        hi[6],
-        hi[7],  # AC–AF 主5–8
-        hi[8],
-        hi[9],
-        hi[10],
-        hi[11],  # AG–AJ 主9–12
-        data["主總"],  # AK  主總
-        data["主安打"],  # AL  主安打
-        data["主失誤"],  # AM  主失誤
-        data["賽事狀態"],  # AN  賽事狀態
-        data["日期"],  # AO  日期
-        data["客隊代號"],  # AP  客隊代號
-        data["主隊代號"],  # AQ  主隊代號
-        data["客投別"],  # AR  客投別
-        data["主投別"],  # AS  主投別
-        data["客投局"],  # AT  客投局
-        data["主投局"],  # AU  主投局
-        data["客責失"],  # AV  客責失
-        data["客QS"],  # AW  客QS
-        data["主責失"],  # AX  主責失
-        data["主QS"],  # AY  主QS
-    ]
+    return NpbRowsService(module=sys.modules[__name__]).sailu_row(seq, data)
 
 
 def _sailu_formula_row(row_num: int) -> list[str]:
     """Build AZ:BT formula cells for one 賽錄 row."""
-    return [
-        f"=SUM(J{row_num}:L{row_num})",
-        f"=SUM(Y{row_num}:AA{row_num})",
-        f"=SUM(J{row_num}:N{row_num})",
-        f"=SUM(Y{row_num}:AC{row_num})",
-        f"=SUM(J{row_num}:O{row_num})",
-        f"=SUM(Y{row_num}:AD{row_num})",
-        f"=SUM(J{row_num}:P{row_num})",
-        f"=SUM(Y{row_num}:AE{row_num})",
-        '=IF(客總分="","",IF(客總分=主總分,"平",IF(客總分>主總分,"勝","敗")))',
-        '=IF(BH{0}="","",IF(BH{0}="平","平",IF(BH{0}="勝","敗","勝")))'.format(row_num),
-        '=IF(BH{0}="勝",客總分-主總分,IF(BH{0}="敗",主總分-客總分,0))'.format(row_num),
-        '=IF(MOD(AT{0},1)=0,AT{0},IF(RIGHT(AT{0},1)="1",(AT{0}-0.1)+1/3,(AT{0}-0.2)+2/3))'.format(
-            row_num
-        ),
-        '=IF(MOD(AU{0},1)=0,AU{0},IF(RIGHT(AU{0},1)="1",(AU{0}-0.1)+1/3,(AU{0}-0.2)+2/3))'.format(
-            row_num
-        ),
-        '=IF(客總分="","",客總5+主總5)',
-        '=IF(客總分="","",客總分+主總分)',
-        f'=IF(J{row_num}="","",SUM(J{row_num}:R{row_num}))',
-        f'=IF(J{row_num}="","",SUM(Y{row_num}:AG{row_num}))',
-        f'=IF(S{row_num}="","",SUM(S{row_num}:U{row_num}))',
-        f'=IF(AH{row_num}="","",SUM(AH{row_num}:AJ{row_num}))',
-        '=IF(AO{0}="","",IF(AND(客先局>=5,主總7<=3,主總6<=2,主總5<=1),1,IF(AND(客先局>=5,主總6<=2,主總5<=1),1,IF(AND(客先局>=5,主總5<=1),1,""))))'.format(
-            row_num
-        ),
-        '=IF(AO{0}="","",IF(AND(主先局>=5,客總7<=3,客總6<=2,客總5<=1),1,IF(AND(主先局>=5,客總6<=2,客總5<=1),1,IF(AND(主先局>=5,客總5<=1),1,""))))'.format(
-            row_num
-        ),
-    ]
+    return NpbRowsService.sailu_formula_row(row_num)
 
 
 def _chunked(seq: list, size: int):
-    for i in range(0, len(seq), size):
-        yield seq[i : i + size]
+    yield from NpbRowsService.chunked(seq, size)
 
 
 def _placeholder_rows(sheet) -> list[int]:
-    col_a = sheet.col_values(1)[1:]
-    col_b = sheet.col_values(2)[1:]
-    return [
-        i + 2
-        for i, a in enumerate(col_a)
-        if a and not (col_b[i] if i < len(col_b) else "")
-    ]
+    return NpbRowsService.placeholder_rows(sheet)
 
 
 def _ensure_target_sailu_capacity(sheet, needed_rows: int) -> list[int]:
     """Extend target 賽錄 with numbered placeholder rows and formulas if needed."""
-    placeholder_rows = _placeholder_rows(sheet)
-    if len(placeholder_rows) >= needed_rows:
-        return placeholder_rows
-
-    missing = needed_rows - len(placeholder_rows)
-    start_row = sheet.row_count + 1
-    sheet.add_rows(missing)
-
-    prev_seq = int(sheet.acell(f"A{start_row - 1}").value)
-    seq_values = [[prev_seq + offset + 1] for offset in range(missing)]
-    formula_values = [
-        _sailu_formula_row(row_num) for row_num in range(start_row, start_row + missing)
-    ]
-
-    for offset, chunk in enumerate(_chunked(seq_values, 200)):
-        chunk_start = start_row + offset * 200
-        chunk_end = chunk_start + len(chunk) - 1
-        sheet.update(
-            f"A{chunk_start}:A{chunk_end}",
-            chunk,
-            value_input_option="USER_ENTERED",
-        )
-
-    for offset, chunk in enumerate(_chunked(formula_values, 200)):
-        chunk_start = start_row + offset * 200
-        chunk_end = chunk_start + len(chunk) - 1
-        sheet.update(
-            f"AZ{chunk_start}:BT{chunk_end}",
-            chunk,
-            value_input_option="USER_ENTERED",
-        )
-
-    return _placeholder_rows(sheet)
+    return NpbRowsService(module=sys.modules[__name__]).ensure_target_sailu_capacity(
+        sheet, needed_rows
+    )
 
 
 def _write_regular_sailu_games(
@@ -2021,87 +2229,22 @@ def _write_regular_sailu_games(
     auto_extend_target: bool = False,
 ):
     """Write regular-season 賽錄 rows into placeholder rows, optionally extending them."""
-    if not games:
-        return 0, []
-
-    placeholder_rows = (
-        _ensure_target_sailu_capacity(sheet, len(games))
-        if auto_extend_target
-        else _placeholder_rows(sheet)
+    return NpbRowsService(module=sys.modules[__name__]).write_regular_sailu_games(
+        sheet, games, auto_extend_target=auto_extend_target
     )
-
-    filled = 0
-    for (gid, data), row_num in zip(games, placeholder_rows):
-        row_values = _sailu_row(0, data)[1:]  # drop col A; keep existing sequence
-        sheet.update(
-            f"B{row_num}:AY{row_num}", [row_values], value_input_option="USER_ENTERED"
-        )
-        print(f"  [sailu] Row {row_num} ← {gid}")
-        filled += 1
-
-    return filled, games[len(placeholder_rows) :]
 
 
 def _exhibition_row(data: dict) -> list[str]:
     """Convert scraped game data into 熱身賽紀錄's compact 28-column layout."""
-    away_score = int(data["客總分"])
-    home_score = int(data["主總"])
-    if away_score > home_score:
-        away_mark, home_mark = "○", "●"
-    elif away_score < home_score:
-        away_mark, home_mark = "●", "○"
-    else:
-        away_mark = home_mark = "△"
-
-    def _cell(v: str) -> str:
-        return "" if v in ("", "×") else str(v)
-
-    def _ot_total(vals: list) -> str:
-        nums = [int(v) for v in vals if str(v).isdigit()]
-        return str(sum(nums)) if nums else ""
-
-    away_innings = [_cell(v) for v in data["away_innings"][:9]]
-    home_innings = [_cell(v) for v in data["home_innings"][:9]]
-    away_ot = _ot_total(data["away_innings"][9:12])
-    home_ot = _ot_total(data["home_innings"][9:12])
-    dt = datetime.strptime(data["日期"], "%Y-%m-%d")
-
-    return [
-        f"{dt.year}/{dt.month}/{dt.day}",
-        away_mark,
-        display_team_name(data["客場隊伍"]),
-        str(away_score),
-        str(home_score),
-        display_team_name(data["主場隊伍"]),
-        home_mark,
-        data["球場"],
-        *away_innings,
-        away_ot,
-        *home_innings,
-        home_ot,
-    ]
+    return NpbRowsService(module=sys.modules[__name__]).exhibition_row(data)
 
 
 def _exhibition_identity(data: dict) -> tuple[str, str, str]:
-    return (
-        data["日期"],
-        display_team_name(data["客場隊伍"]),
-        display_team_name(data["主場隊伍"]),
-    )
+    return NpbRowsService(module=sys.modules[__name__]).exhibition_identity(data)
 
 
 def _existing_exhibition_identities(sheet) -> set[tuple[str, str, str]]:
-    rows = sheet.get_all_values()[1:]
-    identities: set[tuple[str, str, str]] = set()
-    for row in rows:
-        if len(row) < 6 or not row[0]:
-            continue
-        try:
-            dt = datetime.strptime(row[0], "%Y/%m/%d").strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-        identities.add((dt, row[2], row[5]))
-    return identities
+    return NpbRowsService.existing_exhibition_identities(sheet)
 
 
 async def update_sailu_sheet(session: aiohttp.ClientSession):
@@ -2113,172 +2256,27 @@ async def update_sailu_sheet(session: aiohttp.ClientSession):
     This function detects those placeholders and writes only B–AY into them,
     letting the existing formulas handle everything from AZ onwards.
     """
-    print("\n=== 賽錄 update ===")
-    sheet = get_worksheet(SAILU_SHEET_NAME, SAILU_SPREADSHEET_KEY)
-    target_sheet = get_worksheet(SAILU_SHEET_NAME, SAILU_TARGET_SPREADSHEET_KEY)
-    exhibition_sheet = get_worksheet(EXHIBITION_SHEET_NAME, SAILU_SPREADSHEET_KEY)
-
-    # Games already recorded
-    existing_ids = set(v for v in sheet.col_values(2)[1:] if v)
-    target_existing_ids = set(v for v in target_sheet.col_values(2)[1:] if v)
-    existing_exhibition = _existing_exhibition_identities(exhibition_sheet)
-    print(
-        f"[sailu] {len(_placeholder_rows(sheet))} source placeholder row(s) available."
-    )
-    print(
-        f"[sailu] {len(_placeholder_rows(target_sheet))} target placeholder row(s) available."
-    )
-
-    # Collect recently finished game IDs across all teams (last 3 per team)
-    all_ids: set[str] = set()
-    tasks = {
-        key: get_last_n_game_ids(info["id"], 3, session)
-        for key, info in NPB_TEAMS.items()
-    }
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-    for key, result in zip(tasks.keys(), results):
-        if isinstance(result, Exception):
-            print(f"  [sailu] get_last_n_game_ids({key}): {result}")
-        else:
-            all_ids.update(result)
-
-    new_ids = sorted(gid for gid in all_ids if gid not in existing_ids)
-    if not new_ids:
-        print("[sailu] No new games to add.")
-        return []
-
-    print(f"[sailu] {len(new_ids)} new game(s): {new_ids}")
-
-    # Scrape full box score for each new game
-    new_games: list[tuple[str, dict]] = []
-    for i in range(0, len(new_ids), MAX_CONCURRENT):
-        batch = new_ids[i : i + MAX_CONCURRENT]
-        scraped = await asyncio.gather(
-            *[get_sailu_game_data(gid, session) for gid in batch],
-            return_exceptions=True,
-        )
-        for gid, data in zip(batch, scraped):
-            if isinstance(data, Exception):
-                print(f"  [sailu] get_sailu_game_data({gid}): {data}")
-            elif data:
-                new_games.append((gid, data))
-            else:
-                print(f"  [sailu] No data for {gid} (game may not be finished yet)")
-        if i + MAX_CONCURRENT < len(new_ids):
-            await asyncio.sleep(2)
-
-    if not new_games:
-        print("[sailu] Nothing to write.")
-        return []
-
-    new_games.sort(key=lambda x: x[0])  # sort by game ID (encodes date + sequence)
-
-    regular_games = [
-        (gid, data) for gid, data in new_games if not is_exhibition_game_id(gid)
-    ]
-    exhibition_games = [
-        (gid, data) for gid, data in new_games if is_exhibition_game_id(gid)
-    ]
-
-    source_regular_games = [
-        (gid, data) for gid, data in regular_games if gid not in existing_ids
-    ]
-    target_regular_games = [
-        (gid, data) for gid, data in regular_games if gid not in target_existing_ids
-    ]
-
-    filled, overflow = _write_regular_sailu_games(sheet, source_regular_games)
-    if overflow:
-        print(
-            f"[sailu] WARNING: {len(overflow)} source game(s) skipped — no placeholder rows left: "
-            + str([gid for gid, _ in overflow])
-            + "\n  → Add more pre-populated formula rows to 賽錄 and re-run."
-        )
-
-    target_filled, target_overflow = _write_regular_sailu_games(
-        target_sheet,
-        target_regular_games,
-        auto_extend_target=True,
-    )
-    if target_overflow:
-        print(
-            f"[sailu-target] WARNING: {len(target_overflow)} game(s) skipped: "
-            + str([gid for gid, _ in target_overflow])
-        )
-
-    exhibition_rows = []
-    exhibition_written = 0
-    for gid, data in exhibition_games:
-        ident = _exhibition_identity(data)
-        if ident in existing_exhibition:
-            print(f"  [exhibition] skip existing ← {gid}")
-            continue
-        exhibition_rows.append(_exhibition_row(data))
-        existing_exhibition.add(ident)
-        exhibition_written += 1
-
-    if exhibition_rows:
-        exhibition_sheet.append_rows(
-            exhibition_rows,
-            value_input_option="USER_ENTERED",
-            table_range="A:AB",
-        )
-        print(
-            f"[exhibition] Appended {exhibition_written} row(s) to '{EXHIBITION_SHEET_NAME}'."
-        )
-    else:
-        print("[exhibition] No new games to add.")
-
-    print(
-        f"[sailu] Done. Filled {filled} source row(s) and {target_filled} target row(s)."
-    )
-    source_written_ids = [gid for gid, _ in source_regular_games[:filled]]
-    target_written_ids = [gid for gid, _ in target_regular_games[:target_filled]]
-    return list(dict.fromkeys(source_written_ids + target_written_ids))
+    return await NpbSailuService(module=sys.modules[__name__]).update(session)
 
 
 def _analysis_identity(data: dict) -> tuple[str, str, str]:
-    return (
-        _analysis_date(data["日期"]),
-        _analysis_team_name(data.get("客隊原名", data["客隊"])),
-        _analysis_team_name(data.get("主隊原名", data["主隊"])),
-    )
+    return NpbRowsService(module=sys.modules[__name__]).analysis_identity(data)
 
 
 def _analysis_identity_from_row(row: list[str]) -> tuple[str, str, str] | None:
-    if len(row) < 12 or not row[1] or not row[8] or not row[11]:
-        return None
-    return (row[1], row[8], row[11])
+    return NpbRowsService.analysis_identity_from_row(row)
 
 
 def _analysis_row_year(row: list[str]) -> int | None:
-    if len(row) < 2 or not row[1]:
-        return None
-    try:
-        return datetime.strptime(row[1], "%Y/%m/%d").year
-    except ValueError:
-        return None
+    return NpbRowsService.analysis_row_year(row)
 
 
 def _analysis_row_date(row: list[str]) -> datetime | None:
-    if len(row) < 2 or not row[1]:
-        return None
-    try:
-        return datetime.strptime(row[1], "%Y/%m/%d")
-    except ValueError:
-        return None
+    return NpbRowsService.analysis_row_date(row)
 
 
 def _last_analysis_seq(rows: list[list[str]]) -> int:
-    last_seq = 0
-    for row in rows[2:]:
-        if not row:
-            continue
-        try:
-            last_seq = max(last_seq, int(row[0]))
-        except (TypeError, ValueError):
-            continue
-    return last_seq
+    return NpbRowsService.last_analysis_seq(rows)
 
 
 def _analysis_insert_index(rows: list[list[str]], date_str: str) -> int:
@@ -2286,15 +2284,9 @@ def _analysis_insert_index(rows: list[list[str]], date_str: str) -> int:
     Return the 1-based worksheet row where a new analysis row should be inserted.
     Rows 1-2 are headers; data stays sorted by game date.
     """
-    game_date = datetime.strptime(date_str, "%Y-%m-%d")
-    insert_at = len(rows) + 1
-    for row_num, row in enumerate(rows[2:], start=3):
-        row_date = _analysis_row_date(row)
-        if row_date and row_date > game_date:
-            return row_num
-        if row_date:
-            insert_at = row_num + 1
-    return insert_at
+    return NpbRowsService(module=sys.modules[__name__]).analysis_insert_index(
+        rows, date_str
+    )
 
 
 def _season_months(year: int) -> list[str]:
@@ -2415,94 +2407,13 @@ async def update_analysis_sheet(
     Daily runs use game IDs already written to the target date's 賽錄 rows;
     full_season=True is only for manual historical repair/backfill.
     """
-    print(f"\n=== {ANALYSIS_SHEET_NAME} update ({year}) ===")
-    sheet = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
-    rows = sheet.get_all_values()
-    season_rows = [row for row in rows[2:] if _analysis_row_year(row) == year]
-    existing = {
-        ident for row in season_rows if (ident := _analysis_identity_from_row(row))
-    }
-    last_seq = _last_analysis_seq(rows)
-
-    if full_season:
-        candidate_ids = list(
-            reversed(sorted(await get_finished_game_ids_for_season(year, session)))
-        )
-        print(
-            f"[analysis] Full-season scan found {len(candidate_ids)} finished game ID(s)."
-        )
-    else:
-        source_ids = (
-            game_ids if game_ids is not None else _sailu_game_ids_for_date(target_date)
-        )
-        candidate_ids = []
-        for gid in source_ids:
-            if gid and gid not in candidate_ids:
-                candidate_ids.append(gid)
-        if game_ids is not None:
-            target_label = "provided game IDs"
-        else:
-            target_label = _date_key(target_date)
-        print(
-            f"[analysis] {target_label} has {len(candidate_ids)} candidate game ID(s)."
-        )
-
-    if not candidate_ids:
-        print("[analysis] No candidate games found.")
-        return 0
-
-    if full_season and len(existing) >= len(candidate_ids):
-        print(
-            "[analysis] Sheet already has all finished games by count; "
-            "skipping box-score scrape."
-        )
-        return 0
-
-    new_games: list[tuple[str, dict]] = []
-    for i in range(0, len(candidate_ids), MAX_CONCURRENT):
-        batch = candidate_ids[i : i + MAX_CONCURRENT]
-        scraped = await asyncio.gather(
-            *[get_schedule_game_data(gid, session, retry=full_season) for gid in batch],
-            return_exceptions=True,
-        )
-        for gid, data in zip(batch, scraped):
-            if isinstance(data, Exception):
-                print(f"  [analysis] get_schedule_game_data({gid}): {data}")
-            elif data:
-                if target_date and data["日期"] != _date_key(target_date):
-                    continue
-                ident = _analysis_identity(data)
-                if ident not in existing:
-                    new_games.append((gid, data))
-                    existing.add(ident)
-                    print(f"  [analysis] missing ← {gid} {ident}")
-            else:
-                print(f"  [analysis] No data for {gid}")
-        if i + MAX_CONCURRENT < len(candidate_ids):
-            await asyncio.sleep(2)
-
-    if not new_games:
-        print("[analysis] No new games to append.")
-        return 0
-
-    new_games.sort(key=lambda x: (x[1]["日期"], x[0]))
-    inserted = 0
-    for gid, data in new_games:
-        row_values = _analysis_row(last_seq + inserted + 1, data)
-        insert_at = _analysis_insert_index(rows, data["日期"])
-        sheet.insert_row(
-            row_values,
-            index=insert_at,
-            value_input_option="USER_ENTERED",
-            inherit_from_before=True,
-        )
-        rows.insert(insert_at - 1, [str(v) for v in row_values])
-        inserted += 1
-        print(f"  [analysis] inserted row {insert_at} ← {gid}")
-        await asyncio.sleep(1)
-
-    print(f"[analysis] Inserted {inserted} row(s) into {ANALYSIS_SHEET_NAME}.")
-    return inserted
+    return await NpbAnalysisService(module=sys.modules[__name__]).update(
+        session,
+        year=year,
+        game_ids=game_ids,
+        target_date=target_date,
+        full_season=full_season,
+    )
 
 
 def repair_analysis_leagues(year: int = ANALYSIS_SEASON) -> int:
@@ -2512,35 +2423,7 @@ def repair_analysis_leagues(year: int = ANALYSIS_SEASON) -> int:
     Existing rows do not keep Yahoo game IDs, so this repair uses the same visible
     team columns that identify the row: I=away team and L=home team.
     """
-    print(f"\n=== {ANALYSIS_SHEET_NAME} league repair ({year}) ===")
-    sheet = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
-    rows = sheet.get_all_values()
-    updates = []
-
-    for row_num, row in enumerate(rows[2:], start=3):
-        if _analysis_row_year(row) != year:
-            continue
-        away_team = row[8] if len(row) > 8 else ""
-        home_team = row[11] if len(row) > 11 else ""
-        game_type = _analysis_game_type_from_teams(away_team, home_team)
-        if not game_type:
-            print(
-                f"  [analysis] row {row_num}: "
-                f"skipped unknown team {away_team}/{home_team}"
-            )
-            continue
-        current = row[3] if len(row) > 3 else ""
-        if current == game_type:
-            continue
-        updates.append({"range": f"D{row_num}", "values": [[game_type]]})
-
-    if not updates:
-        print("[analysis] No league cells need repair.")
-        return 0
-
-    sheet.batch_update(updates, value_input_option="USER_ENTERED")
-    print(f"[analysis] Repaired {len(updates)} league cell(s).")
-    return len(updates)
+    return NpbAnalysisService(module=sys.modules[__name__]).repair_leagues(year)
 
 
 def update_huizi_sheet(today: datetime | str | None = None):
@@ -2550,36 +2433,7 @@ def update_huizi_sheet(today: datetime | str | None = None):
     彙資 keeps the same 83-column shape and reserves rows 3-8 for the date's six
     possible NPB games.
     """
-    if isinstance(today, str):
-        today = datetime.strptime(today, "%Y-%m-%d")
-    else:
-        today = today or datetime.now()
-    today_str = f"{today.year}/{today.month}/{today.day}"
-    print(f"\n=== {HUIZI_SHEET_NAME} update ({today_str}) ===")
-
-    analysis = get_worksheet(ANALYSIS_SHEET_NAME, NPB_SPREADSHEET_KEY)
-    huizi = get_worksheet(HUIZI_SHEET_NAME, NPB_SPREADSHEET_KEY)
-    rows = analysis.get_all_values()
-    today_rows = [row[:83] for row in rows[2:] if len(row) > 1 and row[1] == today_str]
-
-    if not today_rows:
-        print(f"[huizi] No finished games for {today_str}; keeping existing data.")
-        return 0
-
-    huizi.batch_clear(["B3:CE8"])
-    values = []
-    for row in today_rows[:6]:
-        padded = row + [""] * (83 - len(row))
-        values.append(padded[1:83])
-
-    end_row = 2 + len(values)
-    huizi.update(
-        range_name=f"B3:CE{end_row}",
-        values=values,
-        value_input_option="USER_ENTERED",
-    )
-    print(f"[huizi] Updated {len(values)} today game row(s).")
-    return len(values)
+    return NpbHuiziService(module=sys.modules[__name__]).update(today)
 
 
 # --- Sheet building ---
@@ -2593,95 +2447,14 @@ def build_block_values(team_key: str, games: list[dict]) -> list[list]:
       row 11:   近十場 平均
       row 12:   近五場 平均
     """
-    display_name = NPB_TEAMS[team_key]["name"]
-
-    header = [
-        display_name,
-        "球 隊",
-        "對 戰",
-        "球 場",
-        "実 点",
-        "得 点",
-        "失 点",
-        "実 失",
-        "安 打",
-        "三 振",
-        "四 死",
-        "本 打",
-    ]
-
-    # Sort by date, keep last GAMES_COUNT
-    sorted_games = sorted(
-        games,
-        key=lambda g: datetime.strptime(g["日期"], "%Y/%m/%d"),
-    )[-GAMES_COUNT:]
-
-    rows = [header]
-
-    for i in range(GAMES_COUNT):
-        if i < len(sorted_games):
-            g = sorted_games[i]
-            date = datetime.strptime(g["日期"], "%Y/%m/%d")
-            date_str = (
-                date.strftime("%#m/%#d")
-                if platform.system() == "Windows"
-                else date.strftime("%-m/%-d")
-            )
-            row = [
-                date_str,
-                g.get("對戰球隊", ""),
-                g.get("對戰先發", ""),
-                _display_field_name(g.get("球場", "")),
-                g.get("実分", 0),
-                g.get("得分", 0),
-                g.get("失分", 0),
-                g.get("実失", 0),
-                g.get("安打", 0),
-                g.get("三振", 0),
-                g.get("四球", 0) + g.get("死球", 0),
-                g.get("全壘打", 0),
-            ]
-        else:
-            row = [""] * 12
-        rows.append(row)
-
-    def avg_row(label: str, game_list: list[dict]) -> list:
-        if not game_list:
-            return ["", "", label, "平 均"] + [""] * 8
-        n = len(game_list)
-
-        def r(v):
-            return round(v / n, 1)
-
-        return [
-            "",
-            "",
-            label,
-            "平 均",
-            r(sum(g.get("実分", 0) for g in game_list)),
-            r(sum(g.get("得分", 0) for g in game_list)),
-            r(sum(g.get("失分", 0) for g in game_list)),
-            r(sum(g.get("実失", 0) for g in game_list)),
-            r(sum(g.get("安打", 0) for g in game_list)),
-            r(sum(g.get("三振", 0) for g in game_list)),
-            r(sum(g.get("四球", 0) + g.get("死球", 0) for g in game_list)),
-            r(sum(g.get("全壘打", 0) for g in game_list)),
-        ]
-
-    rows.append(avg_row("近十場", sorted_games))
-    rows.append(avg_row("近五場", sorted_games[-5:]))
-
-    return rows  # 13 rows × 12 cols
+    return NpbLeagueSheetService(module=sys.modules[__name__]).build_block_values(
+        team_key, games
+    )
 
 
 def _pitcher_font_size(name: str) -> int:
     """10pt default; shrink longer pitcher names to fit the narrow column."""
-    n = len(name.replace(" ", ""))
-    if n > 7:
-        return 6
-    if n > 5:
-        return 8
-    return 10
+    return NpbLeagueSheetService.pitcher_font_size(name)
 
 
 def _pitcher_font_requests(
@@ -2692,142 +2465,39 @@ def _pitcher_font_requests(
     Also resets empty rows to default (10) so stale small fonts don't linger.
     Pitcher column = col_start + 2 (1-indexed) → col_start + 1 (0-indexed).
     """
-    sorted_games = sorted(
-        games, key=lambda g: datetime.strptime(g["日期"], "%Y/%m/%d")
-    )[-GAMES_COUNT:]
-
-    pitcher_col = col_start + 1  # 0-indexed (col_start is 1-indexed)
-    requests = []
-
-    for i in range(GAMES_COUNT):
-        name = sorted_games[i].get("對戰先發", "") if i < len(sorted_games) else ""
-        row_0idx = game_start_row - 1 + i
-        requests.append(
-            {
-                "repeatCell": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "startRowIndex": row_0idx,
-                        "endRowIndex": row_0idx + 1,
-                        "startColumnIndex": pitcher_col,
-                        "endColumnIndex": pitcher_col + 1,
-                    },
-                    "cell": {
-                        "userEnteredFormat": {
-                            "textFormat": {"fontSize": _pitcher_font_size(name)}
-                        }
-                    },
-                    "fields": "userEnteredFormat.textFormat.fontSize",
-                }
-            }
-        )
-
-    return requests
+    return NpbLeagueSheetService(module=sys.modules[__name__]).pitcher_font_requests(
+        sheet_id, games, game_start_row, col_start
+    )
 
 
 def _to_number(value) -> Optional[float]:
-    if value in ("", None):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return NpbLeagueSheetService.to_number(value)
 
 
 def _font_color_request(
     sheet_id: int, row_0idx: int, col_0idx: int, hex_color: str
 ) -> dict:
-    return {
-        "repeatCell": {
-            "range": {
-                "sheetId": sheet_id,
-                "startRowIndex": row_0idx,
-                "endRowIndex": row_0idx + 1,
-                "startColumnIndex": col_0idx,
-                "endColumnIndex": col_0idx + 1,
-            },
-            "cell": {
-                "userEnteredFormat": {
-                    "textFormat": {"foregroundColor": hex_to_rgb(hex_color)}
-                }
-            },
-            "fields": "userEnteredFormat.textFormat.foregroundColor",
-        }
-    }
+    return NpbLeagueSheetService(module=sys.modules[__name__]).font_color_request(
+        sheet_id, row_0idx, col_0idx, hex_color
+    )
 
 
 def _game_font_color_requests(
     sheet_id: int, games: list[dict], game_start_row: int, col_start: int
 ) -> list[dict]:
     """Colour game-row score and hit cells to match the CPBL 近十場 rules."""
-    sorted_games = sorted(
-        games, key=lambda g: datetime.strptime(g["日期"], "%Y/%m/%d")
-    )[-GAMES_COUNT:]
-
-    runs_col = col_start + 4  # 0-indexed 得点; col_start is 1-indexed
-    allowed_col = col_start + 5  # 0-indexed 失点
-    hits_col = col_start + 7  # 0-indexed 安打
-    requests = []
-
-    for i in range(GAMES_COUNT):
-        row_0idx = game_start_row - 1 + i
-        runs_color = DEFAULT_FONT
-        allowed_color = DEFAULT_FONT
-        hits_color = DEFAULT_FONT
-
-        if i < len(sorted_games):
-            game = sorted_games[i]
-            runs = _to_number(game.get("得分"))
-            allowed = _to_number(game.get("失分"))
-            hits = _to_number(game.get("安打"))
-
-            if runs is not None and allowed is not None:
-                if runs > allowed:
-                    runs_color = SCORE_WIN_FONT
-                elif allowed > runs:
-                    allowed_color = SCORE_LOSS_FONT
-                else:
-                    runs_color = SCORE_TIE_FONT
-                    allowed_color = SCORE_TIE_FONT
-
-            if hits is not None and hits >= 10:
-                hits_color = HITS_10_PLUS_FONT
-
-        requests.append(_font_color_request(sheet_id, row_0idx, runs_col, runs_color))
-        requests.append(
-            _font_color_request(sheet_id, row_0idx, allowed_col, allowed_color)
-        )
-        requests.append(_font_color_request(sheet_id, row_0idx, hits_col, hits_color))
-
-    return requests
+    return NpbLeagueSheetService(module=sys.modules[__name__]).game_font_color_requests(
+        sheet_id, games, game_start_row, col_start
+    )
 
 
 def _header_format_request(
     sheet_id: int, team_key: str, header_row: int, col_start: int
 ) -> dict:
     """Build a Sheets API repeatCell request to colour one header row."""
-    info = NPB_TEAMS[team_key]
-    return {
-        "repeatCell": {
-            "range": {
-                "sheetId": sheet_id,
-                "startRowIndex": header_row - 1,  # 0-indexed, inclusive
-                "endRowIndex": header_row,  # exclusive
-                "startColumnIndex": col_start - 1,  # 0-indexed, inclusive
-                "endColumnIndex": col_start + 11,  # exclusive (12 cols)
-            },
-            "cell": {
-                "userEnteredFormat": {
-                    "backgroundColor": hex_to_rgb(info["fill"]),
-                    "textFormat": {
-                        "bold": True,
-                        "foregroundColor": hex_to_rgb(info["font"]),
-                    },
-                }
-            },
-            "fields": "userEnteredFormat(backgroundColor,textFormat)",
-        }
-    }
+    return NpbLeagueSheetService(module=sys.modules[__name__]).header_format_request(
+        sheet_id, team_key, header_row, col_start
+    )
 
 
 def update_league_sheet(
@@ -2839,176 +2509,18 @@ def update_league_sheet(
     Write all 6 team blocks into one sheet.
     matchups[i] = (away_key, home_key) → away goes to top block i, home to bottom block i.
     """
-    sheet = get_worksheet(sheet_name)
-    value_updates = []
-    format_requests = []
-
-    for col_idx, (away_key, home_key) in enumerate(matchups[:3]):
-        col_start = BLOCK_COLS[col_idx]
-        col_end = col_start + 11
-        col_start_l = col_to_letter(col_start)
-        col_end_l = col_to_letter(col_end)
-
-        # Top block (away team)
-        away_games = all_games.get(away_key, [])
-        top_values = build_block_values(away_key, away_games)
-        value_updates.append(
-            {
-                "range": f"{col_start_l}{TOP_HEADER_ROW}:{col_end_l}{TOP_AVG5_ROW}",
-                "values": top_values,
-            }
-        )
-        format_requests.append(
-            _header_format_request(sheet.id, away_key, TOP_HEADER_ROW, col_start)
-        )
-        format_requests.extend(
-            _pitcher_font_requests(sheet.id, away_games, TOP_GAME_START, col_start)
-        )
-        format_requests.extend(
-            _game_font_color_requests(sheet.id, away_games, TOP_GAME_START, col_start)
-        )
-
-        # Bottom block (home team)
-        home_games = all_games.get(home_key, [])
-        bottom_values = build_block_values(home_key, home_games)
-        value_updates.append(
-            {
-                "range": f"{col_start_l}{BOTTOM_HEADER_ROW}:{col_end_l}{BOTTOM_AVG5_ROW}",
-                "values": bottom_values,
-            }
-        )
-        format_requests.append(
-            _header_format_request(sheet.id, home_key, BOTTOM_HEADER_ROW, col_start)
-        )
-        format_requests.extend(
-            _pitcher_font_requests(sheet.id, home_games, BOTTOM_GAME_START, col_start)
-        )
-        format_requests.extend(
-            _game_font_color_requests(
-                sheet.id, home_games, BOTTOM_GAME_START, col_start
-            )
-        )
-
-    # Write values first, then apply formatting in one batch API call
-    sheet.batch_update(value_updates, value_input_option="USER_ENTERED")
-    sheet.spreadsheet.batch_update({"requests": format_requests})
-    print(f"[{sheet_name}] Updated {len(value_updates)} blocks with header colours.")
+    return NpbLeagueSheetService(module=sys.modules[__name__]).update_league_sheet(
+        sheet_name, matchups, all_games
+    )
 
 
 # --- Main ---
 
 
 async def run_once(matchup_date: str | None = None):
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
-    errors = []
-    matchup_start_date = _resolve_matchup_start_date(matchup_date)
-    print(f"Matchup start date: {matchup_start_date:%Y-%m-%d}")
-
-    async with aiohttp.ClientSession(headers=headers) as session:
-        for league, sheet_name in LEAGUE_SHEETS.items():
-            league_teams = {k: v for k, v in NPB_TEAMS.items() if v["league"] == league}
-            print(f"\n=== {league} ({sheet_name}) ===")
-
-            # 1. Determine team order from next game matchups
-            try:
-                matchups = await get_next_matchups(
-                    league, session, start_date=matchup_start_date
-                )
-            except Exception as e:
-                errors.append(f"get_next_matchups({league}): {e}")
-                teams = list(league_teams.keys())
-                matchups = [(teams[i * 2], teams[i * 2 + 1]) for i in range(3)]
-
-            print(f"Matchup order: {matchups}")
-
-            # 2. Fetch last 10 game IDs for each team
-            all_game_ids: dict[str, list[str]] = {}
-            for team_key, team_info in league_teams.items():
-                try:
-                    ids = await get_last_n_game_ids(
-                        team_info["id"], GAMES_COUNT, session
-                    )
-                    all_game_ids[team_key] = ids
-                    print(f"  {team_key}: {len(ids)} game IDs found")
-                except Exception as e:
-                    errors.append(f"get_last_n_game_ids({team_key}): {e}")
-                    all_game_ids[team_key] = []
-
-            # 3. Fetch game details (deduplicated across teams)
-            game_cache: dict[str, dict] = {}
-            unique_ids = {gid for ids in all_game_ids.values() for gid in ids}
-            id_list = list(unique_ids)
-
-            for i in range(0, len(id_list), MAX_CONCURRENT):
-                batch = id_list[i : i + MAX_CONCURRENT]
-                results = await asyncio.gather(
-                    *[get_game_info(gid, session) for gid in batch],
-                    return_exceptions=True,
-                )
-                for gid, result in zip(batch, results):
-                    if isinstance(result, Exception):
-                        errors.append(f"get_game_info({gid}): {result}")
-                    elif result:
-                        game_cache[gid] = result
-                if i + MAX_CONCURRENT < len(id_list):
-                    await asyncio.sleep(2)
-
-            # 4. Build per-team game lists from cache
-            all_games: dict[str, list[dict]] = {}
-            for team_key, team_info in league_teams.items():
-                team_name = team_info["name"]
-                game_list = []
-                for gid in all_game_ids[team_key]:
-                    cached = game_cache.get(gid)
-                    if cached and team_name in cached:
-                        game_list.append(cached[team_name])
-                all_games[team_key] = game_list
-                print(f"  {team_key}: {len(game_list)} games with data")
-
-            # 5. Write to sheet
-            try:
-                update_league_sheet(sheet_name, matchups, all_games)
-            except Exception as e:
-                errors.append(f"update_league_sheet({sheet_name}): {e}")
-
-        # Update 賽錄 in the analysis spreadsheet
-        new_sailu_ids = []
-        try:
-            new_sailu_ids = await update_sailu_sheet(session)
-        except Exception as e:
-            errors.append(f"update_sailu_sheet: {e}")
-
-        # Update the newly written finished games in 分析表紀錄, then refresh 彙資.
-        huizi_date = None
-        try:
-            analysis_game_ids = new_sailu_ids or _sailu_game_ids_for_date()
-            await update_analysis_sheet(session, game_ids=analysis_game_ids)
-            sailu_dates = _sailu_dates_for_game_ids(new_sailu_ids)
-            if not sailu_dates and analysis_game_ids:
-                sailu_dates = _sailu_dates_for_game_ids(analysis_game_ids)
-            if sailu_dates:
-                huizi_date = sailu_dates[-1]
-        except Exception as e:
-            errors.append(f"update_analysis_sheet: {e}")
-
-        try:
-            update_huizi_sheet(huizi_date)
-        except Exception as e:
-            errors.append(f"update_huizi_sheet: {e}")
-
-    if errors:
-        print(f"\n[ERROR] {len(errors)} failure(s):")
-        for err in errors:
-            print(f"  - {err}")
-        sys.exit(1)
-    else:
-        print("\nDone.")
+    return await NpbUpdateService(module=sys.modules[__name__]).run_once(
+        matchup_date=matchup_date
+    )
 
 
 if __name__ == "__main__":
@@ -3031,8 +2543,91 @@ if __name__ == "__main__":
         default=ANALYSIS_SEASON,
         help=f"Season year for analysis repairs. Defaults to {ANALYSIS_SEASON}.",
     )
+    parser.add_argument(
+        "--create-prediction",
+        "--predict",
+        nargs="?",
+        const=PREDICTION_PROMPT_SENTINEL,
+        metavar="HOME_TEAM",
+        dest="create_prediction",
+        help="Create an NPB prediction row by home team. Omit HOME_TEAM for prompts.",
+    )
+    parser.add_argument(
+        "-p",
+        "--pick",
+        help="Team for winner markets, or over/under for total markets.",
+    )
+    parser.add_argument(
+        "-m",
+        "--market",
+        default="final_winner",
+        choices=["half_winner", "final_winner", "half_total", "final_total", "final_handicap", "half_handicap"],
+        help="Prediction market. Defaults to final_winner.",
+    )
+    parser.add_argument(
+        "-l",
+        "--line",
+        type=float,
+        help="Score line for total/handicap predictions (e.g. 0.5, -1.5).",
+    )
+    parser.add_argument(
+        "-r",
+        "--rate",
+        type=float,
+        help="Prediction return rate, e.g. 0.92.",
+    )
+    parser.add_argument(
+        "-s",
+        "--stake",
+        type=float,
+        default=None,
+        help=f"Stake size for the prediction. Defaults to {PREDICTION_DEFAULT_STAKE}.",
+    )
+    parser.add_argument("--game-date", default="", help="Optional prediction game date.")
+    parser.add_argument("--away-team", default="", help="Optional prediction away team.")
+    parser.add_argument("--home-team", default="", help="Optional prediction home team.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build prediction output without writing to Google Sheets.",
+    )
     args = parser.parse_args()
-    if args.repair_analysis_leagues:
+
+    if args.create_prediction is not None:
+        try:
+            values = _prediction_cli_values(args)
+            values = asyncio.run(
+                _prediction_resolve_cli_game(
+                    values,
+                    confirm=args.create_prediction == PREDICTION_PROMPT_SENTINEL,
+                )
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if not values["game_id"]:
+            parser.error("--create-prediction could not resolve a game ID")
+        if not values["pick"] or values["rate"] is None:
+            parser.error("--create-prediction requires --pick and --rate")
+        if values["market"] in {"half_total", "final_total"} and values["line"] is None:
+            parser.error("--market half_total/final_total requires --line")
+        result = create_npb_prediction(
+            values["game_id"],
+            values["pick"],
+            values["rate"],
+            market=values["market"],
+            line=values["line"],
+            stake=values["stake"],
+            game_date=values["game_date"],
+            away_team=values["away_team"],
+            home_team=values["home_team"],
+            dry_run=args.dry_run,
+        )
+        print(result["prediction_text"])
+    elif args.repair_analysis_leagues:
         repair_analysis_leagues(args.analysis_year)
     else:
-        asyncio.run(run_once(matchup_date=args.matchup_date))
+        asyncio.run(
+            NpbUpdateService(module=sys.modules[__name__]).run_once(
+                matchup_date=args.matchup_date
+            )
+        )
