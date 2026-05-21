@@ -127,7 +127,7 @@ You can also set `NPB_MATCHUP_DATE=today` or pass a date such as
 ### Prediction Ledger
 
 NPB predictions are recorded in the separate prediction spreadsheet. A pre-game
-command writes a pending row with a SHA-256 commitment:
+command resolves the game ID by home team and writes a pending row:
 
 ```bash
 python npb.py --create-prediction 巨人 --market final_winner --pick 巨人 --rate 0.92 --stake 10
@@ -156,9 +156,8 @@ python npb.py --predict
 ```
 
 It will list valid home team options, then ask for `Home team`, `Market`,
-`Pick`, `Line` when needed, `Rate`, `Stake`, and optional game metadata one by
-one. Press Enter to accept defaults such as `final_winner` for market and
-`10.0` for stake.
+`Pick`, `Line` when needed, `Rate`, and `Stake`. Press Enter to accept defaults
+such as `final_winner` for market and `10.0` for stake.
 
 For the shortest daily command, add an alias:
 
@@ -167,11 +166,9 @@ alias npbp='cd /Users/evansmac/cpbl && uv run python npb.py --predict'
 npbp
 ```
 
-Use `--dry-run` to print the locked and reveal text without writing anything.
+Use `--dry-run` to print the prediction text without writing anything.
 After the game is scraped as finished, the NPB run resolves pending predictions
-for that game, updates the balance, and stores the reveal text with the result,
-public record, win rate, and current balance in the prediction sheet. The reveal
-text can be pasted into any SHA-256 verifier and compared with the pre-game hash.
+for that game, then updates the result and balance in the prediction sheet.
 An empty prediction sheet starts at `0`; existing sheets continue from the last
 non-empty `balance_after`. A 10-unit win at rate `0.92` from zero becomes `9.2`,
 while a loss subtracts the stake.

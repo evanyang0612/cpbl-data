@@ -6,7 +6,6 @@ import platform
 import asyncio
 import argparse
 import aiohttp
-import hashlib
 import secrets
 from bs4 import BeautifulSoup as bs
 from copy import deepcopy
@@ -146,7 +145,6 @@ PREDICTION_SPREADSHEET_KEY = "1-L5RvjhN3OFiXfrDUVxBa8W0EqYIaLQtxizSi-yP8b0"
 ANALYSIS_SEASON = 2026
 PREDICTION_STARTING_BALANCE = 0.0
 PREDICTION_DEFAULT_STAKE = 10.0
-PREDICTION_SALT_BYTES = 18
 PREDICTION_PROMPT_SENTINEL = "__prompt_prediction__"
 PREDICTION_MARKET_ALIASES = {
     "half": "half_winner",
@@ -161,6 +159,14 @@ PREDICTION_MARKET_ALIASES = {
     "final-total": "final_total",
     "total": "final_total",
     "final_total": "final_total",
+    "handicap": "final_handicap",
+    "final_handicap": "final_handicap",
+    "final-handicap": "final_handicap",
+    "讓分": "final_handicap",
+    "half_handicap": "half_handicap",
+    "half-handicap": "half_handicap",
+    "half_handicap": "half_handicap",
+    "半場讓分": "half_handicap",
 }
 
 OFFICIAL_TEAM_NAME_MAP = {
@@ -321,17 +327,6 @@ def display_team_name(team_name: str) -> str:
 # --- NPB prediction ledger ---
 
 
-def prediction_reveal_text(payload: dict, salt: str) -> str:
-    """
-    Build the exact text followers hash with any standard SHA-256 verifier.
-    """
-    return _NpbPredictionLogic(module=sys.modules[__name__]).reveal_text(payload, salt)
-
-
-def hash_prediction_reveal(reveal_text: str) -> str:
-    return _NpbPredictionLogic(module=sys.modules[__name__]).hash_reveal(reveal_text)
-
-
 def _prediction_now() -> str:
     return _NpbPredictionLogic(module=sys.modules[__name__]).now()
 
@@ -356,7 +351,7 @@ def _prediction_payload(
     )
 
 
-def build_prediction_posts(
+def build_prediction_text(
     game_id: str,
     pick: str,
     rate: float,
@@ -364,18 +359,14 @@ def build_prediction_posts(
     *,
     market: str = "final_winner",
     line: float | None = None,
-    salt: str | None = None,
-    predicted_at: str | None = None,
-) -> dict:
-    return _NpbPredictionLogic(module=sys.modules[__name__]).build_posts(
+) -> str:
+    return _NpbPredictionLogic(module=sys.modules[__name__]).prediction_text(
         game_id,
         pick,
         rate,
         stake,
         market=market,
         line=line,
-        salt=salt,
-        predicted_at=predicted_at,
     )
 
 
@@ -499,14 +490,6 @@ def _prediction_stats_after(
     )
 
 
-def build_prediction_reveal_post(
-    game_id: str, reveal_text: str, outcome: str, stats: dict
-) -> str:
-    return _NpbPredictionLogic(module=sys.modules[__name__]).build_reveal_post(
-        game_id, reveal_text, outcome, stats
-    )
-
-
 def create_npb_prediction(
     game_id: str,
     pick: str,
@@ -564,7 +547,7 @@ def _prompt_float(label: str, *, default: float | None = None) -> float:
 
 
 def _prompt_market(default: str = "final_winner") -> str:
-    options = ["final_winner", "half_winner", "final_total", "half_total"]
+    options = ["final_winner", "half_winner", "final_total", "half_total", "final_handicap", "half_handicap"]
     print("Market options:")
     for idx, market in enumerate(options, start=1):
         print(f"  {idx}. {market}")
@@ -753,7 +736,7 @@ def _prediction_cli_values(args) -> dict:
         else (validate_prediction_pick(args.pick, market) if args.pick else "")
     )
     line = args.line
-    if market in {"half_total", "final_total"} and line is None:
+    if market in {"half_total", "final_total", "final_handicap", "half_handicap"} and line is None:
         line = _prompt_float("Line")
     rate = args.rate if args.rate is not None else _prompt_float("Rate")
     stake = (
@@ -1836,6 +1819,7 @@ async def get_schedule_game_data(
     if not m:
         return None
     date_str = datetime.strptime(m.group(1), "%Y年%m月%d日").strftime("%Y-%m-%d")
+    schedule_status = await _schedule_status_for_game(game_id, date_str, session)
 
     # ── Venue ──────────────────────────────────────────────────────────────
     venue_el = soup.find(class_="bb-gameRound--stadium")
@@ -2045,6 +2029,7 @@ async def get_schedule_game_data(
     return {
         "賽事編號": game_id,
         "日期": date_str,
+        "賽事狀態": schedule_status,
         "客隊原名": away_raw,
         "客隊": away_name,
         "客隊先發": away_starter,
@@ -2074,6 +2059,30 @@ async def get_schedule_game_data(
         "客QS": away_qs,
         "主QS": home_qs,
     }
+
+
+async def _schedule_status_for_game(
+    game_id: str, date_str: str, session: aiohttp.ClientSession
+) -> str:
+    for league in ("first", "second"):
+        html = await _fetch_once(
+            session, f"{BASE_URL}schedule/{league}/all?date={date_str}"
+        )
+        if not html:
+            continue
+        soup = bs(html, "html.parser")
+        game_path = f"/npb/game/{game_id}/"
+        for entry in soup.find_all(class_="bb-calendarTable__data"):
+            if not entry.find("a", href=lambda href: href and game_path in href):
+                continue
+            status = entry.find(class_="bb-calendarTable__status")
+            if status:
+                return status.get_text(" ", strip=True)
+        for status in soup.find_all(class_="bb-calendarTable__status"):
+            href = status.get("href", "")
+            if game_path in href:
+                return status.get_text(" ", strip=True)
+    return ""
 
 
 def _schedule_row(seq: int, data: dict) -> list:
@@ -2541,7 +2550,7 @@ if __name__ == "__main__":
         const=PREDICTION_PROMPT_SENTINEL,
         metavar="HOME_TEAM",
         dest="create_prediction",
-        help="Create an NPB prediction commitment by home team. Omit HOME_TEAM for prompts.",
+        help="Create an NPB prediction row by home team. Omit HOME_TEAM for prompts.",
     )
     parser.add_argument(
         "-p",
@@ -2552,14 +2561,14 @@ if __name__ == "__main__":
         "-m",
         "--market",
         default="final_winner",
-        choices=["half_winner", "final_winner", "half_total", "final_total"],
+        choices=["half_winner", "final_winner", "half_total", "final_total", "final_handicap", "half_handicap"],
         help="Prediction market. Defaults to final_winner.",
     )
     parser.add_argument(
         "-l",
         "--line",
         type=float,
-        help="Score line for half_total/final_total predictions.",
+        help="Score line for total/handicap predictions (e.g. 0.5, -1.5).",
     )
     parser.add_argument(
         "-r",
@@ -2613,8 +2622,7 @@ if __name__ == "__main__":
             home_team=values["home_team"],
             dry_run=args.dry_run,
         )
-        print(result["commitment_post"])
-        print(result["reveal_post"])
+        print(result["prediction_text"])
     elif args.repair_analysis_leagues:
         repair_analysis_leagues(args.analysis_year)
     else:

@@ -24,19 +24,6 @@ class NpbModuleService:
 class _NpbPredictionLogic(NpbModuleService):
     """Internal prediction calculations used by NpbPredictionService."""
 
-    def reveal_text(self, payload: dict, salt: str) -> str:
-        module = self.module
-        canonical_payload = module.json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return f"{canonical_payload}|salt={salt}"
-
-    def hash_reveal(self, reveal_text: str) -> str:
-        return self.module.hashlib.sha256(reveal_text.encode("utf-8")).hexdigest()
-
     def now(self) -> str:
         return datetime.now().replace(microsecond=0).isoformat()
 
@@ -62,7 +49,7 @@ class _NpbPredictionLogic(NpbModuleService):
             payload["l"] = float(line)
         return payload
 
-    def build_posts(
+    def prediction_text(
         self,
         game_id: str,
         pick: str,
@@ -71,48 +58,20 @@ class _NpbPredictionLogic(NpbModuleService):
         *,
         market: str = "final_winner",
         line: float | None = None,
-        salt: str | None = None,
-        predicted_at: str | None = None,
-    ) -> dict:
+    ) -> str:
         module = self.module
         if stake is None:
             stake = module.PREDICTION_DEFAULT_STAKE
-        salt = salt or module.secrets.token_urlsafe(module.PREDICTION_SALT_BYTES)
-        payload = self.payload(
-            game_id,
-            pick,
-            rate,
-            stake,
-            market=market,
-            line=line,
-            predicted_at=predicted_at,
-        )
-        reveal_text = self.reveal_text(payload, salt)
-        commitment_hash = self.hash_reveal(reveal_text)
-        commitment_post = (
-            f"NPB prediction locked before first pitch\n"
+        market = self.normalize_market(market)
+        line_text = "" if line is None else f"\nLine: {float(line)}"
+        return (
+            f"NPB prediction\n"
             f"Game {game_id}\n"
-            f"SHA-256: {commitment_hash}\n"
-            f"Reveal after final."
+            f"Market: {market}\n"
+            f"Pick: {pick}{line_text}\n"
+            f"Rate: {float(rate)}\n"
+            f"Stake: {float(stake)}"
         )
-        reveal_post = (
-            f"NPB prediction reveal\n"
-            f"Game {game_id}\n"
-            f"Verify SHA-256 of:\n"
-            f"{reveal_text}"
-        )
-        if len(commitment_post) > 280:
-            raise ValueError("Prediction commitment post is longer than 280 characters.")
-        if len(reveal_post) > 280:
-            raise ValueError("Prediction reveal post is longer than 280 characters.")
-        return {
-            "salt": salt,
-            "payload": payload,
-            "reveal_text": reveal_text,
-            "commitment_hash": commitment_hash,
-            "commitment_post": commitment_post,
-            "reveal_post": reveal_post,
-        }
 
     @staticmethod
     def calculate_balance(balance_before: float, stake: float, rate: float, outcome: str):
@@ -198,7 +157,7 @@ class _NpbPredictionLogic(NpbModuleService):
         if team in self.module.NPB_TEAMS:
             return team
         raise ValueError(
-            f"Winner predictions require a valid NPB team: {self.team_options()}."
+            f"Winner/handicap predictions require a valid NPB team: {self.team_options()}."
         )
 
     @staticmethod
@@ -244,6 +203,35 @@ class _NpbPredictionLogic(NpbModuleService):
             return "win" if total > line else "loss"
         return "win" if total < line else "loss"
 
+    def handicap_outcome(
+        self, data: dict, pick: str, line: float, *, half: bool = False
+    ) -> str:
+        if half:
+            away_score = self.innings_total(data.get("away_innings", []), 5)
+            home_score = self.innings_total(data.get("home_innings", []), 5)
+        else:
+            away_score = int(data["客總分"])
+            home_score = int(data["主總分"])
+
+        away = self.normalize_team(data.get("客隊原名") or data.get("客隊"))
+        home = self.normalize_team(data.get("主隊原名") or data.get("主隊"))
+        picked = self.normalize_team(pick)
+
+        if picked == away:
+            adjusted = away_score + float(line)
+            opponent = home_score
+        elif picked == home:
+            adjusted = home_score + float(line)
+            opponent = away_score
+        else:
+            raise ValueError(f"Pick '{pick}' is not in this game.")
+
+        if adjusted > opponent:
+            return "win"
+        if adjusted < opponent:
+            return "loss"
+        return "push"
+
     def outcome_for_game(
         self,
         data: dict,
@@ -264,6 +252,14 @@ class _NpbPredictionLogic(NpbModuleService):
             if line is None:
                 raise ValueError("half_total predictions require a line.")
             return self.total_outcome(data, pick, line, half=True)
+        if market == "final_handicap":
+            if line is None:
+                raise ValueError("final_handicap predictions require a line.")
+            return self.handicap_outcome(data, pick, line, half=False)
+        if market == "half_handicap":
+            if line is None:
+                raise ValueError("half_handicap predictions require a line.")
+            return self.handicap_outcome(data, pick, line, half=True)
         raise ValueError(f"Unsupported prediction market: {market}")
 
     @staticmethod
@@ -272,8 +268,6 @@ class _NpbPredictionLogic(NpbModuleService):
             "prediction_id",
             "game_id",
             "game_date",
-            "away_team",
-            "home_team",
             "market",
             "pick",
             "line",
@@ -283,11 +277,6 @@ class _NpbPredictionLogic(NpbModuleService):
             "outcome",
             "balance_before",
             "balance_after",
-            "commitment_post_id",
-            "reveal_post_id",
-            "commitment_hash",
-            "salt",
-            "reveal_post",
             "created_at",
             "resolved_at",
         ]
@@ -407,23 +396,6 @@ class _NpbPredictionLogic(NpbModuleService):
         )
         stats["balance"] = round(float(balance_after), 4)
         return stats
-
-    def build_reveal_post(
-        self, game_id: str, reveal_text: str, outcome: str, stats: dict
-    ) -> str:
-        record = f"{stats['wins']}-{stats['losses']}-{stats['pushes']}"
-        text = (
-            f"NPB prediction reveal\n"
-            f"Game {game_id}\n"
-            f"Result: {str(outcome).upper()}\n"
-            f"Record: {record} | Win rate: {stats['win_rate']}%\n"
-            f"Balance: {stats['balance']}\n"
-            f"Verify SHA-256 of:\n"
-            f"{reveal_text}"
-        )
-        if len(text) > 280:
-            raise ValueError("Prediction reveal post is longer than 280 characters.")
-        return text
 
 
 class NpbRowsService(NpbModuleService):
@@ -1848,59 +1820,50 @@ class NpbPredictionService:
         created_at = logic.now()
         market = logic.normalize_market(market)
         pick = logic.validate_pick(pick, market)
-        posts = logic.build_posts(
+        prediction_text = logic.prediction_text(
             game_id,
             pick,
             float(rate),
             float(stake),
             market=market,
             line=line,
-            predicted_at=created_at,
         )
-        commitment_post_id = ""
 
         balance_after = logic.calculate_balance(
             balance_before, stake, rate, "pending"
         )
-        row = [
-            prediction_id,
-            game_id,
-            game_date,
-            away_team,
-            home_team,
-            market,
-            pick,
-            "" if line is None else float(line),
-            float(rate),
-            float(stake),
-            "pending",
-            "",
-            (
+        values = {
+            "prediction_id": prediction_id,
+            "game_id": game_id,
+            "game_date": game_date,
+            "market": market,
+            "pick": pick,
+            "line": "" if line is None else float(line),
+            "rate": float(rate),
+            "stake": float(stake),
+            "status": "pending",
+            "outcome": "",
+            "balance_before": (
                 balance_before
                 if dry_run
                 else logic.balance_before_formula(headers, row_num)
             ),
-            (
+            "balance_after": (
                 balance_after
                 if dry_run
                 else logic.balance_after_formula(headers, row_num)
             ),
-            commitment_post_id,
-            "",
-            posts["commitment_hash"],
-            posts["salt"],
-            posts["reveal_post"],
-            created_at,
-            "",
-        ]
+            "created_at": created_at,
+            "resolved_at": "",
+        }
+        row = [values.get(header, "") for header in headers]
         if not dry_run:
             sheet.append_row(row, value_input_option="USER_ENTERED")
         return {
             "prediction_id": prediction_id,
             "balance_before": balance_before,
             "balance_after": balance_after,
-            "commitment_post_id": commitment_post_id,
-            **posts,
+            "prediction_text": prediction_text,
         }
 
     def resolve_for_game(
@@ -1914,6 +1877,13 @@ class NpbPredictionService:
     ) -> int:
         module = self.module
         logic = _NpbPredictionLogic(module=module)
+        game_status = str(data.get("賽事狀態", "")).strip()
+        if game_status != "試合終了":
+            print(
+                f"[prediction] Game {game_id} is not finished "
+                f"({game_status or 'unknown'}); keeping prediction pending."
+            )
+            return 0
         sheet = sheet or logic.sheet()
         rows = logic.rows(sheet)
         headers = rows[0]
@@ -1929,10 +1899,6 @@ class NpbPredictionService:
             "outcome",
             "balance_before",
             "balance_after",
-            "commitment_post_id",
-            "reveal_post_id",
-            "reveal_post",
-            "salt",
             "created_at",
             "resolved_at",
         }
@@ -1984,25 +1950,6 @@ class NpbPredictionService:
             balance_after = logic.calculate_balance(
                 balance_before, stake, rate, outcome
             )
-            stats = logic.stats_after(rows, outcome, balance_after)
-            payload = logic.payload(
-                game_id,
-                pick,
-                rate,
-                stake,
-                market=market,
-                line=line,
-                predicted_at=row[index["created_at"]] or None,
-            )
-            reveal_text = logic.reveal_text(payload, row[index["salt"]])
-            reveal_post = logic.build_reveal_post(
-                game_id,
-                reveal_text,
-                outcome,
-                stats,
-            )
-            reveal_post_id = ""
-
             running_balance = balance_after
             resolved_at = logic.now()
             if not dry_run:
@@ -2017,14 +1964,10 @@ class NpbPredictionService:
                         "balance_after",
                         logic.balance_after_formula(headers, row_num),
                     ),
-                    ("reveal_post_id", reveal_post_id),
-                    ("reveal_post", reveal_post),
                     ("resolved_at", resolved_at),
                 ]
                 backfill_values = {
                     "game_date": data.get("日期", ""),
-                    "away_team": data.get("客隊原名") or data.get("客隊", ""),
-                    "home_team": data.get("主隊原名") or data.get("主隊", ""),
                 }
                 for col_name, value in backfill_values.items():
                     if col_name in index and not row[index[col_name]] and value:
