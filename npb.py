@@ -2082,6 +2082,16 @@ async def _schedule_status_for_game(
             href = status.get("href", "")
             if game_path in href:
                 return status.get_text(" ", strip=True)
+        # bb-score layout (used on some date pages)
+        anchor = soup.find("a", href=lambda h: h and game_path in h)
+        if anchor:
+            item = anchor.find_parent(class_="bb-score__item") or anchor.find_parent(
+                class_="bb-score__content"
+            )
+            if item:
+                link_el = item.find(class_="bb-score__link")
+                if link_el:
+                    return link_el.get_text(" ", strip=True)
     return ""
 
 
