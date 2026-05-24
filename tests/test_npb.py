@@ -13,7 +13,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from bs4 import BeautifulSoup as bs
 
-from baseball.npb_services import NpbPredictionService
+from baseball.npb_services import (
+    NpbLeagueSheetService,
+    NpbPredictionService,
+    NpbRecentGamesService,
+)
 from npb import (
     DEFAULT_FONT,
     HITS_10_PLUS_FONT,
@@ -23,6 +27,7 @@ from npb import (
     _game_font_color_requests,
     _get_schedule_opponent,
     _header_format_request,
+    _official_next_matchups,
     _analysis_game_type_from_teams,
     _analysis_row,
     _analysis_team_league,
@@ -93,6 +98,124 @@ class TestResolveMatchupStartDate:
     def test_invalid_date_raises_clear_error(self):
         with pytest.raises(ValueError, match="today.*tomorrow.*YYYY-MM-DD"):
             _resolve_matchup_start_date("05/12/2026")
+
+
+# ---------------------------------------------------------------------------
+# _official_next_matchups
+# ---------------------------------------------------------------------------
+
+
+class TestOfficialNextMatchups:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_interleague_keeps_real_cross_league_matchups(self):
+        html = """
+        <table>
+          <tr><th>5/26（火）</th></tr>
+          <tr><td><div class="team1">巨人</div><div class="team2">ソフトバンク</div></td></tr>
+          <tr><td><div class="team1">ヤクルト</div><div class="team2">西武</div></td></tr>
+          <tr><td><div class="team1">横浜DeNA</div><div class="team2">オリックス</div></td></tr>
+          <tr><td><div class="team1">中日</div><div class="team2">楽天</div></td></tr>
+          <tr><td><div class="team1">阪神</div><div class="team2">日本ハム</div></td></tr>
+          <tr><td><div class="team1">広島</div><div class="team2">ロッテ</div></td></tr>
+        </table>
+        """
+        with patch("npb._fetch_once", new=AsyncMock(return_value=html)):
+            central = self._run(
+                _official_next_matchups("央盟", AsyncMock(), date(2026, 5, 24))
+            )
+            pacific = self._run(
+                _official_next_matchups("洋盟", AsyncMock(), date(2026, 5, 24))
+            )
+
+        assert central == [
+            ("ソフトバンク", "巨人"),
+            ("西武", "ヤクルト"),
+            ("オリックス", "DeNA"),
+        ]
+        assert pacific == [
+            ("楽天", "中日"),
+            ("日本ハム", "阪神"),
+            ("ロッテ", "広島"),
+        ]
+
+
+class TestNpbRecentGamesService:
+    def test_fetches_recent_games_for_cross_league_matchup_teams(self):
+        calls = []
+
+        async def get_next_matchups(league, session, start_date):
+            assert league == "央盟"
+            return [("阪神", "オリックス")]
+
+        async def get_last_n_game_ids(team_id, n, session):
+            calls.append(team_id)
+            return [f"game-{team_id}"]
+
+        async def get_game_info(game_id, session):
+            return {
+                "阪 神": _make_game(
+                    "2026/05/26",
+                    "歐 牛",
+                    "投手",
+                    "甲子園",
+                    1,
+                    2,
+                    3,
+                    3,
+                    4,
+                    5,
+                    1,
+                    0,
+                    0,
+                ),
+                "歐 牛": _make_game(
+                    "2026/05/26",
+                    "阪 神",
+                    "投手",
+                    "京大阪",
+                    3,
+                    3,
+                    2,
+                    1,
+                    6,
+                    4,
+                    2,
+                    0,
+                    1,
+                ),
+            }
+
+        module = Namespace(
+            LEAGUE_SHEETS={"央盟": "近十場a"},
+            NPB_TEAMS=NPB_TEAMS,
+            GAMES_COUNT=10,
+            MAX_CONCURRENT=10,
+            get_next_matchups=get_next_matchups,
+            get_last_n_game_ids=get_last_n_game_ids,
+            get_game_info=get_game_info,
+        )
+
+        captured = {}
+
+        def capture_update(self, sheet_name, matchups, all_games):
+            captured["sheet_name"] = sheet_name
+            captured["matchups"] = matchups
+            captured["all_games"] = all_games
+
+        with patch.object(
+            NpbLeagueSheetService, "update_league_sheet", new=capture_update
+        ):
+            asyncio.run(
+                NpbRecentGamesService(module=module).update(
+                    AsyncMock(), matchup_start_date=date(2026, 5, 26), errors=[]
+                )
+            )
+
+        assert calls == [NPB_TEAMS["阪神"]["id"], NPB_TEAMS["オリックス"]["id"]]
+        assert captured["matchups"] == [("阪神", "オリックス")]
+        assert set(captured["all_games"]) == {"阪神", "オリックス"}
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Baseball Stats Scrapers
 
-Automated scrapers that pull game results from CPBL and NPB, then write stats to Google Sheets. Both run on GitHub Actions cron schedules.
+Automated scrapers that pull game results from CPBL, NPB, and MLB, then write stats to Google Sheets. They run on GitHub Actions cron schedules.
 
 ---
 
@@ -15,6 +15,7 @@ Automated scrapers that pull game results from CPBL and NPB, then write stats to
 ├── lastTenGamesPreseason.gs         # Google Apps Script for CPBL 熱身賽 近十場 sheet
 └── .github/workflows/
     ├── cpbl_scheduler.yml           # Cron: every 30 min, 07:00–16:00 UTC (via Japan VPN)
+    ├── mlb_record_scheduler.yml     # Cron: daily, 12:00 UTC
     └── npb_scheduler.yml            # Cron: every 30 min, 08:00–14:00 UTC
 ```
 
@@ -79,15 +80,38 @@ Runs every 30 minutes between **08:00–14:00 UTC** (17:00–23:00 JST), coverin
 
 ---
 
+## MLB (`migration/update_mlb_record.py`)
+
+Scrapes MLB Stats API finalized regular-season games and appends missing rows to the `紀錄` worksheet in the MLB spreadsheet.
+
+### Workflow
+
+1. Fetches recent regular-season games from MLB Stats API
+2. Uses `gamePk` in column B to skip games already recorded
+3. Fetches per-game feed data for starters, pitcher hand, line score, venue, umpire, league/division, starter innings, and earned runs
+4. Writes raw columns `A:AN` and copies formula columns `AO:BC` from the prior row
+5. Refreshes `MLB近十場1` through `MLB近十場5`, with three matchup blocks per sheet
+
+### Scheduler
+
+Runs once daily at **12:00 UTC** (21:00 JST). The record command checks the last 3 calendar dates so delayed finalization and timezone edge cases are picked up without duplicating rows:
+
+```bash
+uv run python migration/update_mlb_record.py --recent-days 3
+uv run python migration/update_mlb_last10.py
+```
+
+---
+
 ## GitHub Secrets
 
 | Secret               | Used by   | Description                             |
 | -------------------- | --------- | --------------------------------------- |
-| `GOOGLE_CREDENTIALS` | CPBL, NPB | Google service account JSON (full body) |
+| `GOOGLE_CREDENTIALS` | CPBL, NPB, MLB | Google service account JSON (full body) |
 | `SPREADSHEET_KEY`    | CPBL      | Google Sheets spreadsheet ID for CPBL   |
 | `NORDVPN_TOKEN`      | CPBL      | NordVPN token for WireGuard tunnel      |
-| `TELEGRAM_BOT_TOKEN` | CPBL, NPB | Telegram bot token for failure alerts   |
-| `TELEGRAM_CHAT_ID`   | CPBL, NPB | Telegram chat ID for failure alerts     |
+| `TELEGRAM_BOT_TOKEN` | CPBL, NPB, MLB | Telegram bot token for failure alerts   |
+| `TELEGRAM_CHAT_ID`   | CPBL, NPB, MLB | Telegram chat ID for failure alerts     |
 
 ## GitHub Variables
 

@@ -1,0 +1,42 @@
+name: MLB Record Updater
+
+on:
+  schedule:
+    # 21:00 JST / 12:00 UTC catches most finalized MLB day games and retries
+    # recent dates by gamePk, so duplicate rows are skipped.
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+jobs:
+  update-record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run MLB record updater
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: uv run python migration/update_mlb_record.py --recent-days 3
+
+      - name: Run MLB last-10 updater
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: uv run python migration/update_mlb_last10.py
+
+      - name: Send failure Telegram message
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=MLB record updater failed. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
