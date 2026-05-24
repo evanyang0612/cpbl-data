@@ -1117,28 +1117,40 @@ async def _official_next_matchups(
 
     for date_key in sorted(by_date):
         same_league: list[tuple[str, str]] = []
-        away_cross: list[str] = []
-        home_cross: list[str] = []
+        cross_league: list[tuple[str, str]] = []
 
         for away_key, home_key in by_date[date_key]:
             away_in = away_key in league_teams
             home_in = home_key in league_teams
             if away_in and home_in:
                 same_league.append((away_key, home_key))
-            elif away_in:
-                away_cross.append(away_key)
-            elif home_in:
-                home_cross.append(home_key)
+            elif away_in or home_in:
+                cross_league.append((away_key, home_key))
 
         matchups = same_league[:]
-        while away_cross and home_cross and len(matchups) < 3:
-            matchups.append((away_cross.pop(0), home_cross.pop(0)))
 
-        remaining_cross = away_cross + home_cross
-        for i in range(0, len(remaining_cross) - 1, 2):
+        if not same_league and len(cross_league) > 3:
+            league_idx = list(LEAGUE_SHEETS).index(league)
+            start_idx = league_idx * 3
+            matchups = cross_league[start_idx : start_idx + 3]
+            if matchups:
+                print(
+                    f"[{league}] Official next game day: {date_key}, games: {matchups}"
+                )
+                return matchups
+
+        # During interleague play, keep real cross-league opponents. Prefer games
+        # where this sheet's league is the away side, so the two league sheets
+        # split a six-game day into three actual matchups each when schedules are
+        # balanced by home/away league.
+        preferred_cross = [
+            game for game in cross_league if game[0] in league_teams
+        ] + [game for game in cross_league if game[0] not in league_teams]
+        for game in preferred_cross:
             if len(matchups) >= 3:
                 break
-            matchups.append((remaining_cross[i], remaining_cross[i + 1]))
+            if game not in matchups:
+                matchups.append(game)
 
         matched = {t for pair in matchups for t in pair}
         unmatched = [k for k in league_teams if k not in matched]
@@ -1267,15 +1279,13 @@ async def get_next_matchups(
     print(f"[{league}] Next game day: {next_date}, games: {day_games}")
 
     seen: dict[str, tuple[str, str]] = {}  # game_id -> (away_key, home_key)
-    cross_roles: dict[str, str] = (
-        {}
-    )  # team_key -> 'away' | 'home' for inter-league teams
+    cross_games: list[tuple[str, str]] = []
 
     # For teams that have a real game ID, fetch the game page to get teams + venue.
     # /top works for finished games; for upcoming games /top has no team/venue data,
     # but /stats does — so always try /stats as fallback when parsing fails.
-    known_ids = {gid for gid in day_games.values() if gid is not None}
-    for game_id in dict.fromkeys(known_ids):
+    known_ids = sorted({gid for gid in day_games.values() if gid is not None})
+    for game_id in known_ids:
         soup = None
         for path in ("stats", "top"):
             html = await _fetch(session, f"{BASE_URL}game/{game_id}/{path}")
@@ -1301,16 +1311,13 @@ async def get_next_matchups(
         if t0_in and t1_in:
             # Same-league game — page order: [0]=away, [1]=home
             seen[game_id] = (t0, t1)
-        elif t0_in:
-            # Inter-league: t0 is our team and is playing away
-            cross_roles[t0] = "away"
-        elif t1_in:
-            # Inter-league: t1 is our team and is playing home
-            cross_roles[t1] = "home"
+        elif t0_in or t1_in:
+            # Inter-league game — keep the actual opponent and home/away order.
+            cross_games.append((t0, t1))
 
     matchups = list(seen.values())
     matched = {t for pair in matchups for t in pair}
-    matched.update(cross_roles.keys())
+    matched.update(t for pair in cross_games for t in pair if t in league_teams)
 
     # For teams still unmatched (no game ID yet), try reading opponent from schedule page
     no_id_teams = [
@@ -1340,24 +1347,24 @@ async def get_next_matchups(
                 paired.update([key, opp])
                 matched.update([key, opp])
             elif opp and opp not in league_teams:
-                # Inter-league game, no ID yet — can't determine home/away without game page;
-                # default to 'away' so the team lands on top rather than being dropped
-                cross_roles[key] = "away"
+                # Inter-league game, no ID yet — can't determine home/away without
+                # game page; default this league's team to away so it is retained.
+                cross_games.append((key, opp))
                 matched.add(key)
 
-    # Pair inter-league teams: match away with home where possible
-    away_cross = [k for k, r in cross_roles.items() if r == "away"]
-    home_cross = [k for k, r in cross_roles.items() if r == "home"]
+    if not matchups and len(cross_games) > 3:
+        league_idx = list(LEAGUE_SHEETS).index(league)
+        start_idx = league_idx * 3
+        matchups = cross_games[start_idx : start_idx + 3]
 
-    while away_cross and home_cross and len(matchups) < 3:
-        matchups.append((away_cross.pop(0), home_cross.pop(0)))
-
-    # If roles are unbalanced (e.g. all-away day), pair same-role teams together
-    remaining_cross = away_cross + home_cross
-    for i in range(0, len(remaining_cross) - 1, 2):
+    preferred_cross = [game for game in cross_games if game[0] in league_teams] + [
+        game for game in cross_games if game[0] not in league_teams
+    ]
+    for game in preferred_cross:
         if len(matchups) >= 3:
             break
-        matchups.append((remaining_cross[i], remaining_cross[i + 1]))
+        if game not in matchups:
+            matchups.append(game)
 
     # Pad to 3 if still fewer than 3 matchups (e.g. rest days)
     matched = {t for pair in matchups for t in pair}

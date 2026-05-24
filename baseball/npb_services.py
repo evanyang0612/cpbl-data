@@ -1352,8 +1352,20 @@ class NpbRecentGamesService:
 
             print(f"Matchup order: {matchups}")
 
+            team_keys = list(
+                dict.fromkeys(
+                    key
+                    for matchup in matchups
+                    for key in matchup
+                    if key in module.NPB_TEAMS
+                )
+            )
+            if not team_keys:
+                team_keys = list(league_teams.keys())
+
             all_game_ids: dict[str, list[str]] = {}
-            for team_key, team_info in league_teams.items():
+            for team_key in team_keys:
+                team_info = module.NPB_TEAMS[team_key]
                 try:
                     ids = await module.get_last_n_game_ids(
                         team_info["id"], module.GAMES_COUNT, session
@@ -1383,7 +1395,8 @@ class NpbRecentGamesService:
                     await asyncio.sleep(2)
 
             all_games: dict[str, list[dict]] = {}
-            for team_key, team_info in league_teams.items():
+            for team_key in team_keys:
+                team_info = module.NPB_TEAMS[team_key]
                 team_name = team_info["name"]
                 game_list = []
                 for gid in all_game_ids[team_key]:
