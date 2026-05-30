@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cpbl import _sheets_client
 
-
 SPREADSHEET_KEY = "11FV70TXVAxLTwYH6pLj7HwK1qq-fIa61QrePRCC8YUM"
 RECORD_SHEET_NAME = "紀錄"
 SHEET_PREFIX = "MLB近十場"
@@ -105,6 +104,44 @@ TEAM_COLORS = {
     "COL": ("#33006f", "#ffffff"),
 }
 
+MLB_VENUE_ID_DISPLAY_NAMES = {
+    1: "Angels",
+    2: "Orioles",
+    3: "Red Sox",
+    4: "White Sox",
+    5: "Guardians",
+    7: "Royals",
+    12: "Rays",
+    14: "Blue Jays",
+    15: "D-backs",
+    17: "Cubs",
+    19: "Rockies",
+    22: "Dodgers",
+    31: "Pirates",
+    32: "Brewers",
+    680: "Mariners",
+    2392: "Astros",
+    2394: "Tigers",
+    2395: "Giants",
+    2529: "Athletics",
+    2602: "Reds",
+    2680: "Padres",
+    2681: "Phillies",
+    2889: "Cardinals",
+    3289: "Mets",
+    3309: "Nationals",
+    3312: "Twins",
+    3313: "Yankees",
+    4169: "Marlins",
+    4705: "Braves",
+    5325: "Rangers",
+}
+
+MLB_VENUE_NAME_DISPLAY_NAMES = {
+    "Oriole Park at Camden Yards": "Orioles",
+    "UNIQLO Field at Dodger Stadium": "Dodgers",
+}
+
 
 def _with_retries(label: str, fn: Any) -> Any:
     last_error: Exception | None = None
@@ -124,7 +161,9 @@ def _with_retries(label: str, fn: Any) -> Any:
 def _get_json(session: requests.Session, url: str, **params: Any) -> dict[str, Any]:
     return _with_retries(
         f"fetch {url}",
-        lambda: _raise_for_json(session.get(url, params=params, timeout=REQUEST_TIMEOUT)),
+        lambda: _raise_for_json(
+            session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        ),
     )
 
 
@@ -176,6 +215,13 @@ def _to_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _display_venue_name(venue: str, venue_id: Any = None) -> str:
+    venue_id_int = _to_int(venue_id)
+    if venue_id_int in MLB_VENUE_ID_DISPLAY_NAMES:
+        return MLB_VENUE_ID_DISPLAY_NAMES[venue_id_int]
+    return MLB_VENUE_NAME_DISPLAY_NAMES.get(venue, venue)
+
+
 def _to_date_text(value: Any) -> str:
     if isinstance(value, (int, float)):
         dt = date(1899, 12, 30) + timedelta(days=int(value))
@@ -193,7 +239,7 @@ def _display_date(value: str) -> str:
 
 
 def _record_to_team_games(row: list[str]) -> list[tuple[str, dict[str, Any]]]:
-    padded = row + [""] * (40 - len(row))
+    padded = row + [""] * (41 - len(row))
     game_id = _to_text(padded[1])
     if not game_id:
         return []
@@ -203,7 +249,7 @@ def _record_to_team_games(row: list[str]) -> list[tuple[str, dict[str, Any]]]:
         return []
 
     date_value = _to_date_text(padded[0])
-    venue = _to_text(padded[32])
+    venue = _display_venue_name(_to_text(padded[32]), padded[33])
     away_game = {
         "日期": date_value,
         "賽事編號": game_id,
@@ -211,10 +257,10 @@ def _record_to_team_games(row: list[str]) -> list[tuple[str, dict[str, Any]]]:
         "對戰球隊": home,
         "對戰先發": _to_text(padded[30]),
         "球場": venue,
-        "実分": _to_int(padded[39]),
+        "実分": _to_int(padded[40]),
         "得分": _to_int(padded[14]),
         "失分": _to_int(padded[27]),
-        "実失": _to_int(padded[38]),
+        "実失": _to_int(padded[39]),
         "安打": _to_int(padded[15]),
         "主客": "客",
     }
@@ -225,10 +271,10 @@ def _record_to_team_games(row: list[str]) -> list[tuple[str, dict[str, Any]]]:
         "對戰球隊": away,
         "對戰先發": _to_text(padded[3]),
         "球場": venue,
-        "実分": _to_int(padded[38]),
+        "実分": _to_int(padded[39]),
         "得分": _to_int(padded[27]),
         "失分": _to_int(padded[14]),
-        "実失": _to_int(padded[39]),
+        "実失": _to_int(padded[40]),
         "安打": _to_int(padded[28]),
         "主客": "主",
     }
@@ -239,7 +285,7 @@ def _read_team_games() -> dict[str, list[dict[str, Any]]]:
     worksheet = _sheets_client.worksheet(SPREADSHEET_KEY, RECORD_SHEET_NAME)
     rows = _with_retries(
         "read record raw columns",
-        lambda: worksheet.get("A2:AN", value_render_option="UNFORMATTED_VALUE"),
+        lambda: worksheet.get("A2:AO", value_render_option="UNFORMATTED_VALUE"),
     )
     games_by_team: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -256,36 +302,52 @@ def _read_team_games() -> dict[str, list[dict[str, Any]]]:
     return games_by_team
 
 
-def _team_stats_from_feed(session: requests.Session, game_id: str) -> dict[str, dict[str, int]]:
+def _team_stats_from_feed(
+    session: requests.Session, game_id: str
+) -> dict[str, Any]:
     feed = _get_json(session, f"{MLB_API}/v1.1/game/{game_id}/feed/live")
     game_data = feed["gameData"]
     boxscore = feed["liveData"]["boxscore"]
-    result: dict[str, dict[str, int]] = {}
+    team_stats: dict[str, dict[str, int]] = {}
     for side in ("away", "home"):
         team = boxscore["teams"][side]
         abbrev = game_data["teams"][side].get("abbreviation")
         batting = team.get("teamStats", {}).get("batting", {})
-        result[abbrev] = {
+        team_stats[abbrev] = {
             "三振": _to_int(batting.get("strikeOuts")),
             "四死": _to_int(batting.get("baseOnBalls"))
             + _to_int(batting.get("hitByPitch")),
             "本打": _to_int(batting.get("homeRuns")),
         }
-    return result
+    venue = game_data.get("venue", {})
+    return {
+        "team_stats": team_stats,
+        "venue_id": venue.get("id"),
+        "venue_name": venue.get("name", ""),
+    }
 
 
 def _enrich_batting_stats(games_by_team: dict[str, list[dict[str, Any]]]) -> None:
     session = requests.Session()
-    game_ids = sorted({g["賽事編號"] for games in games_by_team.values() for g in games})
-    stats_cache: dict[str, dict[str, dict[str, int]]] = {}
+    game_ids = sorted(
+        {g["賽事編號"] for games in games_by_team.values() for g in games}
+    )
+    game_cache: dict[str, dict[str, Any]] = {}
     for index, game_id in enumerate(game_ids, start=1):
-        stats_cache[game_id] = _team_stats_from_feed(session, game_id)
+        game_cache[game_id] = _team_stats_from_feed(session, game_id)
         if index % 25 == 0 or index == len(game_ids):
             print(f"Fetched batting stats {index}/{len(game_ids)}", flush=True)
         time.sleep(0.03)
     for games in games_by_team.values():
         for game in games:
-            game.update(stats_cache.get(game["賽事編號"], {}).get(game["隊伍"], {}))
+            cached = game_cache.get(game["賽事編號"], {})
+            game.update(cached.get("team_stats", {}).get(game["隊伍"], {}))
+            venue = _display_venue_name(
+                _to_text(cached.get("venue_name")),
+                cached.get("venue_id"),
+            )
+            if venue:
+                game["球場"] = venue
 
 
 def _avg_row(label: str, games: list[dict[str, Any]]) -> list[Any]:
@@ -404,7 +466,9 @@ def _ensure_worksheet(title: str):
         return spreadsheet.add_worksheet(title=title, rows=30, cols=40)
 
 
-def _font_color_request(sheet_id: int, row_0idx: int, col_0idx: int, hex_color: str) -> dict:
+def _font_color_request(
+    sheet_id: int, row_0idx: int, col_0idx: int, hex_color: str
+) -> dict:
     return {
         "repeatCell": {
             "range": {
@@ -424,7 +488,9 @@ def _font_color_request(sheet_id: int, row_0idx: int, col_0idx: int, hex_color: 
     }
 
 
-def _header_format_request(sheet_id: int, team: str, header_row: int, col_start: int) -> dict:
+def _header_format_request(
+    sheet_id: int, team: str, header_row: int, col_start: int
+) -> dict:
     fill, font = TEAM_COLORS.get(team, ("#3c4043", "#ffffff"))
     return {
         "repeatCell": {
@@ -514,12 +580,18 @@ def _game_font_color_requests(
             if _to_float(game.get("安打")) >= 10:
                 hits_color = HITS_10_PLUS_FONT
         requests.append(_font_color_request(sheet_id, row_0idx, runs_col, runs_color))
-        requests.append(_font_color_request(sheet_id, row_0idx, allowed_col, allowed_color))
+        requests.append(
+            _font_color_request(sheet_id, row_0idx, allowed_col, allowed_color)
+        )
         requests.append(_font_color_request(sheet_id, row_0idx, hits_col, hits_color))
     return requests
 
 
-def _update_sheet(sheet, matchups: list[tuple[str, str]], games_by_team: dict[str, list[dict[str, Any]]]) -> None:
+def _update_sheet(
+    sheet,
+    matchups: list[tuple[str, str]],
+    games_by_team: dict[str, list[dict[str, Any]]],
+) -> None:
     value_updates = []
     format_requests = []
     for col_idx, (away, home) in enumerate(matchups[:3]):
@@ -535,9 +607,15 @@ def _update_sheet(sheet, matchups: list[tuple[str, str]], games_by_team: dict[st
                 "values": _build_block_values(away, away_games),
             }
         )
-        format_requests.append(_header_format_request(sheet.id, away, TOP_HEADER_ROW, col_start))
-        format_requests.extend(_pitcher_font_requests(sheet.id, away_games, TOP_GAME_START, col_start))
-        format_requests.extend(_game_font_color_requests(sheet.id, away_games, TOP_GAME_START, col_start))
+        format_requests.append(
+            _header_format_request(sheet.id, away, TOP_HEADER_ROW, col_start)
+        )
+        format_requests.extend(
+            _pitcher_font_requests(sheet.id, away_games, TOP_GAME_START, col_start)
+        )
+        format_requests.extend(
+            _game_font_color_requests(sheet.id, away_games, TOP_GAME_START, col_start)
+        )
 
         home_games = games_by_team.get(home, [])
         value_updates.append(
@@ -546,9 +624,17 @@ def _update_sheet(sheet, matchups: list[tuple[str, str]], games_by_team: dict[st
                 "values": _build_block_values(home, home_games),
             }
         )
-        format_requests.append(_header_format_request(sheet.id, home, BOTTOM_HEADER_ROW, col_start))
-        format_requests.extend(_pitcher_font_requests(sheet.id, home_games, BOTTOM_GAME_START, col_start))
-        format_requests.extend(_game_font_color_requests(sheet.id, home_games, BOTTOM_GAME_START, col_start))
+        format_requests.append(
+            _header_format_request(sheet.id, home, BOTTOM_HEADER_ROW, col_start)
+        )
+        format_requests.extend(
+            _pitcher_font_requests(sheet.id, home_games, BOTTOM_GAME_START, col_start)
+        )
+        format_requests.extend(
+            _game_font_color_requests(
+                sheet.id, home_games, BOTTOM_GAME_START, col_start
+            )
+        )
 
     _with_retries(
         f"clear {sheet.title}",
@@ -589,7 +675,9 @@ def update_mlb_last10() -> None:
             continue
         sheet = _ensure_worksheet(f"{SHEET_PREFIX}{page_index + 1}")
         _update_sheet(sheet, page_pairs, games_by_team)
-        print(f"[{sheet.title}] updated {len(page_pairs)} matchup block(s).", flush=True)
+        print(
+            f"[{sheet.title}] updated {len(page_pairs)} matchup block(s).", flush=True
+        )
 
 
 def main() -> None:
