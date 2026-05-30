@@ -1,7 +1,7 @@
 """Backfill MLB regular-season games into the 紀錄 worksheet.
 
-The target worksheet stores raw box-score fields in A:AN and formula-driven
-fields in AO:BC. This script writes only A:AN, then copies formulas from the
+The target worksheet stores raw box-score fields in A:AO and formula-driven
+fields in AP:BD. This script writes only A:AO, then copies formulas from the
 last existing dated row down across the inserted range.
 """
 
@@ -29,6 +29,10 @@ WORKSHEET_NAME = "紀錄"
 MLB_API = "https://statsapi.mlb.com/api"
 REQUEST_TIMEOUT = (10, 60)
 CACHE_DIR = Path("/private/tmp")
+RAW_COLUMN_COUNT = 41
+RAW_END_COLUMN = "AO"
+FORMULA_START_COL_0IDX = 41
+FORMULA_END_COL_0IDX = 56
 
 
 def _get_json(session: requests.Session, url: str, **params: Any) -> dict[str, Any]:
@@ -140,6 +144,7 @@ def _row_from_game(
     home_line = linescore["teams"]["home"]
 
     official_date = datetime.strptime(game["officialDate"], "%Y-%m-%d").date()
+    venue = game_data.get("venue", {})
     row: list[Any] = [
         f"{official_date.year}/{official_date.month}/{official_date.day}",
         game_pk,
@@ -157,7 +162,8 @@ def _row_from_game(
         home_line.get("errors", ""),
         home_starter.get("person", {}).get("fullName", ""),
         _pitch_hand(game_data, home_starter_id),
-        game_data.get("venue", {}).get("name", game.get("venue", {}).get("name", "")),
+        venue.get("name", game.get("venue", {}).get("name", "")),
+        venue.get("id", game.get("venue", {}).get("id", "")),
         away_pitching.get("inningsPitched", ""),
         home_pitching.get("inningsPitched", ""),
         _home_plate_umpire(boxscore),
@@ -166,8 +172,10 @@ def _row_from_game(
         away_pitching.get("earnedRuns", ""),
         home_pitching.get("earnedRuns", ""),
     ]
-    if len(row) != 40:
-        raise RuntimeError(f"Expected 40 raw columns for game {game_pk}, got {len(row)}")
+    if len(row) != RAW_COLUMN_COUNT:
+        raise RuntimeError(
+            f"Expected {RAW_COLUMN_COUNT} raw columns for game {game_pk}, got {len(row)}"
+        )
     return row
 
 
@@ -257,7 +265,9 @@ def update_record_sheet(start_date: str, end_date: str, dry_run: bool = False) -
 
     start_row = last_row + 1
     end_row = start_row + len(games) - 1
-    if _protected_range_blocks_edit(worksheet, start_row - 1, end_row, 0, 55):
+    if _protected_range_blocks_edit(
+        worksheet, start_row - 1, end_row, 0, FORMULA_END_COL_0IDX
+    ):
         raise RuntimeError(
             f"{WORKSHEET_NAME} has a protected range covering rows "
             f"{start_row}:{end_row}. Grant edit access to the service account or "
@@ -267,9 +277,17 @@ def update_record_sheet(start_date: str, end_date: str, dry_run: bool = False) -
     cache_path = _cache_path(start_date, end_date, len(games))
     if cache_path.exists():
         rows = json.loads(cache_path.read_text())
-        print(f"Loaded {len(rows)} cached row(s) from {cache_path}", flush=True)
+        if any(len(row) != RAW_COLUMN_COUNT for row in rows):
+            print(
+                f"Ignoring stale cache with old raw column count: {cache_path}",
+                flush=True,
+            )
+            rows = []
+        else:
+            print(f"Loaded {len(rows)} cached row(s) from {cache_path}", flush=True)
     else:
         rows: list[list[Any]] = []
+    if not rows:
         for index, game in enumerate(games, start=1):
             rows.append(_row_from_game(session, game))
             if index % 100 == 0 or index == len(games):
@@ -295,15 +313,15 @@ def update_record_sheet(start_date: str, end_date: str, dry_run: bool = False) -
                                 "sheetId": worksheet.id,
                                 "startRowIndex": last_row - 1,
                                 "endRowIndex": last_row,
-                                "startColumnIndex": 40,
-                                "endColumnIndex": 55,
+                                "startColumnIndex": FORMULA_START_COL_0IDX,
+                                "endColumnIndex": FORMULA_END_COL_0IDX,
                             },
                             "destination": {
                                 "sheetId": worksheet.id,
                                 "startRowIndex": start_row - 1,
                                 "endRowIndex": end_row,
-                                "startColumnIndex": 40,
-                                "endColumnIndex": 55,
+                                "startColumnIndex": FORMULA_START_COL_0IDX,
+                                "endColumnIndex": FORMULA_END_COL_0IDX,
                             },
                             "pasteType": "PASTE_FORMULA",
                         }
@@ -320,7 +338,7 @@ def update_record_sheet(start_date: str, end_date: str, dry_run: bool = False) -
         _with_retries(
             f"write rows {chunk_start}:{chunk_end}",
             lambda: worksheet.update(
-                range_name=f"A{chunk_start}:AN{chunk_end}",
+                range_name=f"A{chunk_start}:{RAW_END_COLUMN}{chunk_end}",
                 values=chunk,
                 value_input_option="USER_ENTERED",
             ),

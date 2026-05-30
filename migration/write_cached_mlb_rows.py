@@ -19,6 +19,7 @@ from cpbl import _sheets_client
 
 SPREADSHEET_KEY = "11FV70TXVAxLTwYH6pLj7HwK1qq-fIa61QrePRCC8YUM"
 WORKSHEET_NAME = "紀錄"
+RAW_END_COLUMN = "AO"
 
 
 def _with_retries(label: str, fn: Any) -> Any:
@@ -59,7 +60,7 @@ def main() -> None:
         _with_retries(
             f"write rows {chunk_start}:{chunk_end}",
             lambda chunk_start=chunk_start, chunk_end=chunk_end, chunk=chunk: worksheet.update(
-                range_name=f"A{chunk_start}:AN{chunk_end}",
+                range_name=f"A{chunk_start}:{RAW_END_COLUMN}{chunk_end}",
                 values=chunk,
                 value_input_option="USER_ENTERED",
             ),

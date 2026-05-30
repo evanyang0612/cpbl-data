@@ -88,8 +88,8 @@ Scrapes MLB Stats API finalized regular-season games and appends missing rows to
 
 1. Fetches recent regular-season games from MLB Stats API
 2. Uses `gamePk` in column B to skip games already recorded
-3. Fetches per-game feed data for starters, pitcher hand, line score, venue, umpire, league/division, starter innings, and earned runs
-4. Writes raw columns `A:AN` and copies formula columns `AO:BC` from the prior row
+3. Fetches per-game feed data for starters, pitcher hand, line score, venue, venue ID, umpire, league/division, starter innings, and earned runs
+4. Writes raw columns `A:AO` and copies formula columns `AP:BD` from the prior row
 5. Refreshes `MLB近十場1` through `MLB近十場5`, with three matchup blocks per sheet
 
 ### Scheduler
@@ -105,11 +105,11 @@ uv run python migration/update_mlb_last10.py
 
 ## GitHub Secrets
 
-| Secret               | Used by   | Description                             |
-| -------------------- | --------- | --------------------------------------- |
+| Secret               | Used by        | Description                             |
+| -------------------- | -------------- | --------------------------------------- |
 | `GOOGLE_CREDENTIALS` | CPBL, NPB, MLB | Google service account JSON (full body) |
-| `SPREADSHEET_KEY`    | CPBL      | Google Sheets spreadsheet ID for CPBL   |
-| `NORDVPN_TOKEN`      | CPBL      | NordVPN token for WireGuard tunnel      |
+| `SPREADSHEET_KEY`    | CPBL           | Google Sheets spreadsheet ID for CPBL   |
+| `NORDVPN_TOKEN`      | CPBL           | NordVPN token for WireGuard tunnel      |
 | `TELEGRAM_BOT_TOKEN` | CPBL, NPB, MLB | Telegram bot token for failure alerts   |
 | `TELEGRAM_CHAT_ID`   | CPBL, NPB, MLB | Telegram chat ID for failure alerts     |
 
