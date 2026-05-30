@@ -131,13 +131,33 @@ class TestOfficialNextMatchups:
 
         assert central == [
             ("ソフトバンク", "巨人"),
-            ("西武", "ヤクルト"),
-            ("オリックス", "DeNA"),
-        ]
-        assert pacific == [
             ("楽天", "中日"),
             ("日本ハム", "阪神"),
+        ]
+        assert pacific == [
+            ("西武", "ヤクルト"),
             ("ロッテ", "広島"),
+            ("オリックス", "DeNA"),
+        ]
+
+    def test_sorts_matchups_by_home_team_rank(self):
+        html = """
+        <table>
+          <tr><th>5/31（日）</th></tr>
+          <tr><td><div class="team1">横浜DeNA</div><div class="team2">巨人</div></td></tr>
+          <tr><td><div class="team1">中日</div><div class="team2">広島</div></td></tr>
+          <tr><td><div class="team1">阪神</div><div class="team2">ヤクルト</div></td></tr>
+        </table>
+        """
+        with patch("npb._fetch_once", new=AsyncMock(return_value=html)):
+            matchups = self._run(
+                _official_next_matchups("央盟", AsyncMock(), date(2026, 5, 30))
+            )
+
+        assert matchups == [
+            ("広島", "中日"),
+            ("ヤクルト", "阪神"),
+            ("巨人", "DeNA"),
         ]
 
 
