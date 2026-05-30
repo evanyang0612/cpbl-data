@@ -134,6 +134,22 @@ NPB_TEAMS = {
     },
 }
 
+HOME_TEAM_MATCHUP_ORDER = [
+    "巨人",
+    "中日",
+    "阪神",
+    "ヤクルト",
+    "広島",
+    "DeNA",
+    "ロッテ",
+    "西武",
+    "ソフトバンク",
+    "オリックス",
+    "日本ハム",
+    "楽天",
+]
+HOME_TEAM_MATCHUP_RANK = {team: idx for idx, team in enumerate(HOME_TEAM_MATCHUP_ORDER)}
+
 SAILU_SPREADSHEET_KEY = "1X2oaXk6DJLkx1MPVjc0lgLNtqa88X5qdNdKuKyikrbg"
 SAILU_TARGET_SPREADSHEET_KEY = "1XBATQ-ZQVE7saISTw_EYEXg3qFFAn5aeLDPdGI1_8Rg"
 SAILU_SHEET_NAME = "賽錄"
@@ -322,6 +338,19 @@ def is_exhibition_game_id(game_id: str) -> bool:
 def display_team_name(team_name: str) -> str:
     """Match existing sheet naming conventions."""
     return "横浜" if team_name == "DeNA" else team_name
+
+
+def _sort_matchups_by_home_team(
+    matchups: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    return sorted(
+        matchups,
+        key=lambda matchup: (
+            HOME_TEAM_MATCHUP_RANK.get(matchup[1], len(HOME_TEAM_MATCHUP_RANK)),
+            matchup[1],
+            matchup[0],
+        ),
+    )
 
 
 # --- NPB prediction ledger ---
@@ -1127,12 +1156,14 @@ async def _official_next_matchups(
             elif away_in or home_in:
                 cross_league.append((away_key, home_key))
 
-        matchups = same_league[:]
+        matchups = _sort_matchups_by_home_team(same_league)
 
         if not same_league and len(cross_league) > 3:
             league_idx = list(LEAGUE_SHEETS).index(league)
             start_idx = league_idx * 3
-            matchups = cross_league[start_idx : start_idx + 3]
+            matchups = _sort_matchups_by_home_team(cross_league)[
+                start_idx : start_idx + 3
+            ]
             if matchups:
                 print(
                     f"[{league}] Official next game day: {date_key}, games: {matchups}"
@@ -1143,9 +1174,10 @@ async def _official_next_matchups(
         # where this sheet's league is the away side, so the two league sheets
         # split a six-game day into three actual matchups each when schedules are
         # balanced by home/away league.
-        preferred_cross = [
-            game for game in cross_league if game[0] in league_teams
-        ] + [game for game in cross_league if game[0] not in league_teams]
+        preferred_cross = _sort_matchups_by_home_team(
+            [game for game in cross_league if game[0] in league_teams]
+            + [game for game in cross_league if game[0] not in league_teams]
+        )
         for game in preferred_cross:
             if len(matchups) >= 3:
                 break
@@ -1160,6 +1192,7 @@ async def _official_next_matchups(
             matchups.append((unmatched[i], unmatched[i + 1]))
 
         if matchups:
+            matchups = _sort_matchups_by_home_team(matchups)
             print(f"[{league}] Official next game day: {date_key}, games: {matchups}")
             return matchups[:3]
 
@@ -1315,7 +1348,7 @@ async def get_next_matchups(
             # Inter-league game — keep the actual opponent and home/away order.
             cross_games.append((t0, t1))
 
-    matchups = list(seen.values())
+    matchups = _sort_matchups_by_home_team(list(seen.values()))
     matched = {t for pair in matchups for t in pair}
     matched.update(t for pair in cross_games for t in pair if t in league_teams)
 
@@ -1355,11 +1388,12 @@ async def get_next_matchups(
     if not matchups and len(cross_games) > 3:
         league_idx = list(LEAGUE_SHEETS).index(league)
         start_idx = league_idx * 3
-        matchups = cross_games[start_idx : start_idx + 3]
+        matchups = _sort_matchups_by_home_team(cross_games)[start_idx : start_idx + 3]
 
-    preferred_cross = [game for game in cross_games if game[0] in league_teams] + [
-        game for game in cross_games if game[0] not in league_teams
-    ]
+    preferred_cross = _sort_matchups_by_home_team(
+        [game for game in cross_games if game[0] in league_teams]
+        + [game for game in cross_games if game[0] not in league_teams]
+    )
     for game in preferred_cross:
         if len(matchups) >= 3:
             break
@@ -1374,7 +1408,7 @@ async def get_next_matchups(
             break
         matchups.append((unmatched[i], unmatched[i + 1]))
 
-    return matchups[:3]
+    return _sort_matchups_by_home_team(matchups)[:3]
 
 
 # --- 賽錄 scraping & update ---
