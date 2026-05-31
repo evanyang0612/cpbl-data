@@ -160,6 +160,40 @@ class TestOfficialNextMatchups:
             ("巨人", "DeNA"),
         ]
 
+    def test_skips_reserve_days_for_next_official_matchups(self):
+        html = """
+        <table>
+          <tr><th>6/1（月）</th></tr>
+          <tr><td><div class="team1">楽天</div><span>(予備日)</span><div class="team2">ヤクルト</div></td></tr>
+          <tr><td><div class="team1">ロッテ</div><span>(予備日)</span><div class="team2">阪神</div></td></tr>
+          <tr><th>6/2（火）</th></tr>
+          <tr><td><div class="team1">巨人</div><div class="team2">オリックス</div></td></tr>
+          <tr><td><div class="team1">ヤクルト</div><div class="team2">ロッテ</div></td></tr>
+          <tr><td><div class="team1">横浜DeNA</div><div class="team2">楽天</div></td></tr>
+          <tr><td><div class="team1">中日</div><div class="team2">ソフトバンク</div></td></tr>
+          <tr><td><div class="team1">阪神</div><div class="team2">西武</div></td></tr>
+          <tr><td><div class="team1">広島</div><div class="team2">日本ハム</div></td></tr>
+        </table>
+        """
+        with patch("npb._fetch_once", new=AsyncMock(return_value=html)):
+            central = self._run(
+                _official_next_matchups("央盟", AsyncMock(), date(2026, 6, 1))
+            )
+            pacific = self._run(
+                _official_next_matchups("洋盟", AsyncMock(), date(2026, 6, 1))
+            )
+
+        assert central == [
+            ("オリックス", "巨人"),
+            ("ソフトバンク", "中日"),
+            ("西武", "阪神"),
+        ]
+        assert pacific == [
+            ("ロッテ", "ヤクルト"),
+            ("日本ハム", "広島"),
+            ("楽天", "DeNA"),
+        ]
+
 
 class TestNpbRecentGamesService:
     def test_fetches_recent_games_for_cross_league_matchup_teams(self):
