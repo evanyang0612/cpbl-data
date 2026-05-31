@@ -1119,6 +1119,8 @@ async def _official_next_matchups(
                 team2 = tr.find("div", class_="team2")
                 if not current_date or not team1 or not team2:
                     continue
+                if "予備日" in tr.get_text(" ", strip=True):
+                    continue
 
                 m = re.match(r"(\d{1,2})/(\d{1,2})", current_date)
                 if not m:
