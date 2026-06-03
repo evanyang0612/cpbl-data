@@ -11,6 +11,7 @@ import argparse
 import json
 import sys
 import time
+import tempfile
 from datetime import date, datetime
 from datetime import timedelta
 from pathlib import Path
@@ -28,7 +29,7 @@ SPREADSHEET_KEY = "11FV70TXVAxLTwYH6pLj7HwK1qq-fIa61QrePRCC8YUM"
 WORKSHEET_NAME = "紀錄"
 MLB_API = "https://statsapi.mlb.com/api"
 REQUEST_TIMEOUT = (10, 60)
-CACHE_DIR = Path("/private/tmp")
+CACHE_DIR = Path(tempfile.gettempdir())
 RAW_COLUMN_COUNT = 41
 RAW_END_COLUMN = "AO"
 FORMULA_START_COL_0IDX = 41
@@ -245,10 +246,13 @@ def _cache_path(start_date: str, end_date: str, count: int) -> Path:
 def update_record_sheet(start_date: str, end_date: str, dry_run: bool = False) -> int:
     session = requests.Session()
     worksheet = _sheets_client.worksheet(SPREADSHEET_KEY, WORKSHEET_NAME)
-    date_values = _with_retries("read date column", lambda: worksheet.col_values(1))
-    game_pk_values = _with_retries("read game id column", lambda: worksheet.col_values(2))
+    record_keys = _with_retries("read record keys", lambda: worksheet.get("A:B"))
+    date_values = [row[0] if row else "" for row in record_keys]
+    game_pk_values = [row[1] if len(row) > 1 else "" for row in record_keys]
     last_row = _last_dated_row(date_values)
-    existing_game_pks = {str(value).strip() for value in game_pk_values[1:] if str(value).strip()}
+    existing_game_pks = {
+        str(value).strip() for value in game_pk_values[1:] if str(value).strip()
+    }
 
     games = [
         game
@@ -293,6 +297,7 @@ def update_record_sheet(start_date: str, end_date: str, dry_run: bool = False) -
             if index % 100 == 0 or index == len(games):
                 print(f"Built {index}/{len(games)} rows", flush=True)
             time.sleep(0.05)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(rows, ensure_ascii=False))
         print(f"Cached {len(rows)} row(s) to {cache_path}", flush=True)
 

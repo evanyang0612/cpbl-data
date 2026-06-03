@@ -1306,6 +1306,7 @@ class NpbUpdateService:
             except Exception as e:
                 errors.append(f"update_analysis_sheet: {e}")
 
+            await asyncio.sleep(5)
             try:
                 NpbHuiziService(module=module).update(huizi_date)
             except Exception as e:
