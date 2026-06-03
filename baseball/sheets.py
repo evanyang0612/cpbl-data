@@ -30,7 +30,7 @@ class GoogleSheetsClient:
             creds = Credentials.from_service_account_file(
                 self.credentials_file, scopes=scope
             )
-        return gspread.authorize(creds)
+        return gspread.authorize(creds, http_client=gspread.BackOffHTTPClient)
 
     def spreadsheet(self, spreadsheet_key: str):
         return self.client.open_by_key(spreadsheet_key)
