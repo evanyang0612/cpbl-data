@@ -19,6 +19,7 @@ from baseball.npb_services import (
     NpbPredictionService,
     NpbRecentGamesService,
     NpbRowsService,
+    NpbStatusService,
 )
 from npb import (
     DEFAULT_FONT,
@@ -456,6 +457,13 @@ class FakePredictionSheet:
         self.rows.insert(index - 1, list(row))
         self.appended.append(list(row))
 
+    def update(self, range_name=None, values=None, value_input_option=None):
+        start = str(range_name or "A1").split(":")[0]
+        row_num = int("".join(ch for ch in start if ch.isdigit()) or "1")
+        while len(self.rows) < row_num:
+            self.rows.append([])
+        self.rows[row_num - 1] = list(values[0])
+
     def update_cell(self, row, col, value):
         while len(self.rows) < row:
             self.rows.append([])
@@ -484,6 +492,81 @@ class TestNpbRowsService:
         assert row[42] == NPB_TEAMS["巨人"]["id"]
         assert row[45] == "6"
         assert row[47] == 3
+
+
+class TestNpbStatusService:
+    def test_tracks_resolved_status_by_date(self):
+        sheet = FakePredictionSheet(
+            [
+                ["Date", "GameId", "Status", "Resolved", "UpdatedAt"],
+                ["2026-06-04", "game-1", "試合終了", "TRUE", "now"],
+                ["2026-06-04", "game-2", "試合終了", "FALSE", "now"],
+                ["2026-06-05", "game-3", "見どころ", "FALSE", "now"],
+            ]
+        )
+        service = NpbStatusService(
+            module=Namespace(
+                NPB_STATUS_HEADERS=[
+                    "Date",
+                    "GameId",
+                    "Status",
+                    "Resolved",
+                    "UpdatedAt",
+                ],
+                NPB_NO_GAMES_SENTINEL="__NO_GAMES__",
+            )
+        )
+
+        assert not service.all_games_resolved_for_date(sheet, "2026-06-04")
+        assert service.finished_unresolved_game_ids_for_date(sheet, "2026-06-04") == [
+            "game-2"
+        ]
+
+    def test_upsert_updates_existing_status_record(self):
+        sheet = FakePredictionSheet(
+            [
+                ["Date", "GameId", "Status", "Resolved", "UpdatedAt"],
+                ["2026-06-04", "game-1", "見どころ", "FALSE", "old"],
+            ]
+        )
+        service = NpbStatusService(
+            module=Namespace(
+                NPB_STATUS_HEADERS=[
+                    "Date",
+                    "GameId",
+                    "Status",
+                    "Resolved",
+                    "UpdatedAt",
+                ],
+                NPB_NO_GAMES_SENTINEL="__NO_GAMES__",
+            )
+        )
+
+        service.upsert(sheet, "2026-06-04", "game-1", "試合終了", True)
+
+        assert sheet.rows[1][0:4] == ["2026-06-04", "game-1", "試合終了", "TRUE"]
+
+    def test_no_games_sentinel_counts_as_resolved_day(self):
+        sheet = FakePredictionSheet(
+            [
+                ["Date", "GameId", "Status", "Resolved", "UpdatedAt"],
+                ["2026-06-04", "__NO_GAMES__", "無賽事", "TRUE", "now"],
+            ]
+        )
+        service = NpbStatusService(
+            module=Namespace(
+                NPB_STATUS_HEADERS=[
+                    "Date",
+                    "GameId",
+                    "Status",
+                    "Resolved",
+                    "UpdatedAt",
+                ],
+                NPB_NO_GAMES_SENTINEL="__NO_GAMES__",
+            )
+        )
+
+        assert service.all_games_resolved_for_date(sheet, "2026-06-04")
 
 
 class TestNpbAnalysisService:

@@ -3,7 +3,7 @@ import importlib
 import platform
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiohttp
 
@@ -19,6 +19,165 @@ class NpbModuleService:
         if self._module is None:
             self._module = importlib.import_module("npb")
         return self._module
+
+
+class NpbStatusService(NpbModuleService):
+    """Service for NPB status worksheet records."""
+
+    TERMINAL_NON_FINISHED = ("中止", "ノーゲーム", "延期")
+
+    def effective_date_str(self) -> str:
+        return (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
+
+    def records(self, status_sheet):
+        module = self.module
+        rows = status_sheet.get_all_values()
+        if not rows:
+            return []
+        records = []
+        for idx, row in enumerate(rows[1:], start=2):
+            padded = row + [""] * (len(module.NPB_STATUS_HEADERS) - len(row))
+            records.append(
+                {
+                    "row": idx,
+                    "date": padded[0],
+                    "game_id": padded[1],
+                    "status": padded[2],
+                    "resolved": str(padded[3]).upper() == "TRUE",
+                    "updated_at": padded[4],
+                }
+            )
+        return records
+
+    def records_for_date(self, status_sheet, date_str):
+        return [
+            record
+            for record in self.records(status_sheet)
+            if record["date"] == date_str
+        ]
+
+    def all_games_resolved_for_date(self, status_sheet, date_str):
+        date_records = self.records_for_date(status_sheet, date_str)
+        records = [
+            record
+            for record in date_records
+            if record["game_id"] != self.module.NPB_NO_GAMES_SENTINEL
+        ]
+        if not records:
+            return any(
+                record["game_id"] == self.module.NPB_NO_GAMES_SENTINEL
+                and record["resolved"]
+                for record in date_records
+            )
+        return bool(records) and all(record["resolved"] for record in records)
+
+    def finished_unresolved_game_ids_for_date(self, status_sheet, date_str):
+        module = self.module
+        return [
+            record["game_id"]
+            for record in self.records_for_date(status_sheet, date_str)
+            if not record["resolved"]
+            and record["game_id"] != module.NPB_NO_GAMES_SENTINEL
+            and record["status"] == "試合終了"
+        ]
+
+    def upsert(self, status_sheet, date_str, game_id, status, resolved):
+        module = self.module
+        updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        values = [
+            date_str,
+            str(game_id),
+            status or "",
+            "TRUE" if resolved else "FALSE",
+            updated_at,
+        ]
+        for record in self.records(status_sheet):
+            if record["date"] == date_str and record["game_id"] == str(game_id):
+                status_sheet.update(
+                    range_name=f"A{record['row']}:E{record['row']}",
+                    values=[values],
+                    value_input_option="USER_ENTERED",
+                )
+                return
+
+        status_sheet.append_row(values, value_input_option="USER_ENTERED")
+
+    def resolved_from_status(self, game_id: str, status: str, existing_ids: set[str]):
+        if game_id in existing_ids:
+            return True
+        return any(word in str(status or "") for word in self.TERMINAL_NON_FINISHED)
+
+    async def sync_team_schedule_statuses(
+        self, status_sheet, date_str: str, existing_ids: set[str], session
+    ):
+        module = self.module
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        month = dt.strftime("%Y-%m")
+
+        async def fetch_team_status(team_id):
+            html = await module._fetch(
+                session, f"{module.BASE_URL}teams/{team_id}/schedule?month={month}"
+            )
+            if not html:
+                return None
+            soup = module.bs(html, "html.parser")
+            statuses = []
+            for entry in soup.find_all(class_="bb-calendarTable__data"):
+                date_el = entry.find(class_="bb-calendarTable__date")
+                if date_el is None:
+                    continue
+                try:
+                    if int(date_el.text) != dt.day:
+                        continue
+                except ValueError:
+                    continue
+                status_el = entry.find(class_="bb-calendarTable__status")
+                if status_el is None:
+                    continue
+                status_text = status_el.get_text(" ", strip=True)
+                match = re.search(r"npb/game/([^/]+)", status_el.get("href", ""))
+                if match:
+                    statuses.append((match.group(1), status_text))
+            return statuses
+
+        results = await asyncio.gather(
+            *[fetch_team_status(info["id"]) for info in module.NPB_TEAMS.values()],
+            return_exceptions=True,
+        )
+
+        found: dict[str, str] = {}
+        fetched_count = 0
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"  [npb-status] schedule status scan: {result}")
+                continue
+            if result is None:
+                continue
+            fetched_count += 1
+            for game_id, status in result:
+                if game_id not in found or status == "試合終了":
+                    found[game_id] = status
+
+        if not found:
+            if fetched_count == len(module.NPB_TEAMS):
+                self.upsert(
+                    status_sheet,
+                    date_str,
+                    module.NPB_NO_GAMES_SENTINEL,
+                    "無賽事",
+                    True,
+                )
+            return found
+
+        for game_id, status in sorted(found.items()):
+            self.upsert(
+                status_sheet,
+                date_str,
+                game_id,
+                status,
+                self.resolved_from_status(game_id, status, existing_ids),
+            )
+        return found
 
 
 class _NpbPredictionLogic(NpbModuleService):
@@ -1339,7 +1498,9 @@ class NpbUpdateService:
 
             huizi_date = None
             try:
-                analysis_game_ids = new_sailu_ids or module._sailu_game_ids_for_date()
+                analysis_game_ids = new_sailu_ids or module._sailu_game_ids_for_date(
+                    sailu_service.status_date
+                )
                 await NpbAnalysisService(module=module).update(
                     session,
                     game_ids=analysis_game_ids,
@@ -1471,6 +1632,7 @@ class NpbSailuService:
     def __init__(self, module=None):
         self._module = module
         self.written_regular_game_data: list[tuple[str, dict]] = []
+        self.status_date: str | None = None
 
     @property
     def module(self):
@@ -1494,6 +1656,14 @@ class NpbSailuService:
         )
 
         existing_ids = set(v for v in sheet.col_values(2)[1:] if v)
+        status_service = NpbStatusService(module=module)
+        status_sheet = module.get_npb_status_worksheet()
+        status_date = status_service.effective_date_str()
+        self.status_date = status_date
+        if status_service.all_games_resolved_for_date(status_sheet, status_date):
+            print(f"[sailu] {status_date} already resolved. Skipping 賽錄 scrape.")
+            return []
+
         target_existing_ids = set(v for v in target_sheet.col_values(2)[1:] if v)
         existing_exhibition = rows_service.existing_exhibition_identities(
             exhibition_sheet
@@ -1507,19 +1677,20 @@ class NpbSailuService:
             "target placeholder row(s) available."
         )
 
-        all_ids: set[str] = set()
-        tasks = {
-            key: module.get_last_n_game_ids(info["id"], 3, session)
-            for key, info in module.NPB_TEAMS.items()
-        }
-        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        for key, result in zip(tasks.keys(), results):
-            if isinstance(result, Exception):
-                print(f"  [sailu] get_last_n_game_ids({key}): {result}")
-            else:
-                all_ids.update(result)
+        await status_service.sync_team_schedule_statuses(
+            status_sheet, status_date, existing_ids, session
+        )
+        if status_service.all_games_resolved_for_date(status_sheet, status_date):
+            print(f"[sailu] {status_date} already resolved after status sync.")
+            return []
 
-        new_ids = sorted(gid for gid in all_ids if gid not in existing_ids)
+        new_ids = sorted(
+            gid
+            for gid in status_service.finished_unresolved_game_ids_for_date(
+                status_sheet, status_date
+            )
+            if gid not in existing_ids
+        )
         if not new_ids:
             print("[sailu] No new games to add.")
             return []
@@ -1624,6 +1795,15 @@ class NpbSailuService:
         self.written_regular_game_data = [
             (gid, data) for gid, data in regular_games if gid in written_ids
         ]
+        for gid, data in regular_games:
+            if gid in source_written_ids or gid in existing_ids:
+                status_service.upsert(
+                    status_sheet,
+                    data["日期"],
+                    gid,
+                    "試合終了",
+                    True,
+                )
         return written_ids
 
 

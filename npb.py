@@ -156,6 +156,9 @@ SAILU_SHEET_NAME = "賽錄"
 EXHIBITION_SHEET_NAME = "熱身賽紀錄"
 ANALYSIS_SHEET_NAME = "分析表紀錄"
 HUIZI_SHEET_NAME = "彙資"
+NPB_STATUS_SHEET_NAME = "NPB狀態"
+NPB_STATUS_HEADERS = ["Date", "GameId", "Status", "Resolved", "UpdatedAt"]
+NPB_NO_GAMES_SENTINEL = "__NO_GAMES__"
 PREDICTION_SHEET_NAME = "預測紀錄"
 PREDICTION_SPREADSHEET_KEY = "1-L5RvjhN3OFiXfrDUVxBa8W0EqYIaLQtxizSi-yP8b0"
 ANALYSIS_SEASON = 2026
@@ -330,6 +333,25 @@ def get_worksheet(sheet_name: str, spreadsheet_key: str = NPB_SPREADSHEET_KEY):
     return _sheets_client.worksheet(spreadsheet_key, sheet_name)
 
 
+def get_npb_status_worksheet():
+    spreadsheet = _sheets_client.spreadsheet(NPB_SPREADSHEET_KEY)
+    try:
+        sheet = spreadsheet.worksheet(NPB_STATUS_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        sheet = spreadsheet.add_worksheet(
+            title=NPB_STATUS_SHEET_NAME, rows=1000, cols=len(NPB_STATUS_HEADERS)
+        )
+        sheet.update("A1", [NPB_STATUS_HEADERS], value_input_option="USER_ENTERED")
+        return sheet
+
+    values = sheet.get_all_values()
+    if not values:
+        sheet.update("A1", [NPB_STATUS_HEADERS], value_input_option="USER_ENTERED")
+    elif values[0][: len(NPB_STATUS_HEADERS)] != NPB_STATUS_HEADERS:
+        sheet.update("A1", [NPB_STATUS_HEADERS], value_input_option="USER_ENTERED")
+    return sheet
+
+
 def is_exhibition_game_id(game_id: str) -> bool:
     """Warm-up / exhibition games currently use the 202104... game-id prefix."""
     return str(game_id).startswith("202104")
@@ -402,9 +424,7 @@ def build_prediction_text(
 def calculate_prediction_balance(
     balance_before: float, stake: float, rate: float, outcome: str
 ) -> float:
-    return _NpbPredictionLogic.calculate_balance(
-        balance_before, stake, rate, outcome
-    )
+    return _NpbPredictionLogic.calculate_balance(balance_before, stake, rate, outcome)
 
 
 def _prediction_float(value, default: float = 0.0) -> float:
@@ -449,9 +469,7 @@ def _prediction_innings_total(values: list, innings: int = 5) -> int:
     )
 
 
-def _prediction_winner_outcome(
-    data: dict, pick: str, *, half: bool = False
-) -> str:
+def _prediction_winner_outcome(data: dict, pick: str, *, half: bool = False) -> str:
     return _NpbPredictionLogic(module=sys.modules[__name__]).winner_outcome(
         data, pick, half=half
     )
@@ -576,7 +594,14 @@ def _prompt_float(label: str, *, default: float | None = None) -> float:
 
 
 def _prompt_market(default: str = "final_winner") -> str:
-    options = ["final_winner", "half_winner", "final_total", "half_total", "final_handicap", "half_handicap"]
+    options = [
+        "final_winner",
+        "half_winner",
+        "final_total",
+        "half_total",
+        "final_handicap",
+        "half_handicap",
+    ]
     print("Market options:")
     for idx, market in enumerate(options, start=1):
         print(f"  {idx}. {market}")
@@ -635,7 +660,10 @@ def _prediction_parse_game_context(
     html: str,
 ) -> dict:
     soup = bs(html, "html.parser")
-    teams = [el.get_text(" ", strip=True) for el in soup.find_all(class_="bb-gameScoreTable__team")]
+    teams = [
+        el.get_text(" ", strip=True)
+        for el in soup.find_all(class_="bb-gameScoreTable__team")
+    ]
     away_team = _prediction_normalize_team(teams[0]) if len(teams) >= 1 else ""
     home_team = _prediction_normalize_team(teams[1]) if len(teams) >= 2 else ""
 
@@ -687,7 +715,8 @@ async def resolve_prediction_game_by_home_team(
 
     for time_key in sorted(time_keys):
         html = await _fetch(
-            session, f"{BASE_URL}teams/{NPB_TEAMS[home_key]['id']}/schedule?month={time_key}"
+            session,
+            f"{BASE_URL}teams/{NPB_TEAMS[home_key]['id']}/schedule?month={time_key}",
         )
         if not html:
             continue
@@ -757,7 +786,9 @@ def _prediction_cli_values(args) -> dict:
         if interactive
         else validate_prediction_home_team(args.create_prediction or "")
     )
-    market = _prompt_market(args.market or "final_winner") if interactive else args.market
+    market = (
+        _prompt_market(args.market or "final_winner") if interactive else args.market
+    )
     market = normalize_prediction_market(market or "final_winner")
     pick = (
         _prompt_pick(market, default=args.pick or "")
@@ -765,17 +796,16 @@ def _prediction_cli_values(args) -> dict:
         else (validate_prediction_pick(args.pick, market) if args.pick else "")
     )
     line = args.line
-    if market in {"half_total", "final_total", "final_handicap", "half_handicap"} and line is None:
+    if (
+        market in {"half_total", "final_total", "final_handicap", "half_handicap"}
+        and line is None
+    ):
         line = _prompt_float("Line")
     rate = args.rate if args.rate is not None else _prompt_float("Rate")
     stake = (
         _prompt_float("Stake", default=PREDICTION_DEFAULT_STAKE)
         if interactive and args.stake is None
-        else (
-            args.stake
-            if args.stake is not None
-            else PREDICTION_DEFAULT_STAKE
-        )
+        else (args.stake if args.stake is not None else PREDICTION_DEFAULT_STAKE)
     )
     game_date = args.game_date
     away_team = args.away_team
@@ -816,9 +846,7 @@ async def update_npb_prediction_reveals(
 ) -> int:
     return await NpbPredictionService(
         module=sys.modules[__name__]
-    ).reveal_predictions_for_games(
-        session, game_ids, post=post, dry_run=dry_run
-    )
+    ).reveal_predictions_for_games(session, game_ids, post=post, dry_run=dry_run)
 
 
 # --- Scraping ---
@@ -2614,7 +2642,14 @@ if __name__ == "__main__":
         "-m",
         "--market",
         default="final_winner",
-        choices=["half_winner", "final_winner", "half_total", "final_total", "final_handicap", "half_handicap"],
+        choices=[
+            "half_winner",
+            "final_winner",
+            "half_total",
+            "final_total",
+            "final_handicap",
+            "half_handicap",
+        ],
         help="Prediction market. Defaults to final_winner.",
     )
     parser.add_argument(
@@ -2636,9 +2671,15 @@ if __name__ == "__main__":
         default=None,
         help=f"Stake size for the prediction. Defaults to {PREDICTION_DEFAULT_STAKE}.",
     )
-    parser.add_argument("--game-date", default="", help="Optional prediction game date.")
-    parser.add_argument("--away-team", default="", help="Optional prediction away team.")
-    parser.add_argument("--home-team", default="", help="Optional prediction home team.")
+    parser.add_argument(
+        "--game-date", default="", help="Optional prediction game date."
+    )
+    parser.add_argument(
+        "--away-team", default="", help="Optional prediction away team."
+    )
+    parser.add_argument(
+        "--home-team", default="", help="Optional prediction home team."
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
