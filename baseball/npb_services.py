@@ -74,7 +74,9 @@ class _NpbPredictionLogic(NpbModuleService):
         )
 
     @staticmethod
-    def calculate_balance(balance_before: float, stake: float, rate: float, outcome: str):
+    def calculate_balance(
+        balance_before: float, stake: float, rate: float, outcome: str
+    ):
         outcome = str(outcome).lower()
         if outcome == "win":
             return round(float(balance_before) + float(stake) * float(rate), 4)
@@ -287,7 +289,9 @@ class _NpbPredictionLogic(NpbModuleService):
 
     def sheet(self):
         module = self.module
-        if not hasattr(module, "_sheets_client") and hasattr(module, "_prediction_sheet"):
+        if not hasattr(module, "_sheets_client") and hasattr(
+            module, "_prediction_sheet"
+        ):
             return module._prediction_sheet()
         spreadsheet = module._sheets_client.spreadsheet(
             module.PREDICTION_SPREADSHEET_KEY
@@ -324,13 +328,17 @@ class _NpbPredictionLogic(NpbModuleService):
             return module.PREDICTION_STARTING_BALANCE
         for row in reversed(rows[1:]):
             if len(row) > balance_idx and str(row[balance_idx]).strip():
-                return self.to_float(row[balance_idx], module.PREDICTION_STARTING_BALANCE)
+                return self.to_float(
+                    row[balance_idx], module.PREDICTION_STARTING_BALANCE
+                )
         return module.PREDICTION_STARTING_BALANCE
 
     def balance_before_formula(self, headers: list[str], row_num: int):
         if row_num <= 2:
             return self.module.PREDICTION_STARTING_BALANCE
-        balance_after_col = self.module.col_to_letter(headers.index("balance_after") + 1)
+        balance_after_col = self.module.col_to_letter(
+            headers.index("balance_after") + 1
+        )
         return f"={balance_after_col}{row_num - 1}"
 
     def balance_after_formula(self, headers: list[str], row_num: int) -> str:
@@ -661,41 +669,70 @@ class NpbRowsService(NpbModuleService):
         ]
 
     def sailu_row(self, seq: int, data: dict) -> list:
+        module = self.module
         ai = data["away_innings"]
         hi = data["home_innings"]
+        away_raw = data.get("客場隊伍") or data.get("客隊原名")
+        home_raw = data.get("主場隊伍") or data.get("主隊原名")
+        away_starter = data.get("客場先發") or data.get("客隊先發", "")
+        home_starter = data.get("主場先發") or data.get("主隊先發", "")
+        venue = data.get("球場原名") or data.get("球場", "")
+        away_hits = data.get("客安打", data.get("客總安打", 0))
+        away_errors = data.get("客失誤", data.get("客總失誤", 0))
+        home_score = data.get("主總", data.get("主總分", 0))
+        home_hits = data.get("主安打", data.get("主總安打", 0))
+        home_errors = data.get("主失誤", data.get("主總失誤", 0))
+        game_status = data.get("賽事狀態", "")
+        if "客場隊伍" not in data and game_status == "試合終了":
+            game_status = "正常"
+        away_code = data.get("客隊代號") or module.NPB_TEAMS[away_raw]["id"]
+        home_code = data.get("主隊代號") or module.NPB_TEAMS[home_raw]["id"]
+        away_ip = data.get("客投局")
+        if away_ip is None:
+            away_ip = data.get("客先發投球", [""])[0]
+        home_ip = data.get("主投局")
+        if home_ip is None:
+            home_ip = data.get("主先發投球", [""])[0]
+        away_er = data.get("客責失")
+        if away_er is None:
+            away_er = data.get("客先發投球", [0] * 13)[12]
+        home_er = data.get("主責失")
+        if home_er is None:
+            home_er = data.get("主先發投球", [0] * 13)[12]
+
         return [
             seq,
             data["賽事編號"],
-            data["客場隊伍"],
-            data["客場先發"],
-            data["主場隊伍"],
-            data["主場先發"],
+            away_raw,
+            away_starter,
+            home_raw,
+            home_starter,
             data["時間"],
-            data["球場"],
+            venue,
             data["主審"],
             *ai[:4],
             *ai[4:8],
             *ai[8:12],
             data["客總分"],
-            data["客安打"],
-            data["客失誤"],
+            away_hits,
+            away_errors,
             *hi[:4],
             *hi[4:8],
             *hi[8:12],
-            data["主總"],
-            data["主安打"],
-            data["主失誤"],
-            data["賽事狀態"],
+            home_score,
+            home_hits,
+            home_errors,
+            game_status,
             data["日期"],
-            data["客隊代號"],
-            data["主隊代號"],
+            away_code,
+            home_code,
             data["客投別"],
             data["主投別"],
-            data["客投局"],
-            data["主投局"],
-            data["客責失"],
+            away_ip,
+            home_ip,
+            away_er,
             data["客QS"],
-            data["主責失"],
+            home_er,
             data["主QS"],
         ]
 
@@ -711,18 +748,30 @@ class NpbRowsService(NpbModuleService):
             f"=SUM(J{row_num}:P{row_num})",
             f"=SUM(Y{row_num}:AE{row_num})",
             '=IF(客總分="","",IF(客總分=主總分,"平",IF(客總分>主總分,"勝","敗")))',
-            '=IF(BH{0}="","",IF(BH{0}="平","平",IF(BH{0}="勝","敗","勝")))'.format(row_num),
-            '=IF(BH{0}="勝",客總分-主總分,IF(BH{0}="敗",主總分-客總分,0))'.format(row_num),
-            '=IF(MOD(AT{0},1)=0,AT{0},IF(RIGHT(AT{0},1)="1",(AT{0}-0.1)+1/3,(AT{0}-0.2)+2/3))'.format(row_num),
-            '=IF(MOD(AU{0},1)=0,AU{0},IF(RIGHT(AU{0},1)="1",(AU{0}-0.1)+1/3,(AU{0}-0.2)+2/3))'.format(row_num),
+            '=IF(BH{0}="","",IF(BH{0}="平","平",IF(BH{0}="勝","敗","勝")))'.format(
+                row_num
+            ),
+            '=IF(BH{0}="勝",客總分-主總分,IF(BH{0}="敗",主總分-客總分,0))'.format(
+                row_num
+            ),
+            '=IF(MOD(AT{0},1)=0,AT{0},IF(RIGHT(AT{0},1)="1",(AT{0}-0.1)+1/3,(AT{0}-0.2)+2/3))'.format(
+                row_num
+            ),
+            '=IF(MOD(AU{0},1)=0,AU{0},IF(RIGHT(AU{0},1)="1",(AU{0}-0.1)+1/3,(AU{0}-0.2)+2/3))'.format(
+                row_num
+            ),
             '=IF(客總分="","",客總5+主總5)',
             '=IF(客總分="","",客總分+主總分)',
             f'=IF(J{row_num}="","",SUM(J{row_num}:R{row_num}))',
             f'=IF(J{row_num}="","",SUM(Y{row_num}:AG{row_num}))',
             f'=IF(S{row_num}="","",SUM(S{row_num}:U{row_num}))',
             f'=IF(AH{row_num}="","",SUM(AH{row_num}:AJ{row_num}))',
-            '=IF(AO{0}="","",IF(AND(客先局>=5,主總7<=3,主總6<=2,主總5<=1),1,IF(AND(客先局>=5,主總6<=2,主總5<=1),1,IF(AND(客先局>=5,主總5<=1),1,""))))'.format(row_num),
-            '=IF(AO{0}="","",IF(AND(主先局>=5,客總7<=3,客總6<=2,客總5<=1),1,IF(AND(主先局>=5,客總6<=2,客總5<=1),1,IF(AND(主先局>=5,客總5<=1),1,""))))'.format(row_num),
+            '=IF(AO{0}="","",IF(AND(客先局>=5,主總7<=3,主總6<=2,主總5<=1),1,IF(AND(客先局>=5,主總6<=2,主總5<=1),1,IF(AND(客先局>=5,主總5<=1),1,""))))'.format(
+                row_num
+            ),
+            '=IF(AO{0}="","",IF(AND(主先局>=5,客總7<=3,客總6<=2,客總5<=1),1,IF(AND(主先局>=5,客總6<=2,客總5<=1),1,IF(AND(主先局>=5,客總5<=1),1,""))))'.format(
+                row_num
+            ),
         ]
 
     @staticmethod
@@ -1091,9 +1140,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 },
                 "cell": {
                     "userEnteredFormat": {
-                        "textFormat": {
-                            "foregroundColor": self.hex_to_rgb(hex_color)
-                        }
+                        "textFormat": {"foregroundColor": self.hex_to_rgb(hex_color)}
                     }
                 },
                 "fields": "userEnteredFormat.textFormat.foregroundColor",
@@ -1283,9 +1330,10 @@ class NpbUpdateService:
                 session, matchup_start_date=matchup_start_date, errors=errors
             )
 
+            sailu_service = NpbSailuService(module=module)
             new_sailu_ids = []
             try:
-                new_sailu_ids = await NpbSailuService(module=module).update(session)
+                new_sailu_ids = await sailu_service.update(session)
             except Exception as e:
                 errors.append(f"update_sailu_sheet: {e}")
 
@@ -1293,7 +1341,9 @@ class NpbUpdateService:
             try:
                 analysis_game_ids = new_sailu_ids or module._sailu_game_ids_for_date()
                 await NpbAnalysisService(module=module).update(
-                    session, game_ids=analysis_game_ids
+                    session,
+                    game_ids=analysis_game_ids,
+                    scraped_games=sailu_service.written_regular_game_data,
                 )
                 sailu_dates = module._sailu_dates_for_game_ids(new_sailu_ids)
                 if not sailu_dates and analysis_game_ids:
@@ -1408,7 +1458,9 @@ class NpbRecentGamesService:
                 print(f"  {team_key}: {len(game_list)} games with data")
 
             try:
-                league_sheet_service.update_league_sheet(sheet_name, matchups, all_games)
+                league_sheet_service.update_league_sheet(
+                    sheet_name, matchups, all_games
+                )
             except Exception as e:
                 errors.append(f"update_league_sheet({sheet_name}): {e}")
 
@@ -1418,6 +1470,7 @@ class NpbSailuService:
 
     def __init__(self, module=None):
         self._module = module
+        self.written_regular_game_data: list[tuple[str, dict]] = []
 
     @property
     def module(self):
@@ -1428,8 +1481,11 @@ class NpbSailuService:
     async def update(self, session):
         module = self.module
         rows_service = NpbRowsService(module=module)
+        self.written_regular_game_data = []
         print("\n=== 賽錄 update ===")
-        sheet = module.get_worksheet(module.SAILU_SHEET_NAME, module.SAILU_SPREADSHEET_KEY)
+        sheet = module.get_worksheet(
+            module.SAILU_SHEET_NAME, module.SAILU_SPREADSHEET_KEY
+        )
         target_sheet = module.get_worksheet(
             module.SAILU_SHEET_NAME, module.SAILU_TARGET_SPREADSHEET_KEY
         )
@@ -1474,12 +1530,15 @@ class NpbSailuService:
         for i in range(0, len(new_ids), module.MAX_CONCURRENT):
             batch = new_ids[i : i + module.MAX_CONCURRENT]
             scraped = await asyncio.gather(
-                *[module.get_sailu_game_data(gid, session) for gid in batch],
+                *[
+                    module.get_schedule_game_data(gid, session, retry=False)
+                    for gid in batch
+                ],
                 return_exceptions=True,
             )
             for gid, data in zip(batch, scraped):
                 if isinstance(data, Exception):
-                    print(f"  [sailu] get_sailu_game_data({gid}): {data}")
+                    print(f"  [sailu] get_schedule_game_data({gid}): {data}")
                 elif data:
                     new_games.append((gid, data))
                 else:
@@ -1506,9 +1565,7 @@ class NpbSailuService:
             (gid, data) for gid, data in regular_games if gid not in existing_ids
         ]
         target_regular_games = [
-            (gid, data)
-            for gid, data in regular_games
-            if gid not in target_existing_ids
+            (gid, data) for gid, data in regular_games if gid not in target_existing_ids
         ]
 
         filled, overflow = rows_service.write_regular_sailu_games(
@@ -1563,7 +1620,11 @@ class NpbSailuService:
         )
         source_written_ids = [gid for gid, _ in source_regular_games[:filled]]
         target_written_ids = [gid for gid, _ in target_regular_games[:target_filled]]
-        return list(dict.fromkeys(source_written_ids + target_written_ids))
+        written_ids = list(dict.fromkeys(source_written_ids + target_written_ids))
+        self.written_regular_game_data = [
+            (gid, data) for gid, data in regular_games if gid in written_ids
+        ]
+        return written_ids
 
 
 class NpbAnalysisService:
@@ -1586,6 +1647,7 @@ class NpbAnalysisService:
         game_ids: list[str] | None = None,
         target_date=None,
         full_season: bool = False,
+        scraped_games: list[tuple[str, dict]] | None = None,
     ):
         module = self.module
         rows_service = NpbRowsService(module=module)
@@ -1648,30 +1710,54 @@ class NpbAnalysisService:
             return 0
 
         new_games: list[tuple[str, dict]] = []
-        for i in range(0, len(candidate_ids), module.MAX_CONCURRENT):
-            batch = candidate_ids[i : i + module.MAX_CONCURRENT]
-            scraped = await asyncio.gather(
-                *[
-                    module.get_schedule_game_data(gid, session, retry=full_season)
-                    for gid in batch
-                ],
-                return_exceptions=True,
+        scraped_by_id = {
+            gid: data
+            for gid, data in (scraped_games or [])
+            if gid in candidate_ids and data
+        }
+
+        def add_if_missing(gid: str, data: dict):
+            if target_date and data["日期"] != module._date_key(target_date):
+                return
+            ident = rows_service.analysis_identity(data)
+            if ident not in existing:
+                new_games.append((gid, data))
+                existing.add(ident)
+                print(f"  [analysis] missing ← {gid} {ident}")
+
+        for gid in candidate_ids:
+            data = scraped_by_id.get(gid)
+            if data:
+                add_if_missing(gid, data)
+
+        missing_candidate_ids = [
+            gid for gid in candidate_ids if gid not in scraped_by_id
+        ]
+        if scraped_by_id:
+            print(
+                f"[analysis] Reusing {len(scraped_by_id)} scraped game(s) "
+                "from 賽錄 update."
             )
-            for gid, data in zip(batch, scraped):
-                if isinstance(data, Exception):
-                    print(f"  [analysis] get_schedule_game_data({gid}): {data}")
-                elif data:
-                    if target_date and data["日期"] != module._date_key(target_date):
-                        continue
-                    ident = rows_service.analysis_identity(data)
-                    if ident not in existing:
-                        new_games.append((gid, data))
-                        existing.add(ident)
-                        print(f"  [analysis] missing ← {gid} {ident}")
-                else:
-                    print(f"  [analysis] No data for {gid}")
-            if i + module.MAX_CONCURRENT < len(candidate_ids):
-                await asyncio.sleep(2)
+
+        if missing_candidate_ids:
+            for i in range(0, len(missing_candidate_ids), module.MAX_CONCURRENT):
+                batch = missing_candidate_ids[i : i + module.MAX_CONCURRENT]
+                scraped = await asyncio.gather(
+                    *[
+                        module.get_schedule_game_data(gid, session, retry=full_season)
+                        for gid in batch
+                    ],
+                    return_exceptions=True,
+                )
+                for gid, data in zip(batch, scraped):
+                    if isinstance(data, Exception):
+                        print(f"  [analysis] get_schedule_game_data({gid}): {data}")
+                    elif data:
+                        add_if_missing(gid, data)
+                    else:
+                        print(f"  [analysis] No data for {gid}")
+                if i + module.MAX_CONCURRENT < len(missing_candidate_ids):
+                    await asyncio.sleep(2)
 
         if not new_games:
             print("[analysis] No new games to append.")
@@ -1716,9 +1802,7 @@ class NpbAnalysisService:
                 continue
             away_team = row[8] if len(row) > 8 else ""
             home_team = row[11] if len(row) > 11 else ""
-            game_type = rows_service.analysis_game_type_from_teams(
-                away_team, home_team
-            )
+            game_type = rows_service.analysis_game_type_from_teams(away_team, home_team)
             if not game_type:
                 print(
                     f"  [analysis] row {row_num}: "
@@ -1763,7 +1847,9 @@ class NpbHuiziService:
         analysis = module.get_worksheet(
             module.ANALYSIS_SHEET_NAME, module.NPB_SPREADSHEET_KEY
         )
-        huizi = module.get_worksheet(module.HUIZI_SHEET_NAME, module.NPB_SPREADSHEET_KEY)
+        huizi = module.get_worksheet(
+            module.HUIZI_SHEET_NAME, module.NPB_SPREADSHEET_KEY
+        )
         rows = analysis.get_all_values()
         today_rows = [
             row[:83] for row in rows[2:] if len(row) > 1 and row[1] == today_str
@@ -1823,9 +1909,7 @@ class NpbPredictionService:
             stake = module.PREDICTION_DEFAULT_STAKE
         sheet = sheet or (None if dry_run else logic.sheet())
         rows = (
-            logic.rows(sheet, ensure_header=not dry_run)
-            if sheet
-            else [logic.headers()]
+            logic.rows(sheet, ensure_header=not dry_run) if sheet else [logic.headers()]
         )
         headers = rows[0]
         row_num = len(rows) + 1
@@ -1843,9 +1927,7 @@ class NpbPredictionService:
             line=line,
         )
 
-        balance_after = logic.calculate_balance(
-            balance_before, stake, rate, "pending"
-        )
+        balance_after = logic.calculate_balance(balance_before, stake, rate, "pending")
         values = {
             "prediction_id": prediction_id,
             "game_id": game_id,
@@ -1932,9 +2014,7 @@ class NpbPredictionService:
             ):
                 if row[index["status"]] == "pending":
                     continue
-                balance_after = logic.to_float(
-                    row[index["balance_after"]], None
-                )
+                balance_after = logic.to_float(row[index["balance_after"]], None)
                 if balance_after is None:
                     rate = logic.to_float(row[index["rate"]])
                     stake = logic.to_float(
@@ -1954,12 +2034,8 @@ class NpbPredictionService:
             pick = row[index["pick"]]
             line = row[index["line"]] or None
             rate = logic.to_float(row[index["rate"]])
-            stake = logic.to_float(
-                row[index["stake"]], module.PREDICTION_DEFAULT_STAKE
-            )
-            outcome = logic.outcome_for_game(
-                data, pick, market=market, line=line
-            )
+            stake = logic.to_float(row[index["stake"]], module.PREDICTION_DEFAULT_STAKE)
+            outcome = logic.outcome_for_game(data, pick, market=market, line=line)
             balance_before = running_balance
             balance_after = logic.calculate_balance(
                 balance_before, stake, rate, outcome
@@ -2010,7 +2086,9 @@ class NpbPredictionService:
                 ids.append(gid)
         return ids
 
-    async def reveal_predictions_for_games(self, session, game_ids: list[str], **kwargs):
+    async def reveal_predictions_for_games(
+        self, session, game_ids: list[str], **kwargs
+    ):
         module = self.module
         post = kwargs.get("post", False)
         dry_run = kwargs.get("dry_run", False)

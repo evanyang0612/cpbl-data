@@ -14,9 +14,11 @@ import pytest
 from bs4 import BeautifulSoup as bs
 
 from baseball.npb_services import (
+    NpbAnalysisService,
     NpbLeagueSheetService,
     NpbPredictionService,
     NpbRecentGamesService,
+    NpbRowsService,
 )
 from npb import (
     DEFAULT_FONT,
@@ -80,9 +82,7 @@ PREDICTION_HEADERS = [
 
 class TestResolveMatchupStartDate:
     def test_default_is_tomorrow(self):
-        assert _resolve_matchup_start_date(today=date(2026, 5, 10)) == date(
-            2026, 5, 11
-        )
+        assert _resolve_matchup_start_date(today=date(2026, 5, 10)) == date(2026, 5, 11)
 
     def test_today_aliases_keep_today(self):
         assert _resolve_matchup_start_date("today", date(2026, 5, 10)) == date(
@@ -403,6 +403,42 @@ SAMPLE_GAMES = [
 ]
 
 
+def _make_schedule_game_data(game_id="game-1"):
+    return {
+        "賽事編號": game_id,
+        "日期": "2026-06-04",
+        "賽事狀態": "試合終了",
+        "客隊原名": "阪神",
+        "客隊": "阪 神",
+        "客隊先發": "才木",
+        "主隊原名": "巨人",
+        "主隊": "巨 人",
+        "主隊先發": "戸郷",
+        "球場原名": "東京ドーム",
+        "球場": "東 京",
+        "主審": "山本",
+        "時間": "18:00",
+        "away_innings": [0, 0, 1, 1, 0, 0, 0, 0, 0, "", "", ""],
+        "home_innings": [1, 1, 0, 0, 2, 0, 0, 0, "×", "", "", ""],
+        "客總分": 2,
+        "客總安打": 7,
+        "客總失誤": 1,
+        "主總分": 4,
+        "主總安打": 8,
+        "主總失誤": 0,
+        "客先發投球": ["6", 24, 91, 0, 5, 1, 2, 0, 6, 0, 0, 3, 3],
+        "客總投球": ["8", 33, 132, 0, 8, 1, 3, 0, 8, 0, 0, 4, 4],
+        "主先發投球": ["6", 23, 88, 0, 6, 0, 1, 0, 5, 0, 0, 2, 2],
+        "主總投球": ["9", 35, 121, 0, 7, 0, 2, 0, 7, 0, 0, 2, 2],
+        "客投別": "右",
+        "主投別": "右",
+        "客打擊": [35, 2, 7, 2, 1, 0, 0, 2, 6, 1, 1, 0, 0, 1, 0, 1],
+        "主打擊": [34, 4, 8, 4, 2, 0, 1, 3, 8, 2, 0, 0, 0, 0, 0, 0],
+        "客QS": 1,
+        "主QS": 1,
+    }
+
+
 class FakePredictionSheet:
     def __init__(self, rows=None):
         self.rows = [list(row) for row in (rows or [])]
@@ -416,7 +452,7 @@ class FakePredictionSheet:
         self.rows.append(list(row))
         self.appended.append(list(row))
 
-    def insert_row(self, row, index=1, value_input_option=None):
+    def insert_row(self, row, index=1, value_input_option=None, **kwargs):
         self.rows.insert(index - 1, list(row))
         self.appended.append(list(row))
 
@@ -427,6 +463,70 @@ class FakePredictionSheet:
             self.rows[row - 1].append("")
         self.rows[row - 1][col - 1] = value
         self.updated_cells.append((row, col, value))
+
+
+class TestNpbRowsService:
+    def test_sailu_row_accepts_schedule_game_data_shape(self):
+        row = NpbRowsService(module=Namespace(NPB_TEAMS=NPB_TEAMS)).sailu_row(
+            0, _make_schedule_game_data("game-1")
+        )
+
+        assert row[1] == "game-1"
+        assert row[2] == "阪神"
+        assert row[3] == "才木"
+        assert row[4] == "巨人"
+        assert row[5] == "戸郷"
+        assert row[7] == "東京ドーム"
+        assert row[22] == 7
+        assert row[36] == 4
+        assert row[39] == "正常"
+        assert row[41] == NPB_TEAMS["阪神"]["id"]
+        assert row[42] == NPB_TEAMS["巨人"]["id"]
+        assert row[45] == "6"
+        assert row[47] == 3
+
+
+class TestNpbAnalysisService:
+    def test_reuses_scraped_games_without_refetching(self):
+        sheet = FakePredictionSheet([["seq"], ["header"]])
+        fetched = []
+
+        class FakeModule:
+            ANALYSIS_SEASON = 2026
+            ANALYSIS_SHEET_NAME = "分析表紀錄"
+            NPB_SPREADSHEET_KEY = "spreadsheet"
+            NPB_TEAMS = NPB_TEAMS
+            ANALYSIS_FIELDS = {}
+            NPB_TEAM_HOME_FIELDS = {}
+
+            @staticmethod
+            def get_worksheet(sheet_name, spreadsheet_key):
+                return sheet
+
+            @staticmethod
+            def display_team_name(team_name):
+                return NPB_TEAMS[team_name]["name"]
+
+            @staticmethod
+            def _date_key(target_date=None):
+                return "2026-06-04"
+
+            @staticmethod
+            async def get_schedule_game_data(gid, session, retry=True):
+                fetched.append((gid, retry))
+                return None
+
+        inserted = asyncio.run(
+            NpbAnalysisService(module=FakeModule).update(
+                AsyncMock(),
+                game_ids=["game-1"],
+                scraped_games=[("game-1", _make_schedule_game_data("game-1"))],
+            )
+        )
+
+        assert inserted == 1
+        assert fetched == []
+        assert sheet.rows[2][1] == "2026/6/4"
 
 
 def _balance_after_formula(row_num):
@@ -507,15 +607,34 @@ class TestPredictionLedger:
             "home_innings": [1, 1, 0, 0, 2, "", "", "", "", "", "", ""],
         }
         # 主隊 +0.5: 4+0.5=4.5 > 2 → win
-        assert prediction_outcome_for_game(data, "巨人", market="final_handicap", line=0.5) == "win"
+        assert (
+            prediction_outcome_for_game(data, "巨人", market="final_handicap", line=0.5)
+            == "win"
+        )
         # 客隊 +0.5: 2+0.5=2.5 < 4 → loss
-        assert prediction_outcome_for_game(data, "阪神", market="final_handicap", line=0.5) == "loss"
+        assert (
+            prediction_outcome_for_game(data, "阪神", market="final_handicap", line=0.5)
+            == "loss"
+        )
         # 主隊 -0.5: 4-0.5=3.5 > 2 → win
-        assert prediction_outcome_for_game(data, "巨人", market="final_handicap", line=-0.5) == "win"
+        assert (
+            prediction_outcome_for_game(
+                data, "巨人", market="final_handicap", line=-0.5
+            )
+            == "win"
+        )
         # 主隊 -3.5: 4-3.5=0.5 < 2 → loss
-        assert prediction_outcome_for_game(data, "巨人", market="final_handicap", line=-3.5) == "loss"
+        assert (
+            prediction_outcome_for_game(
+                data, "巨人", market="final_handicap", line=-3.5
+            )
+            == "loss"
+        )
         # push: 客隊 +2: 2+2=4 == 4 → push
-        assert prediction_outcome_for_game(data, "阪神", market="final_handicap", line=2) == "push"
+        assert (
+            prediction_outcome_for_game(data, "阪神", market="final_handicap", line=2)
+            == "push"
+        )
 
     def test_prediction_outcome_handicap_half(self):
         # 前5局: 客 0+0+1+1+0=2, 主 1+1+0+0+2=4
@@ -531,9 +650,15 @@ class TestPredictionLedger:
             "home_innings": [1, 1, 0, 0, 2, "", "", "", "", "", "", ""],
         }
         # 主隊 +0.5: 4+0.5=4.5 > 2 → win
-        assert prediction_outcome_for_game(data, "巨人", market="half_handicap", line=0.5) == "win"
+        assert (
+            prediction_outcome_for_game(data, "巨人", market="half_handicap", line=0.5)
+            == "win"
+        )
         # 客隊 +0.5: 2+0.5=2.5 < 4 → loss
-        assert prediction_outcome_for_game(data, "阪神", market="half_handicap", line=0.5) == "loss"
+        assert (
+            prediction_outcome_for_game(data, "阪神", market="half_handicap", line=0.5)
+            == "loss"
+        )
 
     def test_prediction_outcome_handicap_requires_line(self):
         data = {
@@ -1878,9 +2003,7 @@ class TestGetNextScheduledGame:
 
     def test_returns_none_none_when_fetch_fails(self):
         with patch("npb._fetch", new=AsyncMock(return_value=None)):
-            game_id, date = self._run(
-                get_next_scheduled_game(1, self._mock_session())
-            )
+            game_id, date = self._run(get_next_scheduled_game(1, self._mock_session()))
         assert game_id is None
         assert date is None
 
@@ -1945,9 +2068,7 @@ class TestGetNextScheduledGame:
         )
         with self._patch_now(fake_now):
             with patch("npb._fetch", new=AsyncMock(return_value=html)):
-                game_id, _ = self._run(
-                    get_next_scheduled_game(1, self._mock_session())
-                )
+                game_id, _ = self._run(get_next_scheduled_game(1, self._mock_session()))
         assert game_id == "future01"
 
 
@@ -2087,9 +2208,7 @@ class TestGetScheduleOpponent:
         assert result is None
 
     def test_returns_opponent_key_by_team_id(self):
-        html = _cal_html(
-            {"day": "26", "links": ["/npb/teams/1/schedule"]}
-        )
+        html = _cal_html({"day": "26", "links": ["/npb/teams/1/schedule"]})
         with patch("npb._fetch", new=AsyncMock(return_value=html)):
             result = self._run(
                 _get_schedule_opponent(2, "2026-03-26", self._mock_session())
@@ -2097,9 +2216,7 @@ class TestGetScheduleOpponent:
         assert result == "巨人"
 
     def test_returns_none_when_day_does_not_match(self):
-        html = _cal_html(
-            {"day": "25", "links": ["/npb/teams/1/schedule"]}
-        )
+        html = _cal_html({"day": "25", "links": ["/npb/teams/1/schedule"]})
         with patch("npb._fetch", new=AsyncMock(return_value=html)):
             result = self._run(
                 _get_schedule_opponent(2, "2026-03-26", self._mock_session())
@@ -2154,8 +2271,7 @@ class TestGetLastNGameIds:
     def test_returns_game_id_for_completed_game(self):
         fake_now = datetime(2026, 3, 26)
         html = _cal_html(
-            {"day": "26", "status": "試合終了",
-             "href": "/npb/game/2026032601/top"},
+            {"day": "26", "status": "試合終了", "href": "/npb/game/2026032601/top"},
         )
         with self._patch_now(fake_now):
             with patch("npb._fetch", new=AsyncMock(return_value=html)):
@@ -2167,8 +2283,7 @@ class TestGetLastNGameIds:
         # the inner for-loop and lets the next _fetch=None exit the while-loop.
         fake_now = datetime(2026, 3, 1)
         html = _cal_html(
-            {"day": "1", "status": "先発：投手",
-             "href": "/npb/game/2026030101/top"},
+            {"day": "1", "status": "先発：投手", "href": "/npb/game/2026030101/top"},
         )
         with self._patch_now(fake_now):
             with patch("npb._fetch", new=AsyncMock(side_effect=[html, None])):
@@ -2179,10 +2294,8 @@ class TestGetLastNGameIds:
         fake_now = datetime(2026, 3, 26)
         # Entries for days 25 and 26; reversed → day 26 processed first
         html = _cal_html(
-            {"day": "25", "status": "試合終了",
-             "href": "/npb/game/2026032501/top"},
-            {"day": "26", "status": "試合終了",
-             "href": "/npb/game/2026032601/top"},
+            {"day": "25", "status": "試合終了", "href": "/npb/game/2026032501/top"},
+            {"day": "26", "status": "試合終了", "href": "/npb/game/2026032601/top"},
         )
         with self._patch_now(fake_now):
             with patch("npb._fetch", new=AsyncMock(return_value=html)):
@@ -2197,10 +2310,8 @@ class TestGetLastNGameIds:
         # subsequent _fetch=None exits the outer while-loop.
         fake_now = datetime(2026, 3, 2)
         html = _cal_html(
-            {"day": "1", "status": "試合終了",
-             "href": "/npb/game/2026030201/top"},
-            {"day": "2", "status": "試合終了",
-             "href": "/npb/game/2026030201/top"},
+            {"day": "1", "status": "試合終了", "href": "/npb/game/2026030201/top"},
+            {"day": "2", "status": "試合終了", "href": "/npb/game/2026030201/top"},
         )
         with self._patch_now(fake_now):
             with patch("npb._fetch", new=AsyncMock(side_effect=[html, None])):
@@ -2210,8 +2321,7 @@ class TestGetLastNGameIds:
     def test_respects_n_limit(self):
         fake_now = datetime(2026, 3, 26)
         html = _cal_html(
-            {"day": "26", "status": "試合終了",
-             "href": "/npb/game/2026032601/top"},
+            {"day": "26", "status": "試合終了", "href": "/npb/game/2026032601/top"},
         )
         with self._patch_now(fake_now):
             with patch("npb._fetch", new=AsyncMock(return_value=html)):
