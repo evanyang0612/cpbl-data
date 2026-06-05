@@ -1,8 +1,6 @@
 name: CPBL Schedule Updater
 
 on:
-  schedule:
-    - cron: "*/30 8-16 * * *"
   workflow_dispatch:
 
 jobs:
