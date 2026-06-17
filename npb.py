@@ -352,9 +352,46 @@ def get_npb_status_worksheet():
     return sheet
 
 
+EXHIBITION_GAME_KIND_KEYWORDS = ("オープン戦", "練習試合")
+
+
 def is_exhibition_game_id(game_id: str) -> bool:
-    """Warm-up / exhibition games currently use the 202104... game-id prefix."""
+    """Legacy fallback heuristic: warm-up game ids used the 202104... prefix.
+
+    Unreliable on its own — make-up/regular games share the same id band — so it
+    is only consulted when the page's game-kind label could not be captured.
+    """
     return str(game_id).startswith("202104")
+
+
+def _parse_game_kind(soup) -> str:
+    """Read the game-type label from the bb-gameRound header.
+
+    Returns the leading kind label such as 'オープン戦', 'セ・リーグ',
+    'パ・リーグ', or 'セ・パ交流戦'. Returns '' when the header is missing.
+    """
+    el = soup.find(class_="bb-gameRound")
+    if not el:
+        return ""
+    text = el.get_text(" ", strip=True)
+    match = re.match(r"\s*(.+?)\s*\d+回戦", text)
+    if match:
+        return match.group(1).strip()
+    tokens = text.split()
+    return tokens[0] if tokens else ""
+
+
+def is_exhibition_game(data: dict) -> bool:
+    """Classify a scraped NPB game as an exhibition (熱身賽).
+
+    Decided by the page's game-kind label: オープン戦/練習試合 are exhibition;
+    every official label (セ・リーグ/パ・リーグ/セ・パ交流戦/…) is a regular
+    game. Falls back to the id-prefix heuristic only when no label was captured.
+    """
+    kind = str(data.get("比賽種類") or "")
+    if kind:
+        return any(keyword in kind for keyword in EXHIBITION_GAME_KIND_KEYWORDS)
+    return is_exhibition_game_id(str(data.get("賽事編號", "")))
 
 
 def display_team_name(team_name: str) -> str:
@@ -1683,6 +1720,9 @@ async def get_sailu_game_data(
     venue_el = soup.find(class_="bb-gameRound--stadium")
     venue = venue_el.text.strip() if venue_el else ""
 
+    # ── Game kind (オープン戦 / セ・リーグ / セ・パ交流戦 …) ───────────────
+    game_kind = _parse_game_kind(soup)
+
     # ── Game time (from /top page) ─────────────────────────────────────────
     game_time = ""
     if top_soup:
@@ -1822,6 +1862,7 @@ async def get_sailu_game_data(
 
     return {
         "賽事編號": game_id,
+        "比賽種類": game_kind,
         "客場隊伍": away_raw,
         "客場先發": away_starter,
         "主場隊伍": home_raw,
@@ -1896,6 +1937,9 @@ async def get_schedule_game_data(
     venue_el = soup.find(class_="bb-gameRound--stadium")
     venue_raw = venue_el.text.strip() if venue_el else ""
     field = _display_field_name(venue_raw)
+
+    # ── Game kind (オープン戦 / セ・リーグ / セ・パ交流戦 …) ───────────────
+    game_kind = _parse_game_kind(soup)
 
     # ── Game time ──────────────────────────────────────────────────────────
     game_time = ""
@@ -2101,6 +2145,7 @@ async def get_schedule_game_data(
         "賽事編號": game_id,
         "日期": date_str,
         "賽事狀態": schedule_status,
+        "比賽種類": game_kind,
         "客隊原名": away_raw,
         "客隊": away_name,
         "客隊先發": away_starter,

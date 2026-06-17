@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import os
 import platform
 import re
 import sys
@@ -27,6 +28,25 @@ class NpbStatusService(NpbModuleService):
     TERMINAL_NON_FINISHED = ("中止", "ノーゲーム", "延期")
 
     def effective_date_str(self) -> str:
+        """Date the 賽錄 scrape should process.
+
+        Defaults to now minus 6 hours so late-night JST games still count as the
+        same calendar day. A manual backfill can override the date with the
+        NPB_STATUS_DATE env var: 'today', 'yesterday', or YYYY-MM-DD.
+        """
+        override = (os.getenv("NPB_STATUS_DATE") or "").strip()
+        if override:
+            normalized = override.lower()
+            if normalized in {"today", "今天", "今日"}:
+                return datetime.now().strftime("%Y-%m-%d")
+            if normalized in {"yesterday", "昨天", "昨日"}:
+                return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            try:
+                return datetime.strptime(override, "%Y-%m-%d").strftime("%Y-%m-%d")
+            except ValueError as exc:
+                raise ValueError(
+                    "NPB_STATUS_DATE must be 'today', 'yesterday', or YYYY-MM-DD"
+                ) from exc
         return (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
 
     def records(self, status_sheet):
@@ -1015,8 +1035,10 @@ class NpbRowsService(NpbModuleService):
 
     def exhibition_row(self, data: dict) -> list[str]:
         module = self.module
-        away_score = int(data["客總分"])
-        home_score = int(data["主總"])
+        away_raw = data.get("客場隊伍") or data.get("客隊原名")
+        home_raw = data.get("主場隊伍") or data.get("主隊原名")
+        away_score = int(data.get("客總分", data.get("客總", 0)))
+        home_score = int(data.get("主總", data.get("主總分", 0)))
         if away_score > home_score:
             away_mark, home_mark = "○", "●"
         elif away_score < home_score:
@@ -1040,10 +1062,10 @@ class NpbRowsService(NpbModuleService):
         return [
             f"{dt.year}/{dt.month}/{dt.day}",
             away_mark,
-            module.display_team_name(data["客場隊伍"]),
+            module.display_team_name(away_raw),
             str(away_score),
             str(home_score),
-            module.display_team_name(data["主場隊伍"]),
+            module.display_team_name(home_raw),
             home_mark,
             data["球場"],
             *away_innings,
@@ -1054,10 +1076,12 @@ class NpbRowsService(NpbModuleService):
 
     def exhibition_identity(self, data: dict) -> tuple[str, str, str]:
         module = self.module
+        away_raw = data.get("客場隊伍") or data.get("客隊原名")
+        home_raw = data.get("主場隊伍") or data.get("主隊原名")
         return (
             data["日期"],
-            module.display_team_name(data["客場隊伍"]),
-            module.display_team_name(data["主場隊伍"]),
+            module.display_team_name(away_raw),
+            module.display_team_name(home_raw),
         )
 
     @staticmethod
@@ -1726,10 +1750,10 @@ class NpbSailuService:
         regular_games = [
             (gid, data)
             for gid, data in new_games
-            if not module.is_exhibition_game_id(gid)
+            if not module.is_exhibition_game(data)
         ]
         exhibition_games = [
-            (gid, data) for gid, data in new_games if module.is_exhibition_game_id(gid)
+            (gid, data) for gid, data in new_games if module.is_exhibition_game(data)
         ]
 
         source_regular_games = [
