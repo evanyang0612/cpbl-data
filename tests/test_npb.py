@@ -7,7 +7,7 @@ Covers: hex_to_rgb, col_to_letter, _pitcher_font_size, build_block_values,
 
 import asyncio
 from argparse import Namespace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -50,6 +50,9 @@ from npb import (
     get_last_n_game_ids,
     get_next_scheduled_game,
     hex_to_rgb,
+    is_exhibition_game,
+    is_exhibition_game_id,
+    _parse_game_kind,
     prediction_outcome_for_game,
     resolve_prediction_game_by_home_team,
     resolve_npb_predictions_for_game,
@@ -473,6 +476,47 @@ class FakePredictionSheet:
         self.updated_cells.append((row, col, value))
 
 
+def _game_round_soup(label: str):
+    return bs(
+        f'<div class="bb-gameRound">{label}</div>',
+        "html.parser",
+    )
+
+
+class TestExhibitionClassification:
+    def test_parse_game_kind_reads_leading_label(self):
+        assert (
+            _parse_game_kind(_game_round_soup("オープン戦 1回戦 3月6日（金） 14:00 甲子園"))
+            == "オープン戦"
+        )
+        assert (
+            _parse_game_kind(_game_round_soup("セ・パ交流戦 3回戦 6月16日（火） 18:00 甲子園"))
+            == "セ・パ交流戦"
+        )
+        assert (
+            _parse_game_kind(_game_round_soup("セ・リーグ 2回戦 4月1日（水） 18:00 東京ドーム"))
+            == "セ・リーグ"
+        )
+
+    def test_parse_game_kind_missing_header(self):
+        assert _parse_game_kind(bs("<div></div>", "html.parser")) == ""
+
+    def test_make_up_interleague_game_is_regular(self):
+        # 2021044685: the 6/16 make-up game wrongly classified as exhibition by
+        # the legacy id-prefix heuristic. The label says it is a regular game.
+        data = {"賽事編號": "2021044685", "比賽種類": "セ・パ交流戦"}
+        assert is_exhibition_game(data) is False
+        assert is_exhibition_game_id("2021044685") is True  # legacy bug preserved
+
+    def test_open_game_is_exhibition(self):
+        data = {"賽事編號": "2021040043", "比賽種類": "オープン戦"}
+        assert is_exhibition_game(data) is True
+
+    def test_falls_back_to_id_prefix_without_label(self):
+        assert is_exhibition_game({"賽事編號": "2021040043"}) is True
+        assert is_exhibition_game({"賽事編號": "2026051201"}) is False
+
+
 class TestNpbRowsService:
     def test_sailu_row_accepts_schedule_game_data_shape(self):
         row = NpbRowsService(module=Namespace(NPB_TEAMS=NPB_TEAMS)).sailu_row(
@@ -492,6 +536,47 @@ class TestNpbRowsService:
         assert row[42] == NPB_TEAMS["巨人"]["id"]
         assert row[45] == "6"
         assert row[47] == 3
+
+    def test_exhibition_row_accepts_schedule_game_data_shape(self):
+        data = _make_schedule_game_data("2021044685")
+        service = NpbRowsService(
+            module=Namespace(
+                NPB_TEAMS=NPB_TEAMS,
+                display_team_name=lambda name: "横浜" if name == "DeNA" else name,
+            )
+        )
+
+        row = service.exhibition_row(data)
+        assert row[0] == "2026/6/4"
+        assert row[1] == "●"  # away (阪神) lost 2-4
+        assert row[2] == "阪神"
+        assert row[3] == "2"
+        assert row[4] == "4"
+        assert row[5] == "巨人"
+        assert row[6] == "○"
+
+        assert service.exhibition_identity(data) == ("2026-06-04", "阪神", "巨人")
+
+
+class TestEffectiveDateStr:
+    def test_defaults_to_now_minus_six_hours(self, monkeypatch):
+        monkeypatch.delenv("NPB_STATUS_DATE", raising=False)
+        expected = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
+        assert NpbStatusService().effective_date_str() == expected
+
+    def test_override_with_explicit_date(self, monkeypatch):
+        monkeypatch.setenv("NPB_STATUS_DATE", "2026-06-16")
+        assert NpbStatusService().effective_date_str() == "2026-06-16"
+
+    def test_override_with_yesterday(self, monkeypatch):
+        monkeypatch.setenv("NPB_STATUS_DATE", "yesterday")
+        expected = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        assert NpbStatusService().effective_date_str() == expected
+
+    def test_override_invalid_raises(self, monkeypatch):
+        monkeypatch.setenv("NPB_STATUS_DATE", "not-a-date")
+        with pytest.raises(ValueError):
+            NpbStatusService().effective_date_str()
 
 
 class TestNpbStatusService:
