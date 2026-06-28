@@ -46,6 +46,10 @@ SCORE_LOSS_FONT = "38761d"
 SCORE_TIE_FONT = "0000ff"
 HITS_10_PLUS_FONT = "e26b0a"
 DEFAULT_FONT = "000000"
+HOT_AVG_FONT = "ff0000"
+HOT_OBP_FONT = "e26b0a"
+HOT_AVG_THRESHOLD = 0.300
+HOT_OBP_THRESHOLD = 0.360
 
 NPB_TEAMS = {
     "巨人": {
@@ -296,8 +300,8 @@ LEAGUE_SHEETS = {
     "洋盟": "近十場b",
 }
 
-# Block column start positions (1-indexed: B=2, O=15, AB=28)
-BLOCK_COLS = [2, 15, 28]
+# Block column start positions (1-indexed: B=2, Q=17, AF=32)
+BLOCK_COLS = [2, 17, 32]
 
 # Row layout
 TOP_HEADER_ROW = 3
@@ -311,6 +315,10 @@ BOTTOM_GAME_START = 17
 BOTTOM_GAME_END = 26
 BOTTOM_AVG10_ROW = 27
 BOTTOM_AVG5_ROW = 28
+TOP_HR_HEADER_ROW = 30
+TOP_HR_END_ROW = 38
+BOTTOM_HR_HEADER_ROW = 40
+BOTTOM_HR_END_ROW = 48
 
 # Rows per block (header + 10 games + 2 avg rows = 13)
 BLOCK_ROWS = 13
@@ -1479,6 +1487,59 @@ def _batting_event_counts(tbl) -> dict[str, int]:
     return counts
 
 
+def _normalize_batting_event_text(text: str) -> str:
+    return text.replace("２", "2").replace("３", "3").replace("　", "").replace(" ", "")
+
+
+def _home_run_direction(text: str) -> str:
+    normalized = _normalize_batting_event_text(text)
+    if not re.search(r"(本塁打|本塁|本)", normalized):
+        return ""
+    m = re.search(r"(左中|右中|左|中|右)", normalized)
+    if not m:
+        return ""
+    direction = m.group(1)
+    if "左" in direction:
+        return "左本"
+    if "右" in direction:
+        return "右本"
+    return "中本"
+
+
+def _parse_home_run_events(tbl) -> list[dict[str, str]]:
+    events = []
+    rows = tbl.find_all("tr") or tbl.find_all(class_="bb-statsTable__row")
+    for row in rows:
+        if row.find(class_="bb-statsTable__head--result"):
+            continue
+        player_el = row.find(class_=lambda c: c and "statsTable" in c and "player" in c)
+        if not player_el:
+            cells = row.find_all(["th", "td"])
+            player_el = cells[0] if cells else None
+        batter = player_el.get_text("", strip=True) if player_el else ""
+        batter = re.sub(r"\s*[（(][左右][）)]\s*", "", batter).strip()
+        batter_side = ""
+        side_match = re.search(
+            r"[（(]([左右])[）)]",
+            player_el.get_text("", strip=True) if player_el else "",
+        )
+        if side_match:
+            batter_side = f"{side_match.group(1)}打"
+        for cell in row.find_all(class_="bb-statsTable__data--inning"):
+            raw = cell.get_text("", strip=True)
+            direction = _home_run_direction(raw)
+            if not direction:
+                continue
+            events.append(
+                {
+                    "打者": batter,
+                    "左右打": batter_side,
+                    "方向": direction,
+                }
+            )
+    return events
+
+
 def _parse_batting_table(tbl) -> list:
     """
     Parse Yahoo's batting table into:
@@ -2088,6 +2149,8 @@ async def get_schedule_game_data(
     bat_tables = soup.find_all(class_="bb-statsTable")
     away_bat = _parse_batting_table(bat_tables[0]) if len(bat_tables) > 0 else [0] * 16
     home_bat = _parse_batting_table(bat_tables[1]) if len(bat_tables) > 1 else [0] * 16
+    away_homers = _parse_home_run_events(bat_tables[0]) if len(bat_tables) > 0 else []
+    home_homers = _parse_home_run_events(bat_tables[1]) if len(bat_tables) > 1 else []
     # Batting table doesn't expose fielding errors; use scoreboard totals (same as col X/AM)
     away_bat[15] = away_e
     home_bat[15] = home_e
@@ -2127,6 +2190,8 @@ async def get_schedule_game_data(
         "主投別": home_hand,
         "客打擊": away_bat,  # list[16]
         "主打擊": home_bat,  # list[16]
+        "客全壘打明細": away_homers,
+        "主全壘打明細": home_homers,
         "客QS": away_qs,
         "主QS": home_qs,
     }
@@ -2598,9 +2663,19 @@ def update_league_sheet(
 # --- Main ---
 
 
-async def run_once(matchup_date: str | None = None):
+async def run_once(
+    matchup_date: str | None = None,
+    league_sheet_suffix: str | None = None,
+    league_sheet_overrides: dict[str, str] | None = None,
+    recent_only: bool = False,
+):
+    if league_sheet_suffix is None:
+        league_sheet_suffix = os.getenv("NPB_LEAGUE_SHEET_SUFFIX", "")
     return await NpbUpdateService(module=sys.modules[__name__]).run_once(
-        matchup_date=matchup_date
+        matchup_date=matchup_date,
+        league_sheet_suffix=league_sheet_suffix,
+        league_sheet_overrides=league_sheet_overrides,
+        recent_only=recent_only,
     )
 
 
@@ -2612,6 +2687,24 @@ if __name__ == "__main__":
             "First date to use for 近十場 matchup ordering: today, tomorrow, "
             "or YYYY-MM-DD. Defaults to tomorrow; NPB_MATCHUP_DATE is also supported."
         ),
+    )
+    parser.add_argument(
+        "--sheet-copy-suffix",
+        default=os.getenv("NPB_LEAGUE_SHEET_SUFFIX", ""),
+        help=(
+            "Optional suffix appended to NPB 近十場 league sheet names, e.g. "
+            "' 的副本' to write 近十場a 的副本 / 近十場b 的副本."
+        ),
+    )
+    parser.add_argument(
+        "--central-recent-sheet",
+        default="",
+        help="Exact worksheet title for 央盟 近十場 output.",
+    )
+    parser.add_argument(
+        "--pacific-recent-sheet",
+        default="",
+        help="Exact worksheet title for 洋盟 近十場 output.",
     )
     parser.add_argument(
         "--repair-analysis-leagues",
@@ -2685,7 +2778,17 @@ if __name__ == "__main__":
         action="store_true",
         help="Build prediction output without writing to Google Sheets.",
     )
+    parser.add_argument(
+        "--recent-only",
+        action="store_true",
+        help="Only update NPB 近十場 sheets; skip 賽錄, 分析表, prediction reveals, and 彙資.",
+    )
     args = parser.parse_args()
+    recent_sheet_overrides = {}
+    if args.central_recent_sheet:
+        recent_sheet_overrides["央盟"] = args.central_recent_sheet
+    if args.pacific_recent_sheet:
+        recent_sheet_overrides["洋盟"] = args.pacific_recent_sheet
 
     if args.create_prediction is not None:
         try:
@@ -2722,6 +2825,9 @@ if __name__ == "__main__":
     else:
         asyncio.run(
             NpbUpdateService(module=sys.modules[__name__]).run_once(
-                matchup_date=args.matchup_date
+                matchup_date=args.matchup_date,
+                league_sheet_suffix=args.sheet_copy_suffix,
+                league_sheet_overrides=recent_sheet_overrides,
+                recent_only=args.recent_only,
             )
         )

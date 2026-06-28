@@ -323,10 +323,10 @@ class TestColToLetter:
         assert col_to_letter(53) == "BA"
 
     def test_block_col_positions(self):
-        # BLOCK_COLS = [2, 15, 28] → B, O, AB
+        # BLOCK_COLS = [2, 17, 32] → B, Q, AF
         assert col_to_letter(2) == "B"
-        assert col_to_letter(15) == "O"
-        assert col_to_letter(28) == "AB"
+        assert col_to_letter(17) == "Q"
+        assert col_to_letter(32) == "AF"
 
 
 # ---------------------------------------------------------------------------
@@ -377,8 +377,10 @@ def _make_game(
     bb,
     hbp,
     hr,
+    ab=None,
+    sf=0,
 ):
-    return {
+    game = {
         "日期": date,
         "對戰球隊": opponent,
         "對戰先發": starter,
@@ -393,6 +395,10 @@ def _make_game(
         "死球": hbp,
         "全壘打": hr,
     }
+    if ab is not None:
+        game["打數"] = ab
+        game["犧飛"] = sf
+    return game
 
 
 SAMPLE_GAMES = [
@@ -1292,10 +1298,10 @@ class TestBuildBlockValues:
         rows = build_block_values("巨人", SAMPLE_GAMES)
         assert len(rows) == 13
 
-    def test_each_row_has_12_cols(self):
+    def test_each_row_has_14_cols(self):
         rows = build_block_values("巨人", SAMPLE_GAMES)
         for row in rows:
-            assert len(row) == 12
+            assert len(row) == 14
 
     def test_header_row_team_name(self):
         rows = build_block_values("巨人", SAMPLE_GAMES)
@@ -1310,12 +1316,75 @@ class TestBuildBlockValues:
         rows = build_block_values("巨人", SAMPLE_GAMES)
         # 5 games → rows 6-10 (index 6-10) should be all empty strings
         for i in range(len(SAMPLE_GAMES) + 1, GAMES_COUNT + 1):
-            assert rows[i] == [""] * 12
+            assert rows[i] == [""] * 14
 
     def test_bb_plus_hbp_combined(self):
         # Game at index 1 (2025/03/28): bb=3, hbp=0 → col index 10 = 3
         rows = build_block_values("巨人", SAMPLE_GAMES)
         assert rows[1][10] == 3  # bb+hbp
+
+    def test_game_rows_include_avg_and_obp(self):
+        game = _make_game(
+            "2025/04/01",
+            "燕 子",
+            "投手",
+            "東 京",
+            0,
+            4,
+            3,
+            0,
+            9,
+            0,
+            3,
+            1,
+            1,
+            ab=30,
+            sf=1,
+        )
+        rows = build_block_values("巨人", [game])
+        assert rows[1][12] == ".300"
+        assert rows[1][13] == ".371"
+
+    def test_avg_rows_use_aggregate_avg_and_obp(self):
+        games = [
+            _make_game(
+                "2025/04/01",
+                "燕 子",
+                "投手",
+                "東 京",
+                0,
+                4,
+                3,
+                0,
+                9,
+                0,
+                3,
+                1,
+                1,
+                ab=30,
+                sf=1,
+            ),
+            _make_game(
+                "2025/04/02",
+                "燕 子",
+                "投手",
+                "東 京",
+                0,
+                2,
+                3,
+                0,
+                6,
+                0,
+                2,
+                0,
+                0,
+                ab=30,
+                sf=0,
+            ),
+        ]
+        rows = build_block_values("巨人", games)
+        assert rows[11][12] == ".250"
+        assert rows[11][13] == ".313"
 
     def test_two_character_local_field_gets_spaced(self):
         games = [
@@ -1384,8 +1453,8 @@ class TestBuildBlockValues:
 
     def test_no_games_avg_rows_empty(self):
         rows = build_block_values("巨人", [])
-        assert rows[11] == ["", "", "近十場", "平 均"] + [""] * 8
-        assert rows[12] == ["", "", "近五場", "平 均"] + [""] * 8
+        assert rows[11] == ["", "", "近十場", "平 均"] + [""] * 10
+        assert rows[12] == ["", "", "近五場", "平 均"] + [""] * 10
 
     def test_more_than_10_games_keeps_last_10(self):
         games_12 = [
@@ -1409,7 +1478,7 @@ class TestBuildBlockValues:
         rows = build_block_values("巨人", games_12)
         assert len(rows) == 13  # still 13 rows
         # Only 10 game rows should be non-empty (rows 1-10)
-        non_empty = sum(1 for r in rows[1:11] if r != [""] * 12)
+        non_empty = sum(1 for r in rows[1:11] if r != [""] * 14)
         assert non_empty == 10
 
 
@@ -1696,13 +1765,13 @@ class TestHeaderFormatRequest:
         assert rng["startRowIndex"] == 2  # header_row - 1
         assert rng["endRowIndex"] == 3
 
-    def test_range_spans_12_columns(self):
+    def test_range_spans_14_columns(self):
         req = _header_format_request(
             sheet_id=0, team_key="巨人", header_row=3, col_start=2
         )
         rng = req["repeatCell"]["range"]
         assert rng["startColumnIndex"] == 1  # col_start - 1
-        assert rng["endColumnIndex"] == 13  # col_start + 11
+        assert rng["endColumnIndex"] == 15  # col_start + 13
 
     def test_sheet_id_passed_through(self):
         req = _header_format_request(
