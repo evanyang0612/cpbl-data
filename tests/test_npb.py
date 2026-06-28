@@ -1560,6 +1560,19 @@ class TestAnalysisRow:
 
         assert row[13] == "京セラドーム"
 
+    def test_analysis_field_uses_orix_kobe_home_stadium(self):
+        row = _analysis_row(
+            1,
+            self._data(
+                home_raw="オリックス",
+                home_display="歐 牛",
+                venue_raw="ほっともっとフィールド神戸",
+                venue_display="ほっともっとフィールド神戸",
+            ),
+        )
+
+        assert row[13] == "スカイマーク"
+
     def test_analysis_field_marks_non_primary_home_stadium_as_local(self):
         row = _analysis_row(
             1,
