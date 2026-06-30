@@ -60,6 +60,16 @@ class CpblStatusService(CpblModuleService):
             if not record["resolved"] and record["game_sno"] != module.NO_GAMES_SENTINEL
         ]
 
+    def has_prior_suspended_record(self, status_sheet, date_str, kind_code, game_sno):
+        module = self.module
+        return any(
+            record["kind_code"] == kind_code
+            and record["game_sno"] == str(game_sno)
+            and record["date"] < date_str
+            and module.is_suspended_game_status(record["status"])
+            for record in self.records(status_sheet)
+        )
+
     def upsert(self, status_sheet, date_str, kind_code, game_sno, status, resolved):
         updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         values = [
@@ -247,8 +257,7 @@ class CpblGameSheetService(CpblModuleService):
                 if 1 <= inning <= 12:
                     score_val = int(float(score.get("ScoreCnt", 0)))
                     is_finished_ninth_or_later = (
-                        inning >= 9
-                        and game_detail.get("GameStatusChi") == "比賽結束"
+                        inning >= 9 and game_detail.get("GameStatusChi") == "比賽結束"
                     )
                     if is_finished_ninth_or_later:
                         v_total = int(game_detail.get("VisitingTotalScore", 0))
@@ -417,9 +426,18 @@ class CpblScheduleService:
                     if not game_sno:
                         continue
                     schedule_status = game.get("GameStatusChi", "")
+                    is_suspended_resume = module.is_suspended_game_status(
+                        schedule_status
+                    ) and status_service.has_prior_suspended_record(
+                        status_sheet, today_str, kind_code, game_sno
+                    )
                     resolved = (
                         game_sno in existing_snos
-                        or module.is_non_finished_terminal_status(schedule_status)
+                        or (
+                            module.is_non_finished_terminal_status(schedule_status)
+                            or module.is_suspended_game_status(schedule_status)
+                        )
+                        and not is_suspended_resume
                     )
                     if game_sno in existing_snos and not schedule_status:
                         schedule_status = "比賽結束"
@@ -436,6 +454,12 @@ class CpblScheduleService:
                 for game in today_games:
                     game_sno = str(game.get("GameSno"))
                     if not game_sno or game_sno in existing_snos:
+                        continue
+                    if module.is_suspended_game_status(
+                        game.get("GameStatusChi", "")
+                    ) and not status_service.has_prior_suspended_record(
+                        status_sheet, today_str, kind_code, game_sno
+                    ):
                         continue
                     if module.is_non_finished_terminal_status(
                         game.get("GameStatusChi", "")
@@ -469,13 +493,22 @@ class CpblScheduleService:
                     game_detail = game_service.extract_game_detail(data, game_sno)
                     status = game_detail.get("GameStatusChi", "") if game_detail else ""
                     if status and status != "比賽結束":
+                        is_suspended_resume = module.is_suspended_game_status(
+                            status
+                        ) and status_service.has_prior_suspended_record(
+                            status_sheet, game_date_str, kind_code, game_sno
+                        )
                         status_service.upsert(
                             status_sheet,
                             game_date_str,
                             kind_code,
                             game_sno,
                             status,
-                            module.is_terminal_game_status(status),
+                            module.is_terminal_game_status(status)
+                            or (
+                                module.is_suspended_game_status(status)
+                                and not is_suspended_resume
+                            ),
                         )
                         if module.is_terminal_game_status(status):
                             print(f"Game {game_sno} terminal status: {status}.")

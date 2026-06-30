@@ -5,6 +5,7 @@ Covers: _get_pitching_stats, _get_batting_stats, process_and_update_sheet.
 
 import json
 from unittest.mock import MagicMock
+from baseball.cpbl_services import CpblStatusService
 from cpbl import (
     _get_pitching_stats,
     _get_batting_stats,
@@ -391,6 +392,10 @@ class TestTerminalGameStatus:
         assert is_terminal_game_status("因雨延賽") is True
         assert is_non_finished_terminal_status("因雨延賽") is True
 
+    def test_suspended_status_stays_unresolved(self):
+        assert is_terminal_game_status("保留") is False
+        assert is_non_finished_terminal_status("保留") is False
+
     def test_in_progress_is_not_terminal(self):
         assert is_terminal_game_status("比賽中") is False
         assert is_non_finished_terminal_status("比賽中") is False
@@ -439,6 +444,19 @@ class TestStatusSheetHelpers:
         )
         _upsert_status(sheet, "2026-05-10", "A", "1", "比賽中", False)
         sheet.append_row.assert_called_once()
+
+    def test_has_prior_suspended_record_for_resumed_game(self):
+        sheet = self._make_status_sheet(
+            [
+                ["Date", "KindCode", "GameSno", "Status", "Resolved", "UpdatedAt"],
+                ["2026-06-25", "A", "151", "保留", "TRUE", ""],
+                ["2026-06-28", "A", "150", "保留", "FALSE", ""],
+            ]
+        )
+        service = CpblStatusService()
+
+        assert service.has_prior_suspended_record(sheet, "2026-06-28", "A", "151")
+        assert not service.has_prior_suspended_record(sheet, "2026-06-28", "A", "150")
 
 
 # ---------------------------------------------------------------------------
