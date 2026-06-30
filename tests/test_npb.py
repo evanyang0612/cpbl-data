@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from bs4 import BeautifulSoup as bs
 
+import npb
 from baseball.npb_services import (
     NpbAnalysisService,
     NpbLeagueSheetService,
@@ -24,6 +25,8 @@ from baseball.npb_services import (
 from npb import (
     DEFAULT_FONT,
     HITS_10_PLUS_FONT,
+    HOT_RATE_FONT,
+    COLD_RATE_FONT,
     SCORE_LOSS_FONT,
     SCORE_TIE_FONT,
     SCORE_WIN_FONT,
@@ -36,6 +39,10 @@ from npb import (
     _analysis_team_league,
     _parse_official_caught_stealing,
     _parse_batting_table,
+    _parse_home_run_events,
+    _parse_home_run_pitcher_events,
+    _parse_player_bat_hand,
+    _parse_pitcher_name_lookup,
     _resolve_matchup_start_date,
     _schedule_status_for_game,
     _pitcher_font_requests,
@@ -1342,8 +1349,29 @@ class TestBuildBlockValues:
             sf=1,
         )
         rows = build_block_values("巨人", [game])
-        assert rows[1][12] == ".300"
-        assert rows[1][13] == ".371"
+        assert rows[1][12] == "0.300"
+        assert rows[1][13] == "0.371"
+
+    def test_rate_values_keep_three_decimal_places(self):
+        game = _make_game(
+            "2025/04/01",
+            "燕 子",
+            "投手",
+            "東 京",
+            0,
+            4,
+            3,
+            0,
+            4,
+            0,
+            0,
+            0,
+            0,
+            ab=20,
+        )
+        rows = build_block_values("巨人", [game])
+        assert rows[1][12] == "0.200"
+        assert rows[1][13] == "0.200"
 
     def test_avg_rows_use_aggregate_avg_and_obp(self):
         games = [
@@ -1383,8 +1411,59 @@ class TestBuildBlockValues:
             ),
         ]
         rows = build_block_values("巨人", games)
-        assert rows[11][12] == ".250"
-        assert rows[11][13] == ".313"
+        assert rows[11][12] == "0.250"
+        assert rows[11][13] == "0.313"
+
+    def test_home_run_rows_format_date_and_pitcher(self):
+        service = NpbLeagueSheetService(module=npb)
+        game = _make_game(
+            "2026/06/21",
+            "中 日",
+            "柳",
+            "東 京",
+            0,
+            2,
+            0,
+            0,
+            6,
+            0,
+            0,
+            0,
+            1,
+        )
+        game["全壘打明細"] = [
+            {
+                "日期": "2026/06/21",
+                "打者": "泉口 友汰",
+                "左右打": "左打",
+                "方向": "右本",
+                "投手": "柳",
+                "對戰球隊": "中 日",
+            }
+        ]
+
+        rows = service.recent_home_run_rows("巨人", [game])
+
+        assert rows[0][:8] == [
+            "巨 人",
+            "日 期",
+            "打 者",
+            "左 右",
+            "方 向",
+            "投 手",
+            "",
+            "對 戰",
+        ]
+        assert rows[1][:8] == [
+            "",
+            "6/21",
+            "泉口 友汰",
+            "左打",
+            "右本",
+            "柳",
+            "",
+            "中 日",
+        ]
 
     def test_two_character_local_field_gets_spaced(self):
         games = [
@@ -1628,6 +1707,199 @@ class TestParseBattingTable:
         assert stats == [32, 7, 9, 7, 1, 1, 3, 1, 6, 0, 10, 1, 1, 1, 0, 2]
 
 
+class TestParseHomeRunEvents:
+    def test_parses_homer_batter_player_id_and_direction(self):
+        html = """
+        <table class="bb-statsTable">
+          <tr class="bb-statsTable__row">
+            <td class="bb-statsTable__data bb-statsTable__data--bat">(遊)</td>
+            <td class="bb-statsTable__data bb-statsTable__data--player">
+              <a href="/npb/player/1750321/top">泉口 友汰</a>
+            </td>
+            <td class="bb-statsTable__data bb-statsTable__data--inning">右本</td>
+          </tr>
+        </table>
+        """
+
+        events = _parse_home_run_events(bs(html, "html.parser").find("table"))
+
+        assert events == [
+            {
+                "打者": "泉口 友汰",
+                "player_id": "1750321",
+                "左右打": "",
+                "方向": "右本",
+            }
+        ]
+
+    def test_parses_player_bat_hand_from_profile(self):
+        html = """
+        <dl>
+          <dt>投打</dt>
+          <dd>右投左打</dd>
+        </dl>
+        """
+
+        assert _parse_player_bat_hand(html) == "左打"
+
+    def test_parses_homer_pitcher_from_text_page(self):
+        html = """
+        <section class="bb-liveText">
+          <header class="bb-liveText__head">
+            <h1 class="bb-liveText__inning">6回表</h1>
+            <p class="bb-liveText__detail">中日の攻撃</p>
+          </header>
+          <ol>
+            <li class="bb-liveText__item">
+              <div class="bb-liveText__text">
+                <p class="bb-liveText__batter">
+                  <a class="bb-liveText__player" href="/npb/player/1600085/top">細川 成也</a>
+                </p>
+                <p class="bb-liveText__summary">
+                  投手交代: 井上 → 船迫
+                </p>
+                <p class="bb-liveText__summary bb-liveText__summary--point">
+                  レフトスタンドへのホームラン
+                </p>
+              </div>
+            </li>
+          </ol>
+        </section>
+        """
+
+        events = _parse_home_run_pitcher_events(
+            html,
+            away_raw="中日",
+            home_raw="巨人",
+            away_starter="柳",
+            home_starter="井上",
+        )
+
+        assert events["away"] == [
+            {"打者": "細川 成也", "player_id": "1600085", "投手": "船迫"}
+        ]
+        assert events["home"] == []
+
+    def test_parses_between_innings_pitcher_change_before_homer(self):
+        html = """
+        <section class="bb-liveText">
+          <header class="bb-liveText__head">
+            <h1 class="bb-liveText__inning">9回裏</h1>
+            <p class="bb-liveText__detail">中日の攻撃</p>
+          </header>
+          <ol>
+            <li class="bb-liveText__item">
+              <div class="bb-liveText__text">
+                <p class="bb-liveText__batter">
+                  <a class="bb-liveText__player" href="/npb/player/1561854/top">サノー</a>
+                </p>
+                <p class="bb-liveText__summary bb-liveText__summary--change">
+                  ピッチャー レイノルズ に代わって 山﨑 がマウンドにあがる
+                </p>
+                <p class="bb-liveText__summary bb-liveText__summary--point">
+                  右中間へのホームラン 中 4-6 デ
+                </p>
+              </div>
+            </li>
+          </ol>
+        </section>
+        """
+
+        events = _parse_home_run_pitcher_events(
+            html,
+            away_raw="DeNA",
+            home_raw="中日",
+            away_starter="東",
+            home_starter="櫻井",
+        )
+
+        assert events["home"] == [
+            {"打者": "サノー", "player_id": "1561854", "投手": "山﨑"}
+        ]
+
+    def test_expands_short_relief_pitcher_names_from_score_table(self):
+        stats_html = """
+        <table class="bb-scoreTable">
+          <tr class="bb-scoreTable__row">
+            <td class="bb-scoreTable__data--player">東 克樹</td>
+          </tr>
+          <tr class="bb-scoreTable__row">
+            <td class="bb-scoreTable__data--player">中川 虎大</td>
+          </tr>
+          <tr class="bb-scoreTable__row">
+            <td class="bb-scoreTable__data--player">山﨑 康晃</td>
+          </tr>
+        </table>
+        """
+        text_html = """
+        <section class="bb-liveText">
+          <header class="bb-liveText__head">
+            <h1 class="bb-liveText__inning">9回裏</h1>
+            <p class="bb-liveText__detail">中日の攻撃</p>
+          </header>
+          <ol>
+            <li class="bb-liveText__item">
+              <div class="bb-liveText__text">
+                <p class="bb-liveText__batter">
+                  <a class="bb-liveText__player" href="/npb/player/1561854/top">サノー</a>
+                </p>
+                <p class="bb-liveText__summary bb-liveText__summary--change">
+                  ピッチャー 東 に代わって 中川虎 がマウンドにあがる
+                </p>
+                <p class="bb-liveText__summary bb-liveText__summary--point">
+                  右中間へのホームラン 中 3-6 デ
+                </p>
+              </div>
+            </li>
+            <li class="bb-liveText__item">
+              <div class="bb-liveText__text">
+                <p class="bb-liveText__batter">
+                  <a class="bb-liveText__player" href="/npb/player/1561854/top">サノー</a>
+                </p>
+                <p class="bb-liveText__summary bb-liveText__summary--change">
+                  ピッチャー 中川虎 に代わって 山﨑 がマウンドにあがる
+                </p>
+                <p class="bb-liveText__summary bb-liveText__summary--point">
+                  ライトスタンドへのホームラン 中 4-6 デ
+                </p>
+              </div>
+            </li>
+          </ol>
+        </section>
+        """
+        lookup = _parse_pitcher_name_lookup(bs(stats_html, "html.parser"))
+
+        events = _parse_home_run_pitcher_events(
+            text_html,
+            away_raw="DeNA",
+            home_raw="中日",
+            away_starter="東",
+            home_starter="櫻井",
+            pitcher_name_lookup=lookup,
+        )
+
+        assert events["home"] == [
+            {"打者": "サノー", "player_id": "1561854", "投手": "中川 虎大"},
+            {"打者": "サノー", "player_id": "1561854", "投手": "山﨑 康晃"},
+        ]
+
+    def test_ambiguous_pitcher_surname_stays_short(self):
+        stats_html = """
+        <table class="bb-scoreTable">
+          <tr class="bb-scoreTable__row">
+            <td class="bb-scoreTable__data--player">田中 太郎</td>
+          </tr>
+          <tr class="bb-scoreTable__row">
+            <td class="bb-scoreTable__data--player">田中 次郎</td>
+          </tr>
+        </table>
+        """
+
+        lookup = _parse_pitcher_name_lookup(bs(stats_html, "html.parser"))
+
+        assert lookup.get("田中") is None
+
+
 # ---------------------------------------------------------------------------
 # _parse_official_caught_stealing
 # ---------------------------------------------------------------------------
@@ -1795,12 +2067,12 @@ class TestHeaderFormatRequest:
         ]
         assert fg == hex_to_rgb(NPB_TEAMS["巨人"]["font"])
 
-    def test_text_is_bold(self):
+    def test_does_not_touch_non_colour_text_format(self):
         req = _header_format_request(
             sheet_id=0, team_key="巨人", header_row=3, col_start=2
         )
         assert (
-            req["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["bold"] is True
+            "bold" not in req["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]
         )
 
     def test_different_teams_have_different_colors(self):
@@ -1824,8 +2096,80 @@ class TestHeaderFormatRequest:
         )
         assert (
             req["repeatCell"]["fields"]
-            == "userEnteredFormat(backgroundColor,textFormat)"
+            == "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.foregroundColor"
         )
+
+
+class TestConditionalFormatDeleteRequests:
+    def test_deletes_rules_in_reverse_index_order(self):
+        class FakeSpreadsheet:
+            def fetch_sheet_metadata(self, params):
+                assert params == {
+                    "fields": "sheets(properties(sheetId),conditionalFormats)"
+                }
+                return {
+                    "sheets": [
+                        {
+                            "properties": {"sheetId": 99},
+                            "conditionalFormats": [{}, {}, {}],
+                        }
+                    ]
+                }
+
+        requests = NpbLeagueSheetService.conditional_format_delete_requests(
+            FakeSpreadsheet(), 99
+        )
+
+        assert [
+            request["deleteConditionalFormatRule"]["index"] for request in requests
+        ] == [2, 1, 0]
+
+
+class TestLeagueSheetLayoutClear:
+    def test_layout_clear_range_covers_old_and_new_blocks(self):
+        service = NpbLeagueSheetService(module=npb)
+
+        assert service.layout_clear_range() == "B3:AS48"
+
+    def test_home_run_pitcher_merge_requests_cover_pitcher_cells_only(self):
+        service = NpbLeagueSheetService(module=npb)
+
+        requests = service.home_run_pitcher_merge_requests(
+            sheet_id=99,
+            start_row=npb.TOP_HR_HEADER_ROW,
+            end_row=npb.TOP_HR_END_ROW,
+            col_start=2,
+        )
+
+        assert len(requests) == 9
+        first = requests[0]["mergeCells"]
+        assert first["mergeType"] == "MERGE_ALL"
+        assert first["range"] == {
+            "sheetId": 99,
+            "startRowIndex": 29,
+            "endRowIndex": 30,
+            "startColumnIndex": 6,
+            "endColumnIndex": 8,
+        }
+
+    def test_home_run_pitcher_unmerge_requests_cover_pitcher_cells_only(self):
+        service = NpbLeagueSheetService(module=npb)
+
+        requests = service.home_run_pitcher_unmerge_requests(
+            sheet_id=99,
+            start_row=npb.TOP_HR_HEADER_ROW,
+            end_row=npb.TOP_HR_END_ROW,
+            col_start=2,
+        )
+
+        assert len(requests) == 9
+        assert requests[0]["unmergeCells"]["range"] == {
+            "sheetId": 99,
+            "startRowIndex": 29,
+            "endRowIndex": 30,
+            "startColumnIndex": 6,
+            "endColumnIndex": 8,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1881,6 +2225,116 @@ class TestGameFontColorRequests:
         )
         reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
         assert self._foreground_hex(reqs[2]) == DEFAULT_FONT
+
+    def test_batting_average_250_or_more_colours_red(self):
+        game = _make_game(
+            "2025/04/01",
+            "燕 子",
+            "投手",
+            "東 京",
+            0,
+            4,
+            4,
+            0,
+            5,
+            0,
+            0,
+            0,
+            0,
+            ab=20,
+        )
+        reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
+        assert self._foreground_hex(reqs[3]) == HOT_RATE_FONT
+
+    def test_batting_average_150_or_less_colours_green(self):
+        game = _make_game(
+            "2025/04/01",
+            "燕 子",
+            "投手",
+            "東 京",
+            0,
+            4,
+            4,
+            0,
+            3,
+            0,
+            0,
+            0,
+            0,
+            ab=20,
+        )
+        reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
+        assert self._foreground_hex(reqs[3]) == COLD_RATE_FONT
+
+    def test_on_base_percentage_300_or_more_colours_red(self):
+        game = _make_game(
+            "2025/04/01",
+            "燕 子",
+            "投手",
+            "東 京",
+            0,
+            4,
+            4,
+            0,
+            5,
+            0,
+            2,
+            0,
+            0,
+            ab=20,
+        )
+        reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
+        assert self._foreground_hex(reqs[4]) == HOT_RATE_FONT
+
+    def test_on_base_percentage_200_or_less_colours_green(self):
+        game = _make_game(
+            "2025/04/01",
+            "燕 子",
+            "投手",
+            "東 京",
+            0,
+            4,
+            4,
+            0,
+            3,
+            0,
+            1,
+            0,
+            0,
+            ab=20,
+            sf=1,
+        )
+        reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
+        assert self._foreground_hex(reqs[4]) == COLD_RATE_FONT
+
+    def test_average_rows_apply_rate_colours(self):
+        games = [
+            _make_game(
+                "2025/04/01",
+                "燕 子",
+                "投手",
+                "東 京",
+                0,
+                4,
+                3,
+                0,
+                5,
+                0,
+                2,
+                0,
+                0,
+                ab=20,
+            )
+        ]
+
+        reqs = _game_font_color_requests(0, games, game_start_row=4, col_start=2)
+
+        assert self._foreground_hex(reqs[-4]) == HOT_RATE_FONT
+        assert self._foreground_hex(reqs[-3]) == HOT_RATE_FONT
+        assert self._foreground_hex(reqs[-2]) == HOT_RATE_FONT
+        assert self._foreground_hex(reqs[-1]) == HOT_RATE_FONT
+        assert reqs[-4]["repeatCell"]["range"]["startRowIndex"] == 13
+        assert reqs[-2]["repeatCell"]["range"]["startRowIndex"] == 14
 
 
 # ---------------------------------------------------------------------------

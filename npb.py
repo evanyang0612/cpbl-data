@@ -46,10 +46,12 @@ SCORE_LOSS_FONT = "38761d"
 SCORE_TIE_FONT = "0000ff"
 HITS_10_PLUS_FONT = "e26b0a"
 DEFAULT_FONT = "000000"
-HOT_AVG_FONT = "ff0000"
-HOT_OBP_FONT = "e26b0a"
-HOT_AVG_THRESHOLD = 0.300
-HOT_OBP_THRESHOLD = 0.360
+HOT_RATE_FONT = "ff0000"
+COLD_RATE_FONT = "38761d"
+HOT_AVG_THRESHOLD = 0.250
+COLD_AVG_THRESHOLD = 0.150
+HOT_OBP_THRESHOLD = 0.300
+COLD_OBP_THRESHOLD = 0.200
 
 NPB_TEAMS = {
     "巨人": {
@@ -230,6 +232,7 @@ OFFICIAL_TEAM_CODE_MAP = {
     "e": "楽天",
 }
 _OFFICIAL_PLAYBYPLAY_CACHE: dict[str, dict[tuple[str, str, str], str]] = {}
+_PLAYER_BAT_HAND_CACHE: dict[str, str] = {}
 
 NPB_FIELDS = {
     "東京ドーム": "東 京",
@@ -1005,8 +1008,9 @@ async def get_last_n_game_ids(
     game_ids: list[str] = []
     now = datetime.now()
 
-    while len(game_ids) < n:
-        time_key = now.strftime("%Y-%m")
+    month_cursor = now.replace(day=1)
+    for _ in range(12):
+        time_key = month_cursor.strftime("%Y-%m")
         html = await _fetch(
             session, f"{BASE_URL}teams/{team_id}/schedule?month={time_key}"
         )
@@ -1025,7 +1029,8 @@ async def get_last_n_game_ids(
                 entry_day = int(date_el.text)
             except ValueError:
                 continue
-            if entry_day != now.day:
+            entry_date = month_cursor.replace(day=entry_day)
+            if entry_date.date() > now.date():
                 continue
 
             status = data.find(class_="bb-calendarTable__status")
@@ -1039,9 +1044,10 @@ async def get_last_n_game_ids(
             if len(game_ids) >= n:
                 break
 
-            now -= timedelta(days=1)
-            if now.strftime("%Y-%m") != time_key:
-                break
+        if len(game_ids) >= n:
+            break
+
+        month_cursor = (month_cursor - timedelta(days=1)).replace(day=1)
 
     return game_ids[:n]
 
@@ -1516,6 +1522,10 @@ def _parse_home_run_events(tbl) -> list[dict[str, str]]:
         if not player_el:
             cells = row.find_all(["th", "td"])
             player_el = cells[0] if cells else None
+        player_link = player_el.find("a", href=True) if player_el else None
+        player_id = ""
+        if player_link:
+            player_id = _parse_player_id_from_href(player_link["href"])
         batter = player_el.get_text("", strip=True) if player_el else ""
         batter = re.sub(r"\s*[（(][左右][）)]\s*", "", batter).strip()
         batter_side = ""
@@ -1533,10 +1543,205 @@ def _parse_home_run_events(tbl) -> list[dict[str, str]]:
             events.append(
                 {
                     "打者": batter,
+                    "player_id": player_id,
                     "左右打": batter_side,
                     "方向": direction,
                 }
             )
+    return events
+
+
+def _parse_player_bat_hand(html: str) -> str:
+    soup = bs(html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+    match = re.search(r"投打\s*[右左両]投([右左両])打", text)
+    if not match:
+        match = re.search(r"[右左両]投([右左両])打", text)
+    if not match:
+        return ""
+    side = match.group(1)
+    return "兩打" if side == "両" else f"{side}打"
+
+
+async def _player_bat_hand(player_id: str, session: aiohttp.ClientSession) -> str:
+    if not player_id:
+        return ""
+    if player_id in _PLAYER_BAT_HAND_CACHE:
+        return _PLAYER_BAT_HAND_CACHE[player_id]
+    html = await _fetch_once(session, f"{BASE_URL}player/{player_id}/top")
+    hand = _parse_player_bat_hand(html or "")
+    _PLAYER_BAT_HAND_CACHE[player_id] = hand
+    return hand
+
+
+async def _enrich_home_run_batter_hands(
+    events: list[dict[str, str]], session: aiohttp.ClientSession
+) -> list[dict[str, str]]:
+    player_ids = sorted(
+        {
+            event.get("player_id", "")
+            for event in events
+            if event.get("player_id") and not event.get("左右打")
+        }
+    )
+    if player_ids:
+        hands = await asyncio.gather(
+            *[_player_bat_hand(player_id, session) for player_id in player_ids],
+            return_exceptions=True,
+        )
+        for player_id, hand in zip(player_ids, hands):
+            if isinstance(hand, Exception):
+                _PLAYER_BAT_HAND_CACHE[player_id] = ""
+    for event in events:
+        if not event.get("左右打"):
+            event["左右打"] = _PLAYER_BAT_HAND_CACHE.get(event.get("player_id", ""), "")
+        event.pop("player_id", None)
+    return events
+
+
+def _parse_player_id_from_href(href: str) -> str:
+    match = re.search(r"/npb/player/([^/]+)/", href or "")
+    return match.group(1) if match else ""
+
+
+def _pitcher_name_aliases(name: str) -> set[str]:
+    clean = re.sub(r"\s+", " ", str(name or "").strip())
+    compact = clean.replace(" ", "")
+    aliases = {clean, compact}
+    parts = clean.split(" ")
+    if parts:
+        aliases.add(parts[0])
+    if len(parts) >= 2 and parts[1]:
+        aliases.add(f"{parts[0]}{parts[1][0]}")
+    return {alias for alias in aliases if alias}
+
+
+def _parse_pitcher_name_lookup(soup) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    conflicts: set[str] = set()
+    for score_tbl in soup.find_all(class_="bb-scoreTable"):
+        for row in score_tbl.find_all(class_="bb-scoreTable__row"):
+            player_el = row.find(class_="bb-scoreTable__data--player")
+            if not player_el:
+                continue
+            full_name = player_el.get_text(" ", strip=True)
+            for alias in _pitcher_name_aliases(full_name):
+                if alias in lookup and lookup[alias] != full_name:
+                    conflicts.add(alias)
+                else:
+                    lookup[alias] = full_name
+    for alias in conflicts:
+        lookup.pop(alias, None)
+    return lookup
+
+
+def _resolve_pitcher_name(name: str, lookup: dict[str, str] | None = None) -> str:
+    clean = str(name or "").strip()
+    if not clean or not lookup:
+        return clean
+    if clean in lookup:
+        return lookup[clean]
+    compact = clean.replace(" ", "")
+    matches = {
+        full_name
+        for full_name in lookup.values()
+        if full_name.replace(" ", "").startswith(compact)
+    }
+    if len(matches) == 1:
+        return next(iter(matches))
+    return clean
+
+
+def _parse_home_run_pitcher_events(
+    html: str,
+    *,
+    away_raw: str,
+    home_raw: str,
+    away_starter: str,
+    home_starter: str,
+    pitcher_name_lookup: dict[str, str] | None = None,
+) -> dict[str, list[dict[str, str]]]:
+    soup = bs(html, "html.parser")
+    current_pitcher = {
+        "away": _resolve_pitcher_name(away_starter, pitcher_name_lookup),
+        "home": _resolve_pitcher_name(home_starter, pitcher_name_lookup),
+    }
+    result = {"away": [], "home": []}
+
+    for section in soup.find_all("section", class_="bb-liveText"):
+        inning_el = section.find(class_="bb-liveText__inning")
+        detail_el = section.find(class_="bb-liveText__detail")
+        if not inning_el or not detail_el:
+            continue
+        inning_text = inning_el.get_text("", strip=True)
+        detail_text = detail_el.get_text("", strip=True)
+        if "回表" in inning_text:
+            side = "away"
+            pitching_side = "home"
+        elif "回裏" in inning_text:
+            side = "home"
+            pitching_side = "away"
+        else:
+            continue
+        if away_raw not in detail_text and home_raw not in detail_text:
+            continue
+
+        for item in section.find_all("li", class_="bb-liveText__item"):
+            batter_el = item.find(class_="bb-liveText__batter")
+            batter_link = batter_el.find("a", href=True) if batter_el else None
+            batter = batter_link.get_text("", strip=True) if batter_link else ""
+            player_id = (
+                _parse_player_id_from_href(batter_link["href"]) if batter_link else ""
+            )
+            summaries = item.find_all(class_="bb-liveText__summary")
+            summary_texts = [s.get_text(" ", strip=True) for s in summaries]
+            for summary in summaries:
+                text = summary.get_text(" ", strip=True)
+                change = re.search(r"投手交代:\s*([^\s]+)\s*→\s*([^\s]+)", text)
+                if change:
+                    current_pitcher[pitching_side] = _resolve_pitcher_name(
+                        change.group(2), pitcher_name_lookup
+                    )
+                    continue
+                mound_change = re.search(
+                    r"ピッチャー\s*([^\s]+)\s*に代わって\s*([^\s]+)\s*がマウンド",
+                    text,
+                )
+                if mound_change:
+                    current_pitcher[pitching_side] = _resolve_pitcher_name(
+                        mound_change.group(2), pitcher_name_lookup
+                    )
+
+            if any("ホームラン" in text for text in summary_texts):
+                result[side].append(
+                    {
+                        "打者": batter,
+                        "player_id": player_id,
+                        "投手": current_pitcher[pitching_side],
+                    }
+                )
+
+    return result
+
+
+def _enrich_home_run_pitchers(
+    events: list[dict[str, str]], pitcher_events: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    used = set()
+    for event in events:
+        for idx, pitcher_event in enumerate(pitcher_events):
+            if idx in used:
+                continue
+            same_player = event.get("player_id") and event.get(
+                "player_id"
+            ) == pitcher_event.get("player_id")
+            same_name = event.get("打者") and event.get("打者") == pitcher_event.get(
+                "打者"
+            )
+            if same_player or same_name:
+                event["投手"] = pitcher_event.get("投手", "")
+                used.add(idx)
+                break
     return events
 
 
@@ -2151,6 +2356,24 @@ async def get_schedule_game_data(
     home_bat = _parse_batting_table(bat_tables[1]) if len(bat_tables) > 1 else [0] * 16
     away_homers = _parse_home_run_events(bat_tables[0]) if len(bat_tables) > 0 else []
     home_homers = _parse_home_run_events(bat_tables[1]) if len(bat_tables) > 1 else []
+    if away_homers or home_homers:
+        pitcher_name_lookup = _parse_pitcher_name_lookup(soup)
+        text_html = await fetch(session, f"{BASE_URL}game/{game_id}/text")
+        if text_html:
+            pitcher_events = _parse_home_run_pitcher_events(
+                text_html,
+                away_raw=away_raw,
+                home_raw=home_raw,
+                away_starter=away_starter,
+                home_starter=home_starter,
+                pitcher_name_lookup=pitcher_name_lookup,
+            )
+            _enrich_home_run_pitchers(away_homers, pitcher_events["away"])
+            _enrich_home_run_pitchers(home_homers, pitcher_events["home"])
+    await asyncio.gather(
+        _enrich_home_run_batter_hands(away_homers, session),
+        _enrich_home_run_batter_hands(home_homers, session),
+    )
     # Batting table doesn't expose fielding errors; use scoreboard totals (same as col X/AM)
     away_bat[15] = away_e
     home_bat[15] = home_e

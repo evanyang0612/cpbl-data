@@ -1158,6 +1158,13 @@ class NpbLeagueSheetService(NpbModuleService):
                 continue
         raise ValueError(f"Unsupported game date: {value}")
 
+    @classmethod
+    def display_game_date(cls, value: str) -> str:
+        date = cls.parse_game_date(value)
+        if platform.system() == "Windows":
+            return date.strftime("%#m/%#d")
+        return date.strftime("%-m/%-d")
+
     def display_field_name(self, venue: str) -> str:
         module = self.module
         field = module.NPB_FIELDS.get(venue, venue)
@@ -1189,8 +1196,7 @@ class NpbLeagueSheetService(NpbModuleService):
     def rate_text(value: float | None) -> str:
         if value is None:
             return ""
-        text = f"{value:.3f}"
-        return text[1:] if text.startswith("0") else text
+        return f"{value:.3f}"
 
     @staticmethod
     def aggregate_batting_average(game_list: list[dict]) -> float | None:
@@ -1221,16 +1227,19 @@ class NpbLeagueSheetService(NpbModuleService):
         events = []
         for game in sorted_games:
             for event in game.get("全壘打明細", []):
+                event_date = event.get("日期") or game.get("日期", "")
                 events.append(
                     [
                         "",
-                        event.get("日期", game.get("日期", "")),
+                        self.display_game_date(event_date) if event_date else "",
                         event.get("打者", ""),
                         event.get("左右打", ""),
                         event.get("方向", ""),
+                        event.get("投手", ""),
+                        "",
                         event.get("對戰球隊", game.get("對戰球隊", "")),
                     ]
-                    + [""] * 8
+                    + [""] * 6
                 )
         rows = [
             [
@@ -1239,9 +1248,11 @@ class NpbLeagueSheetService(NpbModuleService):
                 "打 者",
                 "左 右",
                 "方 向",
+                "投 手",
+                "",
                 "對 戰",
             ]
-            + [""] * 8
+            + [""] * 6
         ]
         if events:
             rows.extend(events[:8])
@@ -1280,14 +1291,8 @@ class NpbLeagueSheetService(NpbModuleService):
         for i in range(module.GAMES_COUNT):
             if i < len(sorted_games):
                 g = sorted_games[i]
-                date = self.parse_game_date(g["日期"])
-                date_str = (
-                    date.strftime("%#m/%#d")
-                    if platform.system() == "Windows"
-                    else date.strftime("%-m/%-d")
-                )
                 row = [
-                    date_str,
+                    self.display_game_date(g["日期"]),
                     g.get("對戰球隊", ""),
                     g.get("對戰先發", ""),
                     self.display_field_name(g.get("球場", "")),
@@ -1427,6 +1432,21 @@ class NpbLeagueSheetService(NpbModuleService):
         obp_col = col_start + 12
         requests = []
 
+        def rate_colors(game_list: list[dict]) -> tuple[str, str]:
+            batting_avg = self.aggregate_batting_average(game_list)
+            obp = self.aggregate_on_base_percentage(game_list)
+            avg_color = module.DEFAULT_FONT
+            obp_color = module.DEFAULT_FONT
+            if batting_avg is not None and batting_avg >= module.HOT_AVG_THRESHOLD:
+                avg_color = module.HOT_RATE_FONT
+            elif batting_avg is not None and batting_avg <= module.COLD_AVG_THRESHOLD:
+                avg_color = module.COLD_RATE_FONT
+            if obp is not None and obp >= module.HOT_OBP_THRESHOLD:
+                obp_color = module.HOT_RATE_FONT
+            elif obp is not None and obp <= module.COLD_OBP_THRESHOLD:
+                obp_color = module.COLD_RATE_FONT
+            return avg_color, obp_color
+
         for i in range(module.GAMES_COUNT):
             row_0idx = game_start_row - 1 + i
             runs_color = module.DEFAULT_FONT
@@ -1455,9 +1475,15 @@ class NpbLeagueSheetService(NpbModuleService):
                 if hits is not None and hits >= 10:
                     hits_color = module.HITS_10_PLUS_FONT
                 if batting_avg is not None and batting_avg >= module.HOT_AVG_THRESHOLD:
-                    avg_color = module.HOT_AVG_FONT
+                    avg_color = module.HOT_RATE_FONT
+                elif (
+                    batting_avg is not None and batting_avg <= module.COLD_AVG_THRESHOLD
+                ):
+                    avg_color = module.COLD_RATE_FONT
                 if obp is not None and obp >= module.HOT_OBP_THRESHOLD:
-                    obp_color = module.HOT_OBP_FONT
+                    obp_color = module.HOT_RATE_FONT
+                elif obp is not None and obp <= module.COLD_OBP_THRESHOLD:
+                    obp_color = module.COLD_RATE_FONT
 
             requests.append(
                 self.font_color_request(sheet_id, row_0idx, runs_col, runs_color)
@@ -1475,7 +1501,46 @@ class NpbLeagueSheetService(NpbModuleService):
                 self.font_color_request(sheet_id, row_0idx, obp_col, obp_color)
             )
 
+        for row_offset, avg_games in (
+            (module.GAMES_COUNT, sorted_games),
+            (module.GAMES_COUNT + 1, sorted_games[-5:]),
+        ):
+            row_0idx = game_start_row - 1 + row_offset
+            avg_color, obp_color = rate_colors(avg_games)
+            requests.append(
+                self.font_color_request(sheet_id, row_0idx, avg_col, avg_color)
+            )
+            requests.append(
+                self.font_color_request(sheet_id, row_0idx, obp_col, obp_color)
+            )
+
         return requests
+
+    def rate_number_format_request(
+        self, sheet_id: int, start_row: int, end_row: int, col_start: int
+    ) -> dict:
+        avg_col = col_start + 11
+        obp_col = col_start + 12
+        return {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": start_row - 1,
+                    "endRowIndex": end_row,
+                    "startColumnIndex": avg_col,
+                    "endColumnIndex": obp_col + 1,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {
+                            "type": "NUMBER",
+                            "pattern": "0.000",
+                        }
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        }
 
     def header_format_request(
         self, sheet_id: int, team_key: str, header_row: int, col_start: int
@@ -1494,14 +1559,118 @@ class NpbLeagueSheetService(NpbModuleService):
                     "userEnteredFormat": {
                         "backgroundColor": self.hex_to_rgb(info["fill"]),
                         "textFormat": {
-                            "bold": True,
                             "foregroundColor": self.hex_to_rgb(info["font"]),
                         },
                     }
                 },
-                "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                "fields": (
+                    "userEnteredFormat.backgroundColor,"
+                    "userEnteredFormat.textFormat.foregroundColor"
+                ),
             }
         }
+
+    @staticmethod
+    def conditional_format_delete_requests(spreadsheet, sheet_id: int) -> list[dict]:
+        metadata = spreadsheet.fetch_sheet_metadata(
+            params={"fields": "sheets(properties(sheetId),conditionalFormats)"}
+        )
+        rule_count = 0
+        for sheet_meta in metadata.get("sheets", []):
+            if sheet_meta.get("properties", {}).get("sheetId") == sheet_id:
+                rule_count = len(sheet_meta.get("conditionalFormats", []))
+                break
+        return [
+            {
+                "deleteConditionalFormatRule": {
+                    "sheetId": sheet_id,
+                    "index": index,
+                }
+            }
+            for index in range(rule_count - 1, -1, -1)
+        ]
+
+    def layout_clear_range(self) -> str:
+        module = self.module
+        start_col = min(module.BLOCK_COLS)
+        end_col = max(module.BLOCK_COLS) + 13
+        return (
+            f"{self.col_to_letter(start_col)}{module.TOP_HEADER_ROW}:"
+            f"{self.col_to_letter(end_col)}{module.BOTTOM_HR_END_ROW}"
+        )
+
+    def layout_format_clear_request(self, sheet_id: int) -> dict:
+        module = self.module
+        start_col = min(module.BLOCK_COLS)
+        end_col = max(module.BLOCK_COLS) + 13
+        return {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": module.TOP_HEADER_ROW - 1,
+                    "endRowIndex": module.BOTTOM_HR_END_ROW,
+                    "startColumnIndex": start_col - 1,
+                    "endColumnIndex": end_col,
+                },
+                "cell": {},
+                "fields": "userEnteredFormat",
+            }
+        }
+
+    def layout_unmerge_request(self, sheet_id: int) -> dict:
+        module = self.module
+        start_col = min(module.BLOCK_COLS)
+        end_col = max(module.BLOCK_COLS) + 13
+        return {
+            "unmergeCells": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": module.TOP_HEADER_ROW - 1,
+                    "endRowIndex": module.BOTTOM_HR_END_ROW,
+                    "startColumnIndex": start_col - 1,
+                    "endColumnIndex": end_col,
+                }
+            }
+        }
+
+    def home_run_pitcher_merge_requests(
+        self, sheet_id: int, start_row: int, end_row: int, col_start: int
+    ) -> list[dict]:
+        pitcher_col_0idx = col_start + 4
+        return [
+            {
+                "mergeCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row - 1,
+                        "endRowIndex": row,
+                        "startColumnIndex": pitcher_col_0idx,
+                        "endColumnIndex": pitcher_col_0idx + 2,
+                    },
+                    "mergeType": "MERGE_ALL",
+                }
+            }
+            for row in range(start_row, end_row + 1)
+        ]
+
+    def home_run_pitcher_unmerge_requests(
+        self, sheet_id: int, start_row: int, end_row: int, col_start: int
+    ) -> list[dict]:
+        pitcher_col_0idx = col_start + 4
+        return [
+            {
+                "unmergeCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row - 1,
+                        "endRowIndex": row,
+                        "startColumnIndex": pitcher_col_0idx,
+                        "endColumnIndex": pitcher_col_0idx + 2,
+                    }
+                }
+            }
+            for row in range(start_row, end_row + 1)
+        ]
 
     def update_league_sheet(
         self,
@@ -1513,6 +1682,7 @@ class NpbLeagueSheetService(NpbModuleService):
         sheet = module.get_worksheet(sheet_name)
         value_updates = []
         format_requests = []
+        unmerge_requests = []
 
         for col_idx, (away_key, home_key) in enumerate(matchups[:3]):
             col_start = module.BLOCK_COLS[col_idx]
@@ -1560,6 +1730,27 @@ class NpbLeagueSheetService(NpbModuleService):
                     sheet.id, away_games, module.TOP_GAME_START, col_start
                 )
             )
+            format_requests.append(
+                self.rate_number_format_request(
+                    sheet.id, module.TOP_GAME_START, module.TOP_AVG5_ROW, col_start
+                )
+            )
+            format_requests.extend(
+                self.home_run_pitcher_merge_requests(
+                    sheet.id,
+                    module.TOP_HR_HEADER_ROW,
+                    module.TOP_HR_END_ROW,
+                    col_start,
+                )
+            )
+            unmerge_requests.extend(
+                self.home_run_pitcher_unmerge_requests(
+                    sheet.id,
+                    module.TOP_HR_HEADER_ROW,
+                    module.TOP_HR_END_ROW,
+                    col_start,
+                )
+            )
 
             home_games = all_games.get(home_key, [])
             bottom_values = self.build_block_values(home_key, home_games)
@@ -1601,8 +1792,34 @@ class NpbLeagueSheetService(NpbModuleService):
                     sheet.id, home_games, module.BOTTOM_GAME_START, col_start
                 )
             )
+            format_requests.append(
+                self.rate_number_format_request(
+                    sheet.id,
+                    module.BOTTOM_GAME_START,
+                    module.BOTTOM_AVG5_ROW,
+                    col_start,
+                )
+            )
+            format_requests.extend(
+                self.home_run_pitcher_merge_requests(
+                    sheet.id,
+                    module.BOTTOM_HR_HEADER_ROW,
+                    module.BOTTOM_HR_END_ROW,
+                    col_start,
+                )
+            )
+            unmerge_requests.extend(
+                self.home_run_pitcher_unmerge_requests(
+                    sheet.id,
+                    module.BOTTOM_HR_HEADER_ROW,
+                    module.BOTTOM_HR_END_ROW,
+                    col_start,
+                )
+            )
 
-        sheet.batch_update(value_updates, value_input_option="USER_ENTERED")
+        sheet.spreadsheet.batch_update({"requests": unmerge_requests})
+        sheet.batch_clear([self.layout_clear_range()])
+        sheet.batch_update(value_updates, value_input_option="RAW")
         sheet.spreadsheet.batch_update({"requests": format_requests})
         print(
             f"[{sheet_name}] Updated {len(value_updates)} "
@@ -1888,6 +2105,20 @@ class NpbRecentGamesService:
                         game_list.append(cached[team_name])
                 all_games[team_key] = game_list
                 print(f"  {team_key}: {len(game_list)} games with data")
+
+            missing_ids = [
+                team_key for team_key, ids in all_game_ids.items() if not ids
+            ]
+            missing_data = [
+                team_key for team_key, game_list in all_games.items() if not game_list
+            ]
+            if missing_ids or missing_data:
+                errors.append(
+                    f"update_league_sheet({target_sheet_name}): skipped write "
+                    f"because recent game data was incomplete; "
+                    f"missing_ids={missing_ids}, missing_data={missing_data}"
+                )
+                continue
 
             try:
                 league_sheet_service.update_league_sheet(
