@@ -31,10 +31,10 @@ WORKSHEET_MAP = {
 STATUS_WORKSHEET_NAME = "CPBL狀態"
 STATUS_HEADERS = ["Date", "KindCode", "GameSno", "Status", "Resolved", "UpdatedAt"]
 NO_GAMES_SENTINEL = "__NO_GAMES__"
+SUSPENDED_STATUS_KEYWORD = "保留"
 TERMINAL_STATUS_KEYWORDS = (
     "延賽",
     "取消",
-    "保留",
     "裁定",
     "沒收",
     "無效",
@@ -173,6 +173,10 @@ def is_terminal_game_status(status: str) -> bool:
 
 def is_non_finished_terminal_status(status: str) -> bool:
     return bool(status) and status != "比賽結束" and is_terminal_game_status(status)
+
+
+def is_suspended_game_status(status: str) -> bool:
+    return bool(status) and SUSPENDED_STATUS_KEYWORD in status.strip()
 
 
 def _extract_game_detail(data, game_sno):
