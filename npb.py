@@ -48,6 +48,7 @@ HITS_10_PLUS_FONT = "e26b0a"
 DEFAULT_FONT = "000000"
 HOT_RATE_FONT = "ff0000"
 COLD_RATE_FONT = "38761d"
+OPPOSITE_FIELD_FONT = "ff0000"
 HOT_AVG_THRESHOLD = 0.280
 COLD_AVG_THRESHOLD = 0.200
 HOT_OBP_THRESHOLD = 0.330
@@ -233,6 +234,7 @@ OFFICIAL_TEAM_CODE_MAP = {
 }
 _OFFICIAL_PLAYBYPLAY_CACHE: dict[str, dict[tuple[str, str, str], str]] = {}
 _PLAYER_BAT_HAND_CACHE: dict[str, str] = {}
+_PLAYER_THROW_HAND_CACHE: dict[str, str] = {}
 
 NPB_FIELDS = {
     "東京ドーム": "東 京",
@@ -1552,6 +1554,10 @@ def _home_run_direction(text: str) -> str:
     if not m:
         return ""
     direction = m.group(1)
+    if direction == "左中":
+        return "左中本"
+    if direction == "右中":
+        return "右中本"
     if "左" in direction:
         return "左本"
     if "右" in direction:
@@ -1621,6 +1627,29 @@ async def _player_bat_hand(player_id: str, session: aiohttp.ClientSession) -> st
     return hand
 
 
+def _parse_player_throw_hand(html: str) -> str:
+    soup = bs(html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+    match = re.search(r"投打\s*([右左両])投[右左両]打", text)
+    if not match:
+        match = re.search(r"([右左両])投[右左両]打", text)
+    if not match:
+        return ""
+    side = match.group(1)
+    return "兩投" if side == "両" else f"{side}投"
+
+
+async def _player_throw_hand(player_id: str, session: aiohttp.ClientSession) -> str:
+    if not player_id:
+        return ""
+    if player_id in _PLAYER_THROW_HAND_CACHE:
+        return _PLAYER_THROW_HAND_CACHE[player_id]
+    html = await _fetch_once(session, f"{BASE_URL}player/{player_id}/top")
+    hand = _parse_player_throw_hand(html or "")
+    _PLAYER_THROW_HAND_CACHE[player_id] = hand
+    return hand
+
+
 async def _enrich_home_run_batter_hands(
     events: list[dict[str, str]], session: aiohttp.ClientSession
 ) -> list[dict[str, str]]:
@@ -1643,6 +1672,48 @@ async def _enrich_home_run_batter_hands(
         if not event.get("左右打"):
             event["左右打"] = _PLAYER_BAT_HAND_CACHE.get(event.get("player_id", ""), "")
         event.pop("player_id", None)
+    return events
+
+
+async def _enrich_switch_hitter_pitcher_throws(
+    events: list[dict[str, str]],
+    pitcher_id_lookup: dict[str, str],
+    session: aiohttp.ClientSession,
+) -> list[dict[str, str]]:
+    """Resolve the throwing hand of the facing pitcher for switch hitters.
+
+    A switch hitter bats opposite the pitcher's throwing hand, so knowing the
+    pitcher's hand is required to tell whether their home run went to the
+    opposite field. Only 兩打 events need this lookup.
+    """
+
+    def _lookup_id(name: str) -> str:
+        return pitcher_id_lookup.get(name) or pitcher_id_lookup.get(
+            name.replace(" ", "")
+        )
+
+    targets = [
+        event for event in events if event.get("左右打") == "兩打" and event.get("投手")
+    ]
+    resolved = {
+        event["投手"]: _lookup_id(event["投手"])
+        for event in targets
+        if _lookup_id(event["投手"])
+    }
+    player_ids = sorted(set(resolved.values()))
+    if player_ids:
+        hands = await asyncio.gather(
+            *[_player_throw_hand(player_id, session) for player_id in player_ids],
+            return_exceptions=True,
+        )
+        for player_id, hand in zip(player_ids, hands):
+            if isinstance(hand, Exception):
+                _PLAYER_THROW_HAND_CACHE[player_id] = ""
+    for event in targets:
+        player_id = resolved.get(event["投手"], "")
+        event["投手投"] = (
+            _PLAYER_THROW_HAND_CACHE.get(player_id, "") if player_id else ""
+        )
     return events
 
 
@@ -1679,6 +1750,26 @@ def _parse_pitcher_name_lookup(soup) -> dict[str, str]:
                     lookup[alias] = full_name
     for alias in conflicts:
         lookup.pop(alias, None)
+    return lookup
+
+
+def _parse_pitcher_id_lookup(soup) -> dict[str, str]:
+    """Map pitcher name aliases to their Yahoo player id from the score tables."""
+    lookup: dict[str, str] = {}
+    for score_tbl in soup.find_all(class_="bb-scoreTable"):
+        for row in score_tbl.find_all(class_="bb-scoreTable__row"):
+            player_el = row.find(class_="bb-scoreTable__data--player")
+            if not player_el:
+                continue
+            link = player_el.find("a", href=True)
+            if not link:
+                continue
+            player_id = _parse_player_id_from_href(link["href"])
+            if not player_id:
+                continue
+            full_name = player_el.get_text(" ", strip=True)
+            for alias in _pitcher_name_aliases(full_name):
+                lookup.setdefault(alias, player_id)
     return lookup
 
 
@@ -2410,8 +2501,10 @@ async def get_schedule_game_data(
     home_bat = _parse_batting_table(bat_tables[1]) if len(bat_tables) > 1 else [0] * 16
     away_homers = _parse_home_run_events(bat_tables[0]) if len(bat_tables) > 0 else []
     home_homers = _parse_home_run_events(bat_tables[1]) if len(bat_tables) > 1 else []
+    pitcher_id_lookup: dict[str, str] = {}
     if away_homers or home_homers:
         pitcher_name_lookup = _parse_pitcher_name_lookup(soup)
+        pitcher_id_lookup = _parse_pitcher_id_lookup(soup)
         text_html = await fetch(session, f"{BASE_URL}game/{game_id}/text")
         if text_html:
             pitcher_events = _parse_home_run_pitcher_events(
@@ -2427,6 +2520,10 @@ async def get_schedule_game_data(
     await asyncio.gather(
         _enrich_home_run_batter_hands(away_homers, session),
         _enrich_home_run_batter_hands(home_homers, session),
+    )
+    await asyncio.gather(
+        _enrich_switch_hitter_pitcher_throws(away_homers, pitcher_id_lookup, session),
+        _enrich_switch_hitter_pitcher_throws(home_homers, pitcher_id_lookup, session),
     )
     # Batting table doesn't expose fielding errors; use scoreboard totals (same as col X/AM)
     away_bat[15] = away_e
@@ -2922,6 +3019,15 @@ def _header_format_request(
     return NpbLeagueSheetService(module=sys.modules[__name__]).header_format_request(
         sheet_id, team_key, header_row, col_start
     )
+
+
+def _home_run_direction_font_requests(
+    sheet_id: int, games: list[dict], hr_header_row: int, col_start: int
+) -> list[dict]:
+    """Colour the 方向 cell red for opposite-field home runs."""
+    return NpbLeagueSheetService(
+        module=sys.modules[__name__]
+    ).home_run_direction_font_requests(sheet_id, games, hr_header_row, col_start)
 
 
 def update_league_sheet(

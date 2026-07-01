@@ -1242,8 +1242,8 @@ class NpbLeagueSheetService(NpbModuleService):
             return None
         return (hits + walks + hbp) / denominator
 
-    def recent_home_run_rows(self, team_key: str, games: list[dict]) -> list[list]:
-        module = self.module
+    def _home_run_events(self, games: list[dict]) -> list[dict]:
+        """Ordered, capped (max 8) home-run events across the last five games."""
         sorted_games = sorted(
             games,
             key=lambda g: self.parse_game_date(g["日期"]),
@@ -1251,20 +1251,56 @@ class NpbLeagueSheetService(NpbModuleService):
         events = []
         for game in sorted_games:
             for event in game.get("全壘打明細", []):
-                event_date = event.get("日期") or game.get("日期", "")
-                events.append(
-                    [
-                        "",
-                        self.display_game_date(event_date) if event_date else "",
-                        event.get("打者", ""),
-                        event.get("左右打", ""),
-                        event.get("方向", ""),
-                        event.get("投手", ""),
-                        "",
-                        event.get("對戰球隊", game.get("對戰球隊", "")),
-                    ]
-                    + [""] * 6
-                )
+                enriched = dict(event)
+                enriched["_日期"] = event.get("日期") or game.get("日期", "")
+                enriched["_對戰"] = event.get("對戰球隊", game.get("對戰球隊", ""))
+                events.append(enriched)
+        return events[:8]
+
+    @staticmethod
+    def _effective_bat_side(side: str, pitcher_throw: str) -> str:
+        """Which batter's box (左/右) was used, or '' if it cannot be told.
+
+        Switch hitters (兩打) bat opposite the pitcher's throwing hand.
+        """
+        side = side or ""
+        if side.startswith("右"):
+            return "右"
+        if side.startswith("左"):
+            return "左"
+        if side.startswith("兩"):
+            if pitcher_throw.startswith("左"):
+                return "右"
+            if pitcher_throw.startswith("右"):
+                return "左"
+        return ""
+
+    @classmethod
+    def _is_opposite_field_home_run(
+        cls, side: str, direction: str, pitcher_throw: str = ""
+    ) -> bool:
+        """A home run to the same side as the batter's box is opposite-field."""
+        stance = cls._effective_bat_side(side, pitcher_throw)
+        if not stance or not direction:
+            return False
+        return direction.startswith(stance)
+
+    def recent_home_run_rows(self, team_key: str, games: list[dict]) -> list[list]:
+        module = self.module
+        events = [
+            [
+                "",
+                self.display_game_date(event["_日期"]) if event["_日期"] else "",
+                event.get("打者", ""),
+                event.get("左右打", ""),
+                event.get("方向", ""),
+                event.get("投手", ""),
+                "",
+                event["_對戰"],
+            ]
+            + [""] * 6
+            for event in self._home_run_events(games)
+        ]
         rows = [
             [
                 module.NPB_TEAMS[team_key]["name"],
@@ -1696,6 +1732,33 @@ class NpbLeagueSheetService(NpbModuleService):
             for row in range(start_row, end_row + 1)
         ]
 
+    def home_run_direction_font_requests(
+        self, sheet_id: int, games: list[dict], hr_header_row: int, col_start: int
+    ) -> list[dict]:
+        """Colour the 方向 cell red for opposite-field home runs.
+
+        Every event row (up to 8) is emitted so stale red from a previous run is
+        reset to the default colour when a slot is no longer opposite-field.
+        """
+        module = self.module
+        direction_col_0idx = col_start + 3
+        events = self._home_run_events(games)
+        requests = []
+        for i in range(8):
+            event = events[i] if i < len(events) else None
+            opposite = bool(event) and self._is_opposite_field_home_run(
+                event.get("左右打", ""),
+                event.get("方向", ""),
+                event.get("投手投", ""),
+            )
+            color = module.OPPOSITE_FIELD_FONT if opposite else module.DEFAULT_FONT
+            requests.append(
+                self.font_color_request(
+                    sheet_id, hr_header_row + i, direction_col_0idx, color
+                )
+            )
+        return requests
+
     def update_league_sheet(
         self,
         sheet_name: str,
@@ -1767,6 +1830,11 @@ class NpbLeagueSheetService(NpbModuleService):
                     col_start,
                 )
             )
+            format_requests.extend(
+                self.home_run_direction_font_requests(
+                    sheet.id, away_games, module.TOP_HR_HEADER_ROW, col_start
+                )
+            )
             unmerge_requests.extend(
                 self.home_run_pitcher_unmerge_requests(
                     sheet.id,
@@ -1830,6 +1898,11 @@ class NpbLeagueSheetService(NpbModuleService):
                     module.BOTTOM_HR_HEADER_ROW,
                     module.BOTTOM_HR_END_ROW,
                     col_start,
+                )
+            )
+            format_requests.extend(
+                self.home_run_direction_font_requests(
+                    sheet.id, home_games, module.BOTTOM_HR_HEADER_ROW, col_start
                 )
             )
             unmerge_requests.extend(

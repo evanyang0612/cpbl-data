@@ -27,10 +27,15 @@ from npb import (
     HITS_10_PLUS_FONT,
     HOT_RATE_FONT,
     COLD_RATE_FONT,
+    OPPOSITE_FIELD_FONT,
     SCORE_LOSS_FONT,
     SCORE_TIE_FONT,
     SCORE_WIN_FONT,
+    _enrich_switch_hitter_pitcher_throws,
     _game_font_color_requests,
+    _home_run_direction_font_requests,
+    _parse_pitcher_id_lookup,
+    _parse_player_throw_hand,
     _get_schedule_opponent,
     _header_format_request,
     _official_next_matchups,
@@ -1860,6 +1865,24 @@ class TestParseHomeRunEvents:
             }
         ]
 
+    def test_parses_center_gap_home_run_directions(self):
+        html = """
+        <table class="bb-statsTable">
+          <tr class="bb-statsTable__row">
+            <td class="bb-statsTable__data bb-statsTable__data--bat">(遊)</td>
+            <td class="bb-statsTable__data bb-statsTable__data--player">
+              <a href="/npb/player/1750321/top">泉口 友汰</a>
+            </td>
+            <td class="bb-statsTable__data bb-statsTable__data--inning">右中本</td>
+            <td class="bb-statsTable__data bb-statsTable__data--inning">左中本</td>
+          </tr>
+        </table>
+        """
+
+        events = _parse_home_run_events(bs(html, "html.parser").find("table"))
+
+        assert [event["方向"] for event in events] == ["右中本", "左中本"]
+
     def test_parses_player_bat_hand_from_profile(self):
         html = """
         <dl>
@@ -2026,6 +2049,147 @@ class TestParseHomeRunEvents:
         lookup = _parse_pitcher_name_lookup(bs(stats_html, "html.parser"))
 
         assert lookup.get("田中") is None
+
+
+class TestParsePlayerThrowHand:
+    def test_parses_right_thrower(self):
+        assert _parse_player_throw_hand("<dl><dd>右投左打</dd></dl>") == "右投"
+
+    def test_parses_left_thrower(self):
+        assert _parse_player_throw_hand("<dl><dd>左投左打</dd></dl>") == "左投"
+
+    def test_parses_switch_thrower(self):
+        assert _parse_player_throw_hand("<dl><dd>両投両打</dd></dl>") == "兩投"
+
+    def test_returns_empty_when_absent(self):
+        assert _parse_player_throw_hand("<dl><dd>身長</dd></dl>") == ""
+
+
+class TestParsePitcherIdLookup:
+    def test_maps_pitcher_name_aliases_to_player_id(self):
+        html = """
+        <table class="bb-scoreTable">
+          <tr class="bb-scoreTable__row">
+            <td class="bb-scoreTable__data--player">
+              <a href="/npb/player/1900123/top">齋藤 綱記</a>
+            </td>
+          </tr>
+        </table>
+        """
+
+        lookup = _parse_pitcher_id_lookup(bs(html, "html.parser"))
+
+        assert lookup["齋藤 綱記"] == "1900123"
+        assert lookup["齋藤綱記"] == "1900123"
+
+    def test_skips_rows_without_links(self):
+        html = """
+        <table class="bb-scoreTable">
+          <tr class="bb-scoreTable__row">
+            <td class="bb-scoreTable__data--player">齋藤 綱記</td>
+          </tr>
+        </table>
+        """
+
+        assert _parse_pitcher_id_lookup(bs(html, "html.parser")) == {}
+
+
+class TestEnrichSwitchHitterPitcherThrows:
+    def test_resolves_pitcher_throw_hand_for_switch_hitters_only(self):
+        npb._PLAYER_THROW_HAND_CACHE["1900123"] = "左投"
+        events = [
+            {"打者": "ヒュンメル", "左右打": "兩打", "投手": "齋藤 綱記"},
+            {"打者": "泉口 友汰", "左右打": "右打", "投手": "柳"},
+        ]
+
+        asyncio.run(
+            _enrich_switch_hitter_pitcher_throws(
+                events, {"齋藤 綱記": "1900123"}, session=None
+            )
+        )
+
+        assert events[0]["投手投"] == "左投"
+        assert "投手投" not in events[1]
+
+    def test_leaves_throw_empty_when_pitcher_id_missing(self):
+        events = [{"打者": "ヒュンメル", "左右打": "兩打", "投手": "謎の投手"}]
+
+        asyncio.run(_enrich_switch_hitter_pitcher_throws(events, {}, session=None))
+
+        assert events[0]["投手投"] == ""
+
+
+class TestHomeRunDirectionFontRequests:
+    @staticmethod
+    def _color(request: dict) -> dict:
+        return request["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"][
+            "foregroundColor"
+        ]
+
+    def _requests_for(self, events: list[dict]) -> list[dict]:
+        game = {
+            "日期": "2026/06/21",
+            "全壘打明細": [{"日期": "2026/06/21", **e} for e in events],
+        }
+        return _home_run_direction_font_requests(1, [game], 30, 2)
+
+    def test_marks_opposite_field_home_runs_red(self):
+        events = [
+            {"打者": "A", "左右打": "右打", "方向": "右本"},  # opposite → red
+            {"打者": "B", "左右打": "右打", "方向": "右中本"},  # opposite → red
+            {"打者": "C", "左右打": "右打", "方向": "左本"},  # pull → default
+            {"打者": "D", "左右打": "左打", "方向": "左本"},  # opposite → red
+            {"打者": "E", "左右打": "左打", "方向": "左中本"},  # opposite → red
+            {"打者": "F", "左右打": "左打", "方向": "右本"},  # pull → default
+            {"打者": "G", "左右打": "右打", "方向": "中本"},  # center → default
+        ]
+
+        requests = self._requests_for(events)
+        red = NpbLeagueSheetService.hex_to_rgb(OPPOSITE_FIELD_FONT)
+        default = NpbLeagueSheetService.hex_to_rgb(DEFAULT_FONT)
+
+        assert [self._color(r) for r in requests[:7]] == [
+            red,
+            red,
+            default,
+            red,
+            red,
+            default,
+            default,
+        ]
+
+    def test_targets_direction_column_and_event_rows(self):
+        requests = self._requests_for([{"打者": "A", "左右打": "右打", "方向": "右本"}])
+
+        assert len(requests) == 8  # all slots emitted so stale red is reset
+        first = requests[0]["repeatCell"]["range"]
+        assert first["startColumnIndex"] == 5  # 方向 → col_start(2) + 3
+        assert first["startRowIndex"] == 30
+        assert requests[1]["repeatCell"]["range"]["startRowIndex"] == 31
+
+    def test_switch_hitter_uses_pitcher_throwing_hand(self):
+        events = [
+            # vs left pitcher → bats right → 右 is opposite field → red
+            {"打者": "S1", "左右打": "兩打", "方向": "右本", "投手投": "左投"},
+            {"打者": "S2", "左右打": "兩打", "方向": "左本", "投手投": "左投"},
+            # vs right pitcher → bats left → 左 is opposite field → red
+            {"打者": "S3", "左右打": "兩打", "方向": "左本", "投手投": "右投"},
+            {"打者": "S4", "左右打": "兩打", "方向": "右本", "投手投": "右投"},
+            # unknown pitcher hand → cannot decide → default
+            {"打者": "S5", "左右打": "兩打", "方向": "右本", "投手投": ""},
+        ]
+
+        requests = self._requests_for(events)
+        red = NpbLeagueSheetService.hex_to_rgb(OPPOSITE_FIELD_FONT)
+        default = NpbLeagueSheetService.hex_to_rgb(DEFAULT_FONT)
+
+        assert [self._color(r) for r in requests[:5]] == [
+            red,
+            default,
+            red,
+            default,
+            default,
+        ]
 
 
 # ---------------------------------------------------------------------------
