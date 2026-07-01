@@ -386,6 +386,8 @@ def _make_game(
     hr,
     ab=None,
     sf=0,
+    doubles=0,
+    triples=0,
 ):
     game = {
         "日期": date,
@@ -401,6 +403,7 @@ def _make_game(
         "四球": bb,
         "死球": hbp,
         "全壘打": hr,
+        "長打": doubles + triples + hr,
     }
     if ab is not None:
         game["打數"] = ab
@@ -1330,6 +1333,33 @@ class TestBuildBlockValues:
         rows = build_block_values("巨人", SAMPLE_GAMES)
         assert rows[1][10] == 3  # bb+hbp
 
+    def test_header_uses_long_hits_label(self):
+        rows = build_block_values("巨人", SAMPLE_GAMES)
+        assert rows[0][11] == "長 打"
+
+    def test_long_hits_column_sums_doubles_triples_homers(self):
+        # 2 doubles + 1 triple + 3 HR → col index 11 = 6
+        game = _make_game(
+            "2025/04/01",
+            "燕 子",
+            "投手",
+            "東 京",
+            0,
+            4,
+            3,
+            0,
+            9,
+            0,
+            0,
+            0,
+            3,
+            ab=30,
+            doubles=2,
+            triples=1,
+        )
+        rows = build_block_values("巨人", [game])
+        assert rows[1][11] == 6
+
     def test_game_rows_include_avg_and_obp(self):
         game = _make_game(
             "2025/04/01",
@@ -2226,7 +2256,8 @@ class TestGameFontColorRequests:
         reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
         assert self._foreground_hex(reqs[2]) == DEFAULT_FONT
 
-    def test_batting_average_250_or_more_colours_red(self):
+    def test_batting_average_280_or_more_colours_red(self):
+        # 6 hits / 20 AB = .300 ≥ .280
         game = _make_game(
             "2025/04/01",
             "燕 子",
@@ -2236,7 +2267,7 @@ class TestGameFontColorRequests:
             4,
             4,
             0,
-            5,
+            6,
             0,
             0,
             0,
@@ -2246,7 +2277,8 @@ class TestGameFontColorRequests:
         reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
         assert self._foreground_hex(reqs[3]) == HOT_RATE_FONT
 
-    def test_batting_average_150_or_less_colours_green(self):
+    def test_batting_average_200_or_less_colours_green(self):
+        # 4 hits / 20 AB = .200 ≤ .200
         game = _make_game(
             "2025/04/01",
             "燕 子",
@@ -2256,7 +2288,7 @@ class TestGameFontColorRequests:
             4,
             4,
             0,
-            3,
+            4,
             0,
             0,
             0,
@@ -2266,7 +2298,8 @@ class TestGameFontColorRequests:
         reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
         assert self._foreground_hex(reqs[3]) == COLD_RATE_FONT
 
-    def test_on_base_percentage_300_or_more_colours_red(self):
+    def test_on_base_percentage_330_or_more_colours_red(self):
+        # (5 H + 4 BB) / (20 AB + 4 BB) = 9/24 = .375 ≥ .330
         game = _make_game(
             "2025/04/01",
             "燕 子",
@@ -2278,7 +2311,7 @@ class TestGameFontColorRequests:
             0,
             5,
             0,
-            2,
+            4,
             0,
             0,
             ab=20,
@@ -2286,7 +2319,8 @@ class TestGameFontColorRequests:
         reqs = _game_font_color_requests(0, [game], game_start_row=4, col_start=2)
         assert self._foreground_hex(reqs[4]) == HOT_RATE_FONT
 
-    def test_on_base_percentage_200_or_less_colours_green(self):
+    def test_on_base_percentage_250_or_less_colours_green(self):
+        # (4 H + 1 BB) / (20 AB + 1 BB + 1 SF) = 5/22 = .227 ≤ .250
         game = _make_game(
             "2025/04/01",
             "燕 子",
@@ -2296,7 +2330,7 @@ class TestGameFontColorRequests:
             4,
             4,
             0,
-            3,
+            4,
             0,
             1,
             0,
@@ -2308,6 +2342,7 @@ class TestGameFontColorRequests:
         assert self._foreground_hex(reqs[4]) == COLD_RATE_FONT
 
     def test_average_rows_apply_rate_colours(self):
+        # avg = 6/20 = .300 ≥ .280; obp = (6+3)/(20+3) = .391 ≥ .330
         games = [
             _make_game(
                 "2025/04/01",
@@ -2318,9 +2353,9 @@ class TestGameFontColorRequests:
                 4,
                 3,
                 0,
-                5,
+                6,
                 0,
-                2,
+                3,
                 0,
                 0,
                 ab=20,

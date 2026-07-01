@@ -1277,7 +1277,7 @@ class NpbLeagueSheetService(NpbModuleService):
             "安 打",
             "三 振",
             "四 死",
-            "本 打",
+            "長 打",
             "打 率",
             "上 率",
         ]
@@ -1303,7 +1303,7 @@ class NpbLeagueSheetService(NpbModuleService):
                     g.get("安打", 0),
                     g.get("三振", 0),
                     g.get("四球", 0) + g.get("死球", 0),
-                    g.get("全壘打", 0),
+                    g.get("長打", 0),
                     self.rate_text(self.batting_average(g)),
                     self.rate_text(self.on_base_percentage(g)),
                 ]
@@ -1336,7 +1336,7 @@ class NpbLeagueSheetService(NpbModuleService):
             r(sum(g.get("安打", 0) for g in game_list)),
             r(sum(g.get("三振", 0) for g in game_list)),
             r(sum(g.get("四球", 0) + g.get("死球", 0) for g in game_list)),
-            r(sum(g.get("全壘打", 0) for g in game_list)),
+            r(sum(g.get("長打", 0) for g in game_list)),
             NpbLeagueSheetService.rate_text(
                 NpbLeagueSheetService.aggregate_batting_average(game_list)
             ),
@@ -1958,6 +1958,9 @@ class NpbRecentGamesService:
             "四球": own_batting[8],
             "死球": own_batting[9],
             "全壘打": own_batting[6],
+            "長打": int(own_batting[4] or 0)
+            + int(own_batting[5] or 0)
+            + int(own_batting[6] or 0),
             "打數": own_batting[0],
             "犧飛": own_batting[12],
             "全壘打明細": [
