@@ -1173,10 +1173,118 @@ class NpbLeagueSheetService(NpbModuleService):
             result = chr(65 + rem) + result
         return result
 
+    @staticmethod
+    def parse_game_date(value: str) -> datetime:
+        for fmt in ("%Y/%m/%d", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+        raise ValueError(f"Unsupported game date: {value}")
+
+    @classmethod
+    def display_game_date(cls, value: str) -> str:
+        date = cls.parse_game_date(value)
+        if platform.system() == "Windows":
+            return date.strftime("%#m/%#d")
+        return date.strftime("%-m/%-d")
+
     def display_field_name(self, venue: str) -> str:
         module = self.module
         field = module.NPB_FIELDS.get(venue, venue)
         return f"{field[0]} {field[1]}" if len(field) == 2 else field
+
+    @staticmethod
+    def batting_average(game: dict) -> float | None:
+        at_bats = NpbLeagueSheetService.to_number(game.get("打數"))
+        hits = NpbLeagueSheetService.to_number(game.get("安打"))
+        if not at_bats or hits is None:
+            return None
+        return hits / at_bats
+
+    @staticmethod
+    def on_base_percentage(game: dict) -> float | None:
+        hits = NpbLeagueSheetService.to_number(game.get("安打"))
+        walks = NpbLeagueSheetService.to_number(game.get("四球")) or 0
+        hbp = NpbLeagueSheetService.to_number(game.get("死球")) or 0
+        at_bats = NpbLeagueSheetService.to_number(game.get("打數"))
+        sacrifice_flies = NpbLeagueSheetService.to_number(game.get("犧飛")) or 0
+        if hits is None or at_bats is None:
+            return None
+        denominator = at_bats + walks + hbp + sacrifice_flies
+        if not denominator:
+            return None
+        return (hits + walks + hbp) / denominator
+
+    @staticmethod
+    def rate_text(value: float | None) -> str:
+        if value is None:
+            return ""
+        return f"{value:.3f}"
+
+    @staticmethod
+    def aggregate_batting_average(game_list: list[dict]) -> float | None:
+        at_bats = sum(int(g.get("打數") or 0) for g in game_list)
+        hits = sum(int(g.get("安打") or 0) for g in game_list)
+        if not at_bats:
+            return None
+        return hits / at_bats
+
+    @staticmethod
+    def aggregate_on_base_percentage(game_list: list[dict]) -> float | None:
+        hits = sum(int(g.get("安打") or 0) for g in game_list)
+        walks = sum(int(g.get("四球") or 0) for g in game_list)
+        hbp = sum(int(g.get("死球") or 0) for g in game_list)
+        at_bats = sum(int(g.get("打數") or 0) for g in game_list)
+        sacrifice_flies = sum(int(g.get("犧飛") or 0) for g in game_list)
+        denominator = at_bats + walks + hbp + sacrifice_flies
+        if not denominator:
+            return None
+        return (hits + walks + hbp) / denominator
+
+    def recent_home_run_rows(self, team_key: str, games: list[dict]) -> list[list]:
+        module = self.module
+        sorted_games = sorted(
+            games,
+            key=lambda g: self.parse_game_date(g["日期"]),
+        )[-5:]
+        events = []
+        for game in sorted_games:
+            for event in game.get("全壘打明細", []):
+                event_date = event.get("日期") or game.get("日期", "")
+                events.append(
+                    [
+                        "",
+                        self.display_game_date(event_date) if event_date else "",
+                        event.get("打者", ""),
+                        event.get("左右打", ""),
+                        event.get("方向", ""),
+                        event.get("投手", ""),
+                        "",
+                        event.get("對戰球隊", game.get("對戰球隊", "")),
+                    ]
+                    + [""] * 6
+                )
+        rows = [
+            [
+                module.NPB_TEAMS[team_key]["name"],
+                "日 期",
+                "打 者",
+                "左 右",
+                "方 向",
+                "投 手",
+                "",
+                "對 戰",
+            ]
+            + [""] * 6
+        ]
+        if events:
+            rows.extend(events[:8])
+        else:
+            rows.append(["", "近五場無全壘打"] + [""] * 12)
+        while len(rows) < 9:
+            rows.append([""] * 14)
+        return rows
 
     def build_block_values(self, team_key: str, games: list[dict]) -> list[list]:
         module = self.module
@@ -1193,26 +1301,22 @@ class NpbLeagueSheetService(NpbModuleService):
             "安 打",
             "三 振",
             "四 死",
-            "本 打",
+            "長 打",
+            "打 率",
+            "上 率",
         ]
 
         sorted_games = sorted(
             games,
-            key=lambda g: datetime.strptime(g["日期"], "%Y/%m/%d"),
+            key=lambda g: self.parse_game_date(g["日期"]),
         )[-module.GAMES_COUNT :]
 
         rows = [header]
         for i in range(module.GAMES_COUNT):
             if i < len(sorted_games):
                 g = sorted_games[i]
-                date = datetime.strptime(g["日期"], "%Y/%m/%d")
-                date_str = (
-                    date.strftime("%#m/%#d")
-                    if platform.system() == "Windows"
-                    else date.strftime("%-m/%-d")
-                )
                 row = [
-                    date_str,
+                    self.display_game_date(g["日期"]),
                     g.get("對戰球隊", ""),
                     g.get("對戰先發", ""),
                     self.display_field_name(g.get("球場", "")),
@@ -1223,10 +1327,12 @@ class NpbLeagueSheetService(NpbModuleService):
                     g.get("安打", 0),
                     g.get("三振", 0),
                     g.get("四球", 0) + g.get("死球", 0),
-                    g.get("全壘打", 0),
+                    g.get("長打", 0),
+                    self.rate_text(self.batting_average(g)),
+                    self.rate_text(self.on_base_percentage(g)),
                 ]
             else:
-                row = [""] * 12
+                row = [""] * 14
             rows.append(row)
 
         rows.append(self.avg_row("近十場", sorted_games))
@@ -1236,7 +1342,7 @@ class NpbLeagueSheetService(NpbModuleService):
     @staticmethod
     def avg_row(label: str, game_list: list[dict]) -> list:
         if not game_list:
-            return ["", "", label, "平 均"] + [""] * 8
+            return ["", "", label, "平 均"] + [""] * 10
         n = len(game_list)
 
         def r(v):
@@ -1254,7 +1360,13 @@ class NpbLeagueSheetService(NpbModuleService):
             r(sum(g.get("安打", 0) for g in game_list)),
             r(sum(g.get("三振", 0) for g in game_list)),
             r(sum(g.get("四球", 0) + g.get("死球", 0) for g in game_list)),
-            r(sum(g.get("全壘打", 0) for g in game_list)),
+            r(sum(g.get("長打", 0) for g in game_list)),
+            NpbLeagueSheetService.rate_text(
+                NpbLeagueSheetService.aggregate_batting_average(game_list)
+            ),
+            NpbLeagueSheetService.rate_text(
+                NpbLeagueSheetService.aggregate_on_base_percentage(game_list)
+            ),
         ]
 
     @staticmethod
@@ -1270,9 +1382,9 @@ class NpbLeagueSheetService(NpbModuleService):
         self, sheet_id: int, games: list[dict], game_start_row: int, col_start: int
     ) -> list[dict]:
         module = self.module
-        sorted_games = sorted(
-            games, key=lambda g: datetime.strptime(g["日期"], "%Y/%m/%d")
-        )[-module.GAMES_COUNT :]
+        sorted_games = sorted(games, key=lambda g: self.parse_game_date(g["日期"]))[
+            -module.GAMES_COUNT :
+        ]
         pitcher_col = col_start + 1
         requests = []
 
@@ -1334,25 +1446,46 @@ class NpbLeagueSheetService(NpbModuleService):
         self, sheet_id: int, games: list[dict], game_start_row: int, col_start: int
     ) -> list[dict]:
         module = self.module
-        sorted_games = sorted(
-            games, key=lambda g: datetime.strptime(g["日期"], "%Y/%m/%d")
-        )[-module.GAMES_COUNT :]
+        sorted_games = sorted(games, key=lambda g: self.parse_game_date(g["日期"]))[
+            -module.GAMES_COUNT :
+        ]
         runs_col = col_start + 4
         allowed_col = col_start + 5
         hits_col = col_start + 7
+        avg_col = col_start + 11
+        obp_col = col_start + 12
         requests = []
+
+        def rate_colors(game_list: list[dict]) -> tuple[str, str]:
+            batting_avg = self.aggregate_batting_average(game_list)
+            obp = self.aggregate_on_base_percentage(game_list)
+            avg_color = module.DEFAULT_FONT
+            obp_color = module.DEFAULT_FONT
+            if batting_avg is not None and batting_avg >= module.HOT_AVG_THRESHOLD:
+                avg_color = module.HOT_RATE_FONT
+            elif batting_avg is not None and batting_avg <= module.COLD_AVG_THRESHOLD:
+                avg_color = module.COLD_RATE_FONT
+            if obp is not None and obp >= module.HOT_OBP_THRESHOLD:
+                obp_color = module.HOT_RATE_FONT
+            elif obp is not None and obp <= module.COLD_OBP_THRESHOLD:
+                obp_color = module.COLD_RATE_FONT
+            return avg_color, obp_color
 
         for i in range(module.GAMES_COUNT):
             row_0idx = game_start_row - 1 + i
             runs_color = module.DEFAULT_FONT
             allowed_color = module.DEFAULT_FONT
             hits_color = module.DEFAULT_FONT
+            avg_color = module.DEFAULT_FONT
+            obp_color = module.DEFAULT_FONT
 
             if i < len(sorted_games):
                 game = sorted_games[i]
                 runs = self.to_number(game.get("得分"))
                 allowed = self.to_number(game.get("失分"))
                 hits = self.to_number(game.get("安打"))
+                batting_avg = self.batting_average(game)
+                obp = self.on_base_percentage(game)
 
                 if runs is not None and allowed is not None:
                     if runs > allowed:
@@ -1365,6 +1498,16 @@ class NpbLeagueSheetService(NpbModuleService):
 
                 if hits is not None and hits >= 10:
                     hits_color = module.HITS_10_PLUS_FONT
+                if batting_avg is not None and batting_avg >= module.HOT_AVG_THRESHOLD:
+                    avg_color = module.HOT_RATE_FONT
+                elif (
+                    batting_avg is not None and batting_avg <= module.COLD_AVG_THRESHOLD
+                ):
+                    avg_color = module.COLD_RATE_FONT
+                if obp is not None and obp >= module.HOT_OBP_THRESHOLD:
+                    obp_color = module.HOT_RATE_FONT
+                elif obp is not None and obp <= module.COLD_OBP_THRESHOLD:
+                    obp_color = module.COLD_RATE_FONT
 
             requests.append(
                 self.font_color_request(sheet_id, row_0idx, runs_col, runs_color)
@@ -1375,8 +1518,53 @@ class NpbLeagueSheetService(NpbModuleService):
             requests.append(
                 self.font_color_request(sheet_id, row_0idx, hits_col, hits_color)
             )
+            requests.append(
+                self.font_color_request(sheet_id, row_0idx, avg_col, avg_color)
+            )
+            requests.append(
+                self.font_color_request(sheet_id, row_0idx, obp_col, obp_color)
+            )
+
+        for row_offset, avg_games in (
+            (module.GAMES_COUNT, sorted_games),
+            (module.GAMES_COUNT + 1, sorted_games[-5:]),
+        ):
+            row_0idx = game_start_row - 1 + row_offset
+            avg_color, obp_color = rate_colors(avg_games)
+            requests.append(
+                self.font_color_request(sheet_id, row_0idx, avg_col, avg_color)
+            )
+            requests.append(
+                self.font_color_request(sheet_id, row_0idx, obp_col, obp_color)
+            )
 
         return requests
+
+    def rate_number_format_request(
+        self, sheet_id: int, start_row: int, end_row: int, col_start: int
+    ) -> dict:
+        avg_col = col_start + 11
+        obp_col = col_start + 12
+        return {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": start_row - 1,
+                    "endRowIndex": end_row,
+                    "startColumnIndex": avg_col,
+                    "endColumnIndex": obp_col + 1,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {
+                            "type": "NUMBER",
+                            "pattern": "0.000",
+                        }
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        }
 
     def header_format_request(
         self, sheet_id: int, team_key: str, header_row: int, col_start: int
@@ -1389,20 +1577,124 @@ class NpbLeagueSheetService(NpbModuleService):
                     "startRowIndex": header_row - 1,
                     "endRowIndex": header_row,
                     "startColumnIndex": col_start - 1,
-                    "endColumnIndex": col_start + 11,
+                    "endColumnIndex": col_start + 13,
                 },
                 "cell": {
                     "userEnteredFormat": {
                         "backgroundColor": self.hex_to_rgb(info["fill"]),
                         "textFormat": {
-                            "bold": True,
                             "foregroundColor": self.hex_to_rgb(info["font"]),
                         },
                     }
                 },
-                "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                "fields": (
+                    "userEnteredFormat.backgroundColor,"
+                    "userEnteredFormat.textFormat.foregroundColor"
+                ),
             }
         }
+
+    @staticmethod
+    def conditional_format_delete_requests(spreadsheet, sheet_id: int) -> list[dict]:
+        metadata = spreadsheet.fetch_sheet_metadata(
+            params={"fields": "sheets(properties(sheetId),conditionalFormats)"}
+        )
+        rule_count = 0
+        for sheet_meta in metadata.get("sheets", []):
+            if sheet_meta.get("properties", {}).get("sheetId") == sheet_id:
+                rule_count = len(sheet_meta.get("conditionalFormats", []))
+                break
+        return [
+            {
+                "deleteConditionalFormatRule": {
+                    "sheetId": sheet_id,
+                    "index": index,
+                }
+            }
+            for index in range(rule_count - 1, -1, -1)
+        ]
+
+    def layout_clear_range(self) -> str:
+        module = self.module
+        start_col = min(module.BLOCK_COLS)
+        end_col = max(module.BLOCK_COLS) + 13
+        return (
+            f"{self.col_to_letter(start_col)}{module.TOP_HEADER_ROW}:"
+            f"{self.col_to_letter(end_col)}{module.BOTTOM_HR_END_ROW}"
+        )
+
+    def layout_format_clear_request(self, sheet_id: int) -> dict:
+        module = self.module
+        start_col = min(module.BLOCK_COLS)
+        end_col = max(module.BLOCK_COLS) + 13
+        return {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": module.TOP_HEADER_ROW - 1,
+                    "endRowIndex": module.BOTTOM_HR_END_ROW,
+                    "startColumnIndex": start_col - 1,
+                    "endColumnIndex": end_col,
+                },
+                "cell": {},
+                "fields": "userEnteredFormat",
+            }
+        }
+
+    def layout_unmerge_request(self, sheet_id: int) -> dict:
+        module = self.module
+        start_col = min(module.BLOCK_COLS)
+        end_col = max(module.BLOCK_COLS) + 13
+        return {
+            "unmergeCells": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": module.TOP_HEADER_ROW - 1,
+                    "endRowIndex": module.BOTTOM_HR_END_ROW,
+                    "startColumnIndex": start_col - 1,
+                    "endColumnIndex": end_col,
+                }
+            }
+        }
+
+    def home_run_pitcher_merge_requests(
+        self, sheet_id: int, start_row: int, end_row: int, col_start: int
+    ) -> list[dict]:
+        pitcher_col_0idx = col_start + 4
+        return [
+            {
+                "mergeCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row - 1,
+                        "endRowIndex": row,
+                        "startColumnIndex": pitcher_col_0idx,
+                        "endColumnIndex": pitcher_col_0idx + 2,
+                    },
+                    "mergeType": "MERGE_ALL",
+                }
+            }
+            for row in range(start_row, end_row + 1)
+        ]
+
+    def home_run_pitcher_unmerge_requests(
+        self, sheet_id: int, start_row: int, end_row: int, col_start: int
+    ) -> list[dict]:
+        pitcher_col_0idx = col_start + 4
+        return [
+            {
+                "unmergeCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row - 1,
+                        "endRowIndex": row,
+                        "startColumnIndex": pitcher_col_0idx,
+                        "endColumnIndex": pitcher_col_0idx + 2,
+                    }
+                }
+            }
+            for row in range(start_row, end_row + 1)
+        ]
 
     def update_league_sheet(
         self,
@@ -1414,10 +1706,11 @@ class NpbLeagueSheetService(NpbModuleService):
         sheet = module.get_worksheet(sheet_name)
         value_updates = []
         format_requests = []
+        unmerge_requests = []
 
         for col_idx, (away_key, home_key) in enumerate(matchups[:3]):
             col_start = module.BLOCK_COLS[col_idx]
-            col_end = col_start + 11
+            col_end = col_start + 13
             col_start_l = self.col_to_letter(col_start)
             col_end_l = self.col_to_letter(col_end)
 
@@ -1432,9 +1725,23 @@ class NpbLeagueSheetService(NpbModuleService):
                     "values": top_values,
                 }
             )
+            value_updates.append(
+                {
+                    "range": (
+                        f"{col_start_l}{module.TOP_HR_HEADER_ROW}:"
+                        f"{col_end_l}{module.TOP_HR_END_ROW}"
+                    ),
+                    "values": self.recent_home_run_rows(away_key, away_games),
+                }
+            )
             format_requests.append(
                 self.header_format_request(
                     sheet.id, away_key, module.TOP_HEADER_ROW, col_start
+                )
+            )
+            format_requests.append(
+                self.header_format_request(
+                    sheet.id, away_key, module.TOP_HR_HEADER_ROW, col_start
                 )
             )
             format_requests.extend(
@@ -1445,6 +1752,27 @@ class NpbLeagueSheetService(NpbModuleService):
             format_requests.extend(
                 self.game_font_color_requests(
                     sheet.id, away_games, module.TOP_GAME_START, col_start
+                )
+            )
+            format_requests.append(
+                self.rate_number_format_request(
+                    sheet.id, module.TOP_GAME_START, module.TOP_AVG5_ROW, col_start
+                )
+            )
+            format_requests.extend(
+                self.home_run_pitcher_merge_requests(
+                    sheet.id,
+                    module.TOP_HR_HEADER_ROW,
+                    module.TOP_HR_END_ROW,
+                    col_start,
+                )
+            )
+            unmerge_requests.extend(
+                self.home_run_pitcher_unmerge_requests(
+                    sheet.id,
+                    module.TOP_HR_HEADER_ROW,
+                    module.TOP_HR_END_ROW,
+                    col_start,
                 )
             )
 
@@ -1459,9 +1787,23 @@ class NpbLeagueSheetService(NpbModuleService):
                     "values": bottom_values,
                 }
             )
+            value_updates.append(
+                {
+                    "range": (
+                        f"{col_start_l}{module.BOTTOM_HR_HEADER_ROW}:"
+                        f"{col_end_l}{module.BOTTOM_HR_END_ROW}"
+                    ),
+                    "values": self.recent_home_run_rows(home_key, home_games),
+                }
+            )
             format_requests.append(
                 self.header_format_request(
                     sheet.id, home_key, module.BOTTOM_HEADER_ROW, col_start
+                )
+            )
+            format_requests.append(
+                self.header_format_request(
+                    sheet.id, home_key, module.BOTTOM_HR_HEADER_ROW, col_start
                 )
             )
             format_requests.extend(
@@ -1474,8 +1816,34 @@ class NpbLeagueSheetService(NpbModuleService):
                     sheet.id, home_games, module.BOTTOM_GAME_START, col_start
                 )
             )
+            format_requests.append(
+                self.rate_number_format_request(
+                    sheet.id,
+                    module.BOTTOM_GAME_START,
+                    module.BOTTOM_AVG5_ROW,
+                    col_start,
+                )
+            )
+            format_requests.extend(
+                self.home_run_pitcher_merge_requests(
+                    sheet.id,
+                    module.BOTTOM_HR_HEADER_ROW,
+                    module.BOTTOM_HR_END_ROW,
+                    col_start,
+                )
+            )
+            unmerge_requests.extend(
+                self.home_run_pitcher_unmerge_requests(
+                    sheet.id,
+                    module.BOTTOM_HR_HEADER_ROW,
+                    module.BOTTOM_HR_END_ROW,
+                    col_start,
+                )
+            )
 
-        sheet.batch_update(value_updates, value_input_option="USER_ENTERED")
+        sheet.spreadsheet.batch_update({"requests": unmerge_requests})
+        sheet.batch_clear([self.layout_clear_range()])
+        sheet.batch_update(value_updates, value_input_option="RAW")
         sheet.spreadsheet.batch_update({"requests": format_requests})
         print(
             f"[{sheet_name}] Updated {len(value_updates)} "
@@ -1495,7 +1863,13 @@ class NpbUpdateService:
             self._module = importlib.import_module("npb")
         return self._module
 
-    async def run_once(self, matchup_date: str | None = None):
+    async def run_once(
+        self,
+        matchup_date: str | None = None,
+        league_sheet_suffix: str = "",
+        league_sheet_overrides: dict[str, str] | None = None,
+        recent_only: bool = False,
+    ):
         module = self.module
         headers = {
             "User-Agent": (
@@ -1510,42 +1884,50 @@ class NpbUpdateService:
 
         async with aiohttp.ClientSession(headers=headers) as session:
             await NpbRecentGamesService(module=module).update(
-                session, matchup_start_date=matchup_start_date, errors=errors
+                session,
+                matchup_start_date=matchup_start_date,
+                errors=errors,
+                sheet_suffix=league_sheet_suffix,
+                sheet_overrides=league_sheet_overrides,
             )
 
-            sailu_service = NpbSailuService(module=module)
-            new_sailu_ids = []
-            try:
-                new_sailu_ids = await sailu_service.update(session)
-            except Exception as e:
-                errors.append(f"update_sailu_sheet: {e}")
+            if not recent_only:
+                sailu_service = NpbSailuService(module=module)
+                new_sailu_ids = []
+                try:
+                    new_sailu_ids = await sailu_service.update(session)
+                except Exception as e:
+                    errors.append(f"update_sailu_sheet: {e}")
 
-            huizi_date = None
-            try:
-                analysis_game_ids = new_sailu_ids or module._sailu_game_ids_for_date(
-                    sailu_service.status_date
-                )
-                await NpbAnalysisService(module=module).update(
-                    session,
-                    game_ids=analysis_game_ids,
-                    scraped_games=sailu_service.written_regular_game_data,
-                )
-                sailu_dates = module._sailu_dates_for_game_ids(new_sailu_ids)
-                if not sailu_dates and analysis_game_ids:
-                    sailu_dates = module._sailu_dates_for_game_ids(analysis_game_ids)
-                if sailu_dates:
-                    huizi_date = sailu_dates[-1]
-                await NpbPredictionService(module=module).reveal_predictions_for_games(
-                    session, analysis_game_ids
-                )
-            except Exception as e:
-                errors.append(f"update_analysis_sheet: {e}")
+                huizi_date = None
+                try:
+                    analysis_game_ids = (
+                        new_sailu_ids
+                        or module._sailu_game_ids_for_date(sailu_service.status_date)
+                    )
+                    await NpbAnalysisService(module=module).update(
+                        session,
+                        game_ids=analysis_game_ids,
+                        scraped_games=sailu_service.written_regular_game_data,
+                    )
+                    sailu_dates = module._sailu_dates_for_game_ids(new_sailu_ids)
+                    if not sailu_dates and analysis_game_ids:
+                        sailu_dates = module._sailu_dates_for_game_ids(
+                            analysis_game_ids
+                        )
+                    if sailu_dates:
+                        huizi_date = sailu_dates[-1]
+                    await NpbPredictionService(
+                        module=module
+                    ).reveal_predictions_for_games(session, analysis_game_ids)
+                except Exception as e:
+                    errors.append(f"update_analysis_sheet: {e}")
 
-            await asyncio.sleep(5)
-            try:
-                NpbHuiziService(module=module).update(huizi_date)
-            except Exception as e:
-                errors.append(f"update_huizi_sheet: {e}")
+                await asyncio.sleep(5)
+                try:
+                    NpbHuiziService(module=module).update(huizi_date)
+                except Exception as e:
+                    errors.append(f"update_huizi_sheet: {e}")
 
         if errors:
             print(f"\n[ERROR] {len(errors)} failure(s):")
@@ -1568,14 +1950,112 @@ class NpbRecentGamesService:
             self._module = importlib.import_module("npb")
         return self._module
 
-    async def update(self, session, *, matchup_start_date, errors: list[str]):
+    @staticmethod
+    def _date_for_recent_sheet(value: str) -> str:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y/%m/%d")
+
+    @staticmethod
+    def _recent_team_game(
+        data: dict,
+        *,
+        opponent_name: str,
+        opponent_starter: str,
+        own_batting: list,
+        home_runs: list[dict],
+        own_score: int,
+        own_hits: int,
+        opponent_score: int,
+        own_pitching: list,
+        opponent_pitching: list,
+    ) -> dict:
+        return {
+            "日期": NpbRecentGamesService._date_for_recent_sheet(data["日期"]),
+            "球場": data.get("球場", ""),
+            "對戰球隊": opponent_name,
+            "對戰先發": opponent_starter,
+            "実分": opponent_pitching[12],
+            "失分": opponent_score,
+            "実失": own_pitching[12],
+            "得分": own_score,
+            "安打": own_hits,
+            "三振": own_batting[10],
+            "四球": own_batting[8],
+            "死球": own_batting[9],
+            "全壘打": own_batting[6],
+            "長打": int(own_batting[4] or 0)
+            + int(own_batting[5] or 0)
+            + int(own_batting[6] or 0),
+            "打數": own_batting[0],
+            "犧飛": own_batting[12],
+            "全壘打明細": [
+                {
+                    **event,
+                    "日期": NpbRecentGamesService._date_for_recent_sheet(data["日期"]),
+                    "對戰球隊": opponent_name,
+                }
+                for event in home_runs
+            ],
+        }
+
+    @staticmethod
+    def schedule_data_to_recent_game_info(data: dict) -> dict:
+        away_name = data["客隊"]
+        home_name = data["主隊"]
+        away_bat = data["客打擊"]
+        home_bat = data["主打擊"]
+        away_pitch = data["客總投球"]
+        home_pitch = data["主總投球"]
+        return {
+            away_name: NpbRecentGamesService._recent_team_game(
+                data,
+                opponent_name=home_name,
+                opponent_starter=data.get("主隊先發", ""),
+                own_batting=away_bat,
+                home_runs=data.get("客全壘打明細", []),
+                own_score=data["客總分"],
+                own_hits=data["客總安打"],
+                opponent_score=data["主總分"],
+                own_pitching=away_pitch,
+                opponent_pitching=home_pitch,
+            ),
+            home_name: NpbRecentGamesService._recent_team_game(
+                data,
+                opponent_name=away_name,
+                opponent_starter=data.get("客隊先發", ""),
+                own_batting=home_bat,
+                home_runs=data.get("主全壘打明細", []),
+                own_score=data["主總分"],
+                own_hits=data["主總安打"],
+                opponent_score=data["客總分"],
+                own_pitching=home_pitch,
+                opponent_pitching=away_pitch,
+            ),
+            "teams": [home_name, away_name],
+            "home": home_name,
+            "away": away_name,
+            "game_id": data["賽事編號"],
+        }
+
+    async def update(
+        self,
+        session,
+        *,
+        matchup_start_date,
+        errors: list[str],
+        sheet_suffix: str = "",
+        sheet_overrides: dict[str, str] | None = None,
+    ):
         module = self.module
         league_sheet_service = NpbLeagueSheetService(module=module)
+        sheet_overrides = sheet_overrides or {}
         for league, sheet_name in module.LEAGUE_SHEETS.items():
+            target_sheet_name = sheet_overrides.get(
+                league, f"{sheet_name}{sheet_suffix}"
+            )
             league_teams = {
                 k: v for k, v in module.NPB_TEAMS.items() if v["league"] == league
             }
-            print(f"\n=== {league} ({sheet_name}) ===")
+            print(f"\n=== {league} ({target_sheet_name}) ===")
 
             try:
                 matchups = await module.get_next_matchups(
@@ -1618,15 +2098,26 @@ class NpbRecentGamesService:
 
             for i in range(0, len(id_list), module.MAX_CONCURRENT):
                 batch = id_list[i : i + module.MAX_CONCURRENT]
-                results = await asyncio.gather(
-                    *[module.get_game_info(gid, session) for gid in batch],
-                    return_exceptions=True,
-                )
+                if hasattr(module, "get_schedule_game_data"):
+                    scraper_name = "get_schedule_game_data"
+                    coros = [
+                        module.get_schedule_game_data(gid, session, retry=False)
+                        for gid in batch
+                    ]
+                else:
+                    scraper_name = "get_game_info"
+                    coros = [module.get_game_info(gid, session) for gid in batch]
+                results = await asyncio.gather(*coros, return_exceptions=True)
                 for gid, result in zip(batch, results):
                     if isinstance(result, Exception):
-                        errors.append(f"get_game_info({gid}): {result}")
+                        errors.append(f"{scraper_name}({gid}): {result}")
                     elif result:
-                        game_cache[gid] = result
+                        if "客打擊" in result:
+                            game_cache[gid] = self.schedule_data_to_recent_game_info(
+                                result
+                            )
+                        else:
+                            game_cache[gid] = result
                 if i + module.MAX_CONCURRENT < len(id_list):
                     await asyncio.sleep(2)
 
@@ -1642,12 +2133,26 @@ class NpbRecentGamesService:
                 all_games[team_key] = game_list
                 print(f"  {team_key}: {len(game_list)} games with data")
 
+            missing_ids = [
+                team_key for team_key, ids in all_game_ids.items() if not ids
+            ]
+            missing_data = [
+                team_key for team_key, game_list in all_games.items() if not game_list
+            ]
+            if missing_ids or missing_data:
+                errors.append(
+                    f"update_league_sheet({target_sheet_name}): skipped write "
+                    f"because recent game data was incomplete; "
+                    f"missing_ids={missing_ids}, missing_data={missing_data}"
+                )
+                continue
+
             try:
                 league_sheet_service.update_league_sheet(
-                    sheet_name, matchups, all_games
+                    target_sheet_name, matchups, all_games
                 )
             except Exception as e:
-                errors.append(f"update_league_sheet({sheet_name}): {e}")
+                errors.append(f"update_league_sheet({target_sheet_name}): {e}")
 
 
 class NpbSailuService:
