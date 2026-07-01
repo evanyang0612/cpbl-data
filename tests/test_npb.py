@@ -1469,8 +1469,8 @@ class TestBuildBlockValues:
             sf=1,
         )
         rows = build_block_values("巨人", [game])
-        assert rows[1][12] == "0.300"
-        assert rows[1][13] == "0.371"
+        assert rows[1][12] == ".300"
+        assert rows[1][13] == ".371"
 
     def test_rate_values_keep_three_decimal_places(self):
         game = _make_game(
@@ -1490,8 +1490,8 @@ class TestBuildBlockValues:
             ab=20,
         )
         rows = build_block_values("巨人", [game])
-        assert rows[1][12] == "0.200"
-        assert rows[1][13] == "0.200"
+        assert rows[1][12] == ".200"
+        assert rows[1][13] == ".200"
 
     def test_avg_rows_use_aggregate_avg_and_obp(self):
         games = [
@@ -1531,8 +1531,8 @@ class TestBuildBlockValues:
             ),
         ]
         rows = build_block_values("巨人", games)
-        assert rows[11][12] == "0.250"
-        assert rows[11][13] == "0.313"
+        assert rows[11][12] == ".250"
+        assert rows[11][13] == ".313"
 
     def test_home_run_rows_format_date_and_pitcher(self):
         service = NpbLeagueSheetService(module=npb)
@@ -1578,12 +1578,44 @@ class TestBuildBlockValues:
             "",
             "6/21",
             "泉口 友汰",
-            "左打",
+            "左",
             "右本",
             "柳",
             "",
             "中 日",
         ]
+
+    def test_home_run_rows_shorten_switch_hitter_side(self):
+        service = NpbLeagueSheetService(module=npb)
+        game = _make_game(
+            "2026/06/21",
+            "中 日",
+            "柳",
+            "東 京",
+            0,
+            2,
+            0,
+            0,
+            6,
+            0,
+            0,
+            0,
+            1,
+        )
+        game["全壘打明細"] = [
+            {
+                "日期": "2026/06/21",
+                "打者": "ヒュンメル",
+                "左右打": "兩打",
+                "方向": "右本",
+                "投手": "柳",
+                "對戰球隊": "中 日",
+            }
+        ]
+
+        rows = service.recent_home_run_rows("巨人", [game])
+
+        assert rows[1][3] == "両"
 
     def test_two_character_local_field_gets_spaced(self):
         games = [

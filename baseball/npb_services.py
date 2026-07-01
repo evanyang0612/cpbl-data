@@ -1220,7 +1220,20 @@ class NpbLeagueSheetService(NpbModuleService):
     def rate_text(value: float | None) -> str:
         if value is None:
             return ""
-        return f"{value:.3f}"
+        text = f"{value:.3f}"
+        return text[1:] if text.startswith("0.") else text
+
+    @staticmethod
+    def display_bat_side(side: str) -> str:
+        if not side:
+            return ""
+        if side.startswith("右"):
+            return "右"
+        if side.startswith("左"):
+            return "左"
+        if side.startswith(("兩", "両")):
+            return "両"
+        return side
 
     @staticmethod
     def aggregate_batting_average(game_list: list[dict]) -> float | None:
@@ -1292,7 +1305,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 "",
                 self.display_game_date(event["_日期"]) if event["_日期"] else "",
                 event.get("打者", ""),
-                event.get("左右打", ""),
+                self.display_bat_side(event.get("左右打", "")),
                 event.get("方向", ""),
                 event.get("投手", ""),
                 "",
