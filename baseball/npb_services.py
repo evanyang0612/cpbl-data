@@ -1256,7 +1256,8 @@ class NpbLeagueSheetService(NpbModuleService):
         return (hits + walks + hbp) / denominator
 
     def _home_run_events(self, games: list[dict]) -> list[dict]:
-        """Ordered, capped (max 8) home-run events across the last five games."""
+        """Ordered, capped home-run events across the last five games."""
+        module = self.module
         sorted_games = sorted(
             games,
             key=lambda g: self.parse_game_date(g["日期"]),
@@ -1268,7 +1269,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 enriched["_日期"] = event.get("日期") or game.get("日期", "")
                 enriched["_對戰"] = event.get("對戰球隊", game.get("對戰球隊", ""))
                 events.append(enriched)
-        return events[:8]
+        return events[: module.HOME_RUN_EVENT_ROWS]
 
     @staticmethod
     def _effective_bat_side(side: str, pitcher_throw: str) -> str:
@@ -1298,8 +1299,42 @@ class NpbLeagueSheetService(NpbModuleService):
             return False
         return direction.startswith(stance)
 
-    def recent_home_run_rows(self, team_key: str, games: list[dict]) -> list[list]:
+    def home_run_event_row_count(self, games: list[dict]) -> int:
+        return max(1, len(self._home_run_events(games)))
+
+    def home_run_layout(
+        self, matchups: list[tuple[str, str]], all_games: dict[str, list[dict]]
+    ) -> dict[str, int]:
         module = self.module
+        active_matchups = matchups[:3]
+        top_rows = [
+            self.home_run_event_row_count(all_games.get(away_key, []))
+            for away_key, _ in active_matchups
+        ]
+        bottom_rows = [
+            self.home_run_event_row_count(all_games.get(home_key, []))
+            for _, home_key in active_matchups
+        ]
+        top_event_rows = max(top_rows or [1])
+        bottom_event_rows = max(bottom_rows or [1])
+        top_header = module.TOP_HR_HEADER_ROW
+        top_end = top_header + top_event_rows
+        bottom_header = top_end + 2
+        bottom_end = bottom_header + bottom_event_rows
+        return {
+            "top_event_rows": top_event_rows,
+            "top_header": top_header,
+            "top_end": top_end,
+            "bottom_event_rows": bottom_event_rows,
+            "bottom_header": bottom_header,
+            "bottom_end": bottom_end,
+        }
+
+    def recent_home_run_rows(
+        self, team_key: str, games: list[dict], event_rows: int | None = None
+    ) -> list[list]:
+        module = self.module
+        event_rows = event_rows or module.HOME_RUN_EVENT_ROWS
         events = [
             [
                 "",
@@ -1319,7 +1354,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 module.NPB_TEAMS[team_key]["name"],
                 "日 期",
                 "打 者",
-                "左 右",
+                "打 位",
                 "方 向",
                 "投 手",
                 "",
@@ -1328,10 +1363,10 @@ class NpbLeagueSheetService(NpbModuleService):
             + [""] * 6
         ]
         if events:
-            rows.extend(events[:8])
+            rows.extend(events[:event_rows])
         else:
             rows.append(["", "近五場無全壘打"] + [""] * 12)
-        while len(rows) < 9:
+        while len(rows) < event_rows + 1:
             rows.append([""] * 14)
         return rows
 
@@ -1690,6 +1725,34 @@ class NpbLeagueSheetService(NpbModuleService):
             }
         }
 
+    def home_run_base_format_request(self, sheet_id: int) -> dict:
+        module = self.module
+        start_col = min(module.BLOCK_COLS)
+        end_col = max(module.BLOCK_COLS) + 13
+        return {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": module.TOP_HR_HEADER_ROW - 1,
+                    "endRowIndex": module.BOTTOM_HR_END_ROW,
+                    "startColumnIndex": start_col - 1,
+                    "endColumnIndex": end_col,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": self.hex_to_rgb("ffffff"),
+                        "textFormat": {
+                            "foregroundColor": self.hex_to_rgb(module.DEFAULT_FONT),
+                        },
+                    }
+                },
+                "fields": (
+                    "userEnteredFormat.backgroundColor,"
+                    "userEnteredFormat.textFormat.foregroundColor"
+                ),
+            }
+        }
+
     def layout_unmerge_request(self, sheet_id: int) -> dict:
         module = self.module
         start_col = min(module.BLOCK_COLS)
@@ -1746,18 +1809,24 @@ class NpbLeagueSheetService(NpbModuleService):
         ]
 
     def home_run_direction_font_requests(
-        self, sheet_id: int, games: list[dict], hr_header_row: int, col_start: int
+        self,
+        sheet_id: int,
+        games: list[dict],
+        hr_header_row: int,
+        col_start: int,
+        event_rows: int | None = None,
     ) -> list[dict]:
         """Colour the 方向 cell red for opposite-field home runs.
 
-        Every event row (up to 8) is emitted so stale red from a previous run is
-        reset to the default colour when a slot is no longer opposite-field.
+        Every event row is emitted so stale red from a previous run is reset to
+        the default colour when a slot is no longer opposite-field.
         """
         module = self.module
+        event_rows = event_rows or module.HOME_RUN_EVENT_ROWS
         direction_col_0idx = col_start + 3
         events = self._home_run_events(games)
         requests = []
-        for i in range(8):
+        for i in range(event_rows):
             event = events[i] if i < len(events) else None
             opposite = bool(event) and self._is_opposite_field_home_run(
                 event.get("左右打", ""),
@@ -1766,9 +1835,29 @@ class NpbLeagueSheetService(NpbModuleService):
             )
             color = module.OPPOSITE_FIELD_FONT if opposite else module.DEFAULT_FONT
             requests.append(
-                self.font_color_request(
-                    sheet_id, hr_header_row + i, direction_col_0idx, color
-                )
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": hr_header_row + i,
+                            "endRowIndex": hr_header_row + i + 1,
+                            "startColumnIndex": direction_col_0idx,
+                            "endColumnIndex": direction_col_0idx + 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "textFormat": {
+                                    "foregroundColor": self.hex_to_rgb(color),
+                                    "fontSize": 9,
+                                }
+                            }
+                        },
+                        "fields": (
+                            "userEnteredFormat.textFormat.foregroundColor,"
+                            "userEnteredFormat.textFormat.fontSize"
+                        ),
+                    }
+                }
             )
         return requests
 
@@ -1782,7 +1871,9 @@ class NpbLeagueSheetService(NpbModuleService):
         sheet = module.get_worksheet(sheet_name)
         value_updates = []
         format_requests = []
+        reset_requests = [self.home_run_base_format_request(sheet.id)]
         unmerge_requests = []
+        hr_layout = self.home_run_layout(matchups, all_games)
 
         for col_idx, (away_key, home_key) in enumerate(matchups[:3]):
             col_start = module.BLOCK_COLS[col_idx]
@@ -1804,10 +1895,12 @@ class NpbLeagueSheetService(NpbModuleService):
             value_updates.append(
                 {
                     "range": (
-                        f"{col_start_l}{module.TOP_HR_HEADER_ROW}:"
-                        f"{col_end_l}{module.TOP_HR_END_ROW}"
+                        f"{col_start_l}{hr_layout['top_header']}:"
+                        f"{col_end_l}{hr_layout['top_end']}"
                     ),
-                    "values": self.recent_home_run_rows(away_key, away_games),
+                    "values": self.recent_home_run_rows(
+                        away_key, away_games, hr_layout["top_event_rows"]
+                    ),
                 }
             )
             format_requests.append(
@@ -1817,7 +1910,7 @@ class NpbLeagueSheetService(NpbModuleService):
             )
             format_requests.append(
                 self.header_format_request(
-                    sheet.id, away_key, module.TOP_HR_HEADER_ROW, col_start
+                    sheet.id, away_key, hr_layout["top_header"], col_start
                 )
             )
             format_requests.extend(
@@ -1838,21 +1931,25 @@ class NpbLeagueSheetService(NpbModuleService):
             format_requests.extend(
                 self.home_run_pitcher_merge_requests(
                     sheet.id,
-                    module.TOP_HR_HEADER_ROW,
-                    module.TOP_HR_END_ROW,
+                    hr_layout["top_header"],
+                    hr_layout["top_end"],
                     col_start,
                 )
             )
             format_requests.extend(
                 self.home_run_direction_font_requests(
-                    sheet.id, away_games, module.TOP_HR_HEADER_ROW, col_start
+                    sheet.id,
+                    away_games,
+                    hr_layout["top_header"],
+                    col_start,
+                    hr_layout["top_event_rows"],
                 )
             )
             unmerge_requests.extend(
                 self.home_run_pitcher_unmerge_requests(
                     sheet.id,
-                    module.TOP_HR_HEADER_ROW,
-                    module.TOP_HR_END_ROW,
+                    hr_layout["top_header"],
+                    hr_layout["top_end"],
                     col_start,
                 )
             )
@@ -1871,10 +1968,12 @@ class NpbLeagueSheetService(NpbModuleService):
             value_updates.append(
                 {
                     "range": (
-                        f"{col_start_l}{module.BOTTOM_HR_HEADER_ROW}:"
-                        f"{col_end_l}{module.BOTTOM_HR_END_ROW}"
+                        f"{col_start_l}{hr_layout['bottom_header']}:"
+                        f"{col_end_l}{hr_layout['bottom_end']}"
                     ),
-                    "values": self.recent_home_run_rows(home_key, home_games),
+                    "values": self.recent_home_run_rows(
+                        home_key, home_games, hr_layout["bottom_event_rows"]
+                    ),
                 }
             )
             format_requests.append(
@@ -1884,7 +1983,7 @@ class NpbLeagueSheetService(NpbModuleService):
             )
             format_requests.append(
                 self.header_format_request(
-                    sheet.id, home_key, module.BOTTOM_HR_HEADER_ROW, col_start
+                    sheet.id, home_key, hr_layout["bottom_header"], col_start
                 )
             )
             format_requests.extend(
@@ -1908,26 +2007,30 @@ class NpbLeagueSheetService(NpbModuleService):
             format_requests.extend(
                 self.home_run_pitcher_merge_requests(
                     sheet.id,
-                    module.BOTTOM_HR_HEADER_ROW,
-                    module.BOTTOM_HR_END_ROW,
+                    hr_layout["bottom_header"],
+                    hr_layout["bottom_end"],
                     col_start,
                 )
             )
             format_requests.extend(
                 self.home_run_direction_font_requests(
-                    sheet.id, home_games, module.BOTTOM_HR_HEADER_ROW, col_start
+                    sheet.id,
+                    home_games,
+                    hr_layout["bottom_header"],
+                    col_start,
+                    hr_layout["bottom_event_rows"],
                 )
             )
             unmerge_requests.extend(
                 self.home_run_pitcher_unmerge_requests(
                     sheet.id,
-                    module.BOTTOM_HR_HEADER_ROW,
-                    module.BOTTOM_HR_END_ROW,
+                    hr_layout["bottom_header"],
+                    hr_layout["bottom_end"],
                     col_start,
                 )
             )
 
-        sheet.spreadsheet.batch_update({"requests": unmerge_requests})
+        sheet.spreadsheet.batch_update({"requests": reset_requests + unmerge_requests})
         sheet.batch_clear([self.layout_clear_range()])
         sheet.batch_update(value_updates, value_input_option="RAW")
         sheet.spreadsheet.batch_update({"requests": format_requests})
@@ -2187,7 +2290,7 @@ class NpbRecentGamesService:
                 if hasattr(module, "get_schedule_game_data"):
                     scraper_name = "get_schedule_game_data"
                     coros = [
-                        module.get_schedule_game_data(gid, session, retry=False)
+                        module.get_schedule_game_data(gid, session, retry=True)
                         for gid in batch
                     ]
                 else:
@@ -2222,14 +2325,16 @@ class NpbRecentGamesService:
             missing_ids = [
                 team_key for team_key, ids in all_game_ids.items() if not ids
             ]
-            missing_data = [
-                team_key for team_key, game_list in all_games.items() if not game_list
+            incomplete_data = [
+                team_key
+                for team_key, game_list in all_games.items()
+                if len(game_list) < module.GAMES_COUNT
             ]
-            if missing_ids or missing_data:
+            if missing_ids or incomplete_data:
                 errors.append(
                     f"update_league_sheet({target_sheet_name}): skipped write "
                     f"because recent game data was incomplete; "
-                    f"missing_ids={missing_ids}, missing_data={missing_data}"
+                    f"missing_ids={missing_ids}, incomplete_data={incomplete_data}"
                 )
                 continue
 

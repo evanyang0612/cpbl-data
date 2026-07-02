@@ -247,6 +247,7 @@ NPB_FIELDS = {
     "ベルーナドーム": "西 武",
     "みずほPayPay": "福 岡",
     "京セラD大阪": "京大阪",
+    "ほっと神戸": "神 戶",
     "エスコンF": "エスコン",
     "楽天モバイル": "宮 城",
     "ハードオフ新潟": "新潟",
@@ -331,9 +332,10 @@ BOTTOM_GAME_END = 26
 BOTTOM_AVG10_ROW = 27
 BOTTOM_AVG5_ROW = 28
 TOP_HR_HEADER_ROW = 30
-TOP_HR_END_ROW = 38
-BOTTOM_HR_HEADER_ROW = 40
-BOTTOM_HR_END_ROW = 48
+HOME_RUN_EVENT_ROWS = 20
+TOP_HR_END_ROW = TOP_HR_HEADER_ROW + HOME_RUN_EVENT_ROWS
+BOTTOM_HR_HEADER_ROW = TOP_HR_END_ROW + 2
+BOTTOM_HR_END_ROW = BOTTOM_HR_HEADER_ROW + HOME_RUN_EVENT_ROWS
 
 # Rows per block (header + 10 games + 2 avg rows = 13)
 BLOCK_ROWS = 13
@@ -1064,7 +1066,8 @@ async def get_last_n_game_ids(
             session, f"{BASE_URL}teams/{team_id}/schedule?month={time_key}"
         )
         if not html:
-            break
+            month_cursor = (month_cursor - timedelta(days=1)).replace(day=1)
+            continue
 
         soup = bs(html, "html.parser")
         entries = list(soup.find_all(class_="bb-calendarTable__data"))
@@ -1285,7 +1288,6 @@ async def _official_next_matchups(
             matchups.append((unmatched[i], unmatched[i + 1]))
 
         if matchups:
-            matchups = _sort_matchups_by_home_team(matchups)
             print(f"[{league}] Official next game day: {date_key}, games: {matchups}")
             return matchups[:3]
 
@@ -1478,6 +1480,8 @@ async def get_next_matchups(
                 cross_games.append((key, opp))
                 matched.add(key)
 
+    matchups = _sort_matchups_by_home_team(matchups)
+
     if not matchups and len(cross_games) > 3:
         league_idx = list(LEAGUE_SHEETS).index(league)
         start_idx = league_idx * 3
@@ -1501,7 +1505,7 @@ async def get_next_matchups(
             break
         matchups.append((unmatched[i], unmatched[i + 1]))
 
-    return _sort_matchups_by_home_team(matchups)[:3]
+    return matchups[:3]
 
 
 # --- 賽錄 scraping & update ---

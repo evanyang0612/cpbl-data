@@ -176,6 +176,25 @@ class TestOfficialNextMatchups:
             ("巨人", "DeNA"),
         ]
 
+    def test_puts_real_games_before_padded_rest_day_matchups(self):
+        html = """
+        <table>
+          <tr><th>7/2（木）</th></tr>
+          <tr><td><div class="team1">横浜DeNA</div><div class="team2">巨人</div></td></tr>
+          <tr><td><div class="team1">阪神</div><div class="team2">ヤクルト</div></td></tr>
+        </table>
+        """
+        with patch("npb._fetch_once", new=AsyncMock(return_value=html)):
+            matchups = self._run(
+                _official_next_matchups("央盟", AsyncMock(), date(2026, 7, 2))
+            )
+
+        assert matchups == [
+            ("ヤクルト", "阪神"),
+            ("巨人", "DeNA"),
+            ("中日", "広島"),
+        ]
+
     def test_skips_reserve_days_for_next_official_matchups(self):
         html = """
         <table>
@@ -260,7 +279,7 @@ class TestNpbRecentGamesService:
         module = Namespace(
             LEAGUE_SHEETS={"央盟": "近十場a"},
             NPB_TEAMS=NPB_TEAMS,
-            GAMES_COUNT=10,
+            GAMES_COUNT=1,
             MAX_CONCURRENT=10,
             get_next_matchups=get_next_matchups,
             get_last_n_game_ids=get_last_n_game_ids,
@@ -416,6 +435,36 @@ def _make_game(
     if ab is not None:
         game["打數"] = ab
         game["犧飛"] = sf
+    return game
+
+
+def _make_home_run_game(count):
+    game = _make_game(
+        "2026/07/01",
+        "樂 天",
+        "投手",
+        "エスコン",
+        0,
+        2,
+        0,
+        0,
+        6,
+        0,
+        0,
+        0,
+        count,
+    )
+    game["全壘打明細"] = [
+        {
+            "日期": "2026/07/01",
+            "打者": f"打者{i}",
+            "左右打": "右打",
+            "方向": "左本",
+            "投手": "投手",
+            "對戰球隊": "樂 天",
+        }
+        for i in range(count)
+    ]
     return game
 
 
@@ -1568,7 +1617,7 @@ class TestBuildBlockValues:
             "巨 人",
             "日 期",
             "打 者",
-            "左 右",
+            "打 位",
             "方 向",
             "投 手",
             "",
@@ -1617,6 +1666,15 @@ class TestBuildBlockValues:
 
         assert rows[1][3] == "両"
 
+    def test_home_run_rows_keep_up_to_configured_capacity(self):
+        service = NpbLeagueSheetService(module=npb)
+        game = _make_home_run_game(npb.HOME_RUN_EVENT_ROWS + 2)
+
+        rows = service.recent_home_run_rows("日本ハム", [game])
+
+        assert len(rows) == npb.HOME_RUN_EVENT_ROWS + 1
+        assert rows[-1][2] == f"打者{npb.HOME_RUN_EVENT_ROWS - 1}"
+
     def test_two_character_local_field_gets_spaced(self):
         games = [
             _make_game(
@@ -1637,6 +1695,29 @@ class TestBuildBlockValues:
         ]
         rows = build_block_values("巨人", games)
         assert rows[1][3] == "長 野"
+
+    def test_hotto_kobe_field_maps_to_kobe(self):
+        games = [
+            _make_game(
+                "2026/07/01",
+                "火 腿",
+                "投手",
+                "ほっと神戸",
+                0,
+                1,
+                2,
+                2,
+                5,
+                6,
+                1,
+                0,
+                0,
+            )
+        ]
+
+        rows = build_block_values("オリックス", games)
+
+        assert rows[1][3] == "神 戶"
 
     def test_avg10_row(self):
         # Row index 11 = 近十場 average (only 5 games available)
@@ -2193,11 +2274,23 @@ class TestHomeRunDirectionFontRequests:
     def test_targets_direction_column_and_event_rows(self):
         requests = self._requests_for([{"打者": "A", "左右打": "右打", "方向": "右本"}])
 
-        assert len(requests) == 8  # all slots emitted so stale red is reset
+        assert len(requests) == npb.HOME_RUN_EVENT_ROWS
         first = requests[0]["repeatCell"]["range"]
         assert first["startColumnIndex"] == 5  # 方向 → col_start(2) + 3
         assert first["startRowIndex"] == 30
         assert requests[1]["repeatCell"]["range"]["startRowIndex"] == 31
+
+    def test_direction_data_cells_use_smaller_font_without_touching_header(self):
+        requests = self._requests_for([{"打者": "A", "左右打": "右打", "方向": "右本"}])
+
+        first = requests[0]["repeatCell"]
+
+        assert first["range"]["startRowIndex"] == 30  # data row below row-30 header
+        assert first["cell"]["userEnteredFormat"]["textFormat"]["fontSize"] == 9
+        assert (
+            "userEnteredFormat.textFormat.fontSize"
+            in first["fields"]
+        )
 
     def test_switch_hitter_uses_pitcher_throwing_hand(self):
         events = [
@@ -2450,10 +2543,37 @@ class TestConditionalFormatDeleteRequests:
 
 
 class TestLeagueSheetLayoutClear:
+    def test_home_run_layout_uses_max_events_per_row_group(self):
+        service = NpbLeagueSheetService(module=npb)
+        matchups = [
+            ("巨人", "西武"),
+            ("阪神", "日本ハム"),
+            ("広島", "楽天"),
+        ]
+        all_games = {
+            "巨人": [_make_home_run_game(5)],
+            "阪神": [_make_home_run_game(12)],
+            "広島": [_make_home_run_game(2)],
+            "西武": [_make_home_run_game(1)],
+            "日本ハム": [_make_home_run_game(4)],
+            "楽天": [_make_home_run_game(3)],
+        }
+
+        layout = service.home_run_layout(matchups, all_games)
+
+        assert layout == {
+            "top_event_rows": 12,
+            "top_header": 30,
+            "top_end": 42,
+            "bottom_event_rows": 4,
+            "bottom_header": 44,
+            "bottom_end": 48,
+        }
+
     def test_layout_clear_range_covers_old_and_new_blocks(self):
         service = NpbLeagueSheetService(module=npb)
 
-        assert service.layout_clear_range() == "B3:AS48"
+        assert service.layout_clear_range() == "B3:AS72"
 
     def test_home_run_pitcher_merge_requests_cover_pitcher_cells_only(self):
         service = NpbLeagueSheetService(module=npb)
@@ -2465,7 +2585,7 @@ class TestLeagueSheetLayoutClear:
             col_start=2,
         )
 
-        assert len(requests) == 9
+        assert len(requests) == npb.HOME_RUN_EVENT_ROWS + 1
         first = requests[0]["mergeCells"]
         assert first["mergeType"] == "MERGE_ALL"
         assert first["range"] == {
@@ -2486,7 +2606,7 @@ class TestLeagueSheetLayoutClear:
             col_start=2,
         )
 
-        assert len(requests) == 9
+        assert len(requests) == npb.HOME_RUN_EVENT_ROWS + 1
         assert requests[0]["unmergeCells"]["range"] == {
             "sheetId": 99,
             "startRowIndex": 29,
@@ -3221,7 +3341,7 @@ class TestGetLastNGameIds:
             {"day": "1", "status": "先発：投手", "href": "/npb/game/2026030101/top"},
         )
         with self._patch_now(fake_now):
-            with patch("npb._fetch", new=AsyncMock(side_effect=[html, None])):
+            with patch("npb._fetch", new=AsyncMock(side_effect=[html] + [None] * 12)):
                 result = self._run(get_last_n_game_ids(1, 1, self._mock_session()))
         assert result == []
 
@@ -3249,7 +3369,7 @@ class TestGetLastNGameIds:
             {"day": "2", "status": "試合終了", "href": "/npb/game/2026030201/top"},
         )
         with self._patch_now(fake_now):
-            with patch("npb._fetch", new=AsyncMock(side_effect=[html, None])):
+            with patch("npb._fetch", new=AsyncMock(side_effect=[html] + [None] * 12)):
                 result = self._run(get_last_n_game_ids(1, 5, self._mock_session()))
         assert result.count("2026030201") == 1
 
