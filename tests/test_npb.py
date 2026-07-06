@@ -23,6 +23,9 @@ from baseball.npb_services import (
     NpbStatusService,
 )
 from npb import (
+    BAT_SIDE_L_FONT,
+    BAT_SIDE_R_FONT,
+    BAT_SIDE_S_FONT,
     DEFAULT_FONT,
     HITS_10_PLUS_FONT,
     HOT_RATE_FONT,
@@ -33,6 +36,7 @@ from npb import (
     SCORE_WIN_FONT,
     _enrich_switch_hitter_pitcher_throws,
     _game_font_color_requests,
+    _home_run_bat_side_font_requests,
     _home_run_direction_font_requests,
     _parse_pitcher_id_lookup,
     _parse_player_throw_hand,
@@ -1627,7 +1631,7 @@ class TestBuildBlockValues:
             "",
             "6/21",
             "泉口 友汰",
-            "左",
+            "L",
             "右本",
             "柳",
             "",
@@ -1664,7 +1668,7 @@ class TestBuildBlockValues:
 
         rows = service.recent_home_run_rows("巨人", [game])
 
-        assert rows[1][3] == "両"
+        assert rows[1][3] == "S"
 
     def test_home_run_rows_keep_up_to_configured_capacity(self):
         service = NpbLeagueSheetService(module=npb)
@@ -2315,6 +2319,57 @@ class TestHomeRunDirectionFontRequests:
             default,
             default,
         ]
+
+
+class TestHomeRunBatSideFontRequests:
+    @staticmethod
+    def _color(request: dict) -> dict:
+        return request["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"][
+            "foregroundColor"
+        ]
+
+    def _requests_for(self, events: list[dict]) -> list[dict]:
+        game = {
+            "日期": "2026/06/21",
+            "全壘打明細": [{"日期": "2026/06/21", **e} for e in events],
+        }
+        return _home_run_bat_side_font_requests(1, [game], 30, 2)
+
+    def test_colours_each_handedness(self):
+        events = [
+            {"打者": "A", "左右打": "右打"},  # R → blue
+            {"打者": "B", "左右打": "左打"},  # L → red
+            {"打者": "C", "左右打": "兩打"},  # S → yellow
+            {"打者": "D", "左右打": ""},  # unknown → default
+        ]
+
+        requests = self._requests_for(events)
+        blue = NpbLeagueSheetService.hex_to_rgb(BAT_SIDE_R_FONT)
+        red = NpbLeagueSheetService.hex_to_rgb(BAT_SIDE_L_FONT)
+        yellow = NpbLeagueSheetService.hex_to_rgb(BAT_SIDE_S_FONT)
+        default = NpbLeagueSheetService.hex_to_rgb(DEFAULT_FONT)
+
+        assert [self._color(r) for r in requests[:4]] == [
+            blue,
+            red,
+            yellow,
+            default,
+        ]
+
+    def test_targets_bat_side_column_and_event_rows(self):
+        requests = self._requests_for([{"打者": "A", "左右打": "右打"}])
+
+        assert len(requests) == npb.HOME_RUN_EVENT_ROWS
+        first = requests[0]["repeatCell"]["range"]
+        assert first["startColumnIndex"] == 4  # 打位 → col_start(2) + 2
+        assert first["startRowIndex"] == 30
+
+    def test_empty_slots_reset_to_default(self):
+        requests = self._requests_for([{"打者": "A", "左右打": "右打"}])
+        default = NpbLeagueSheetService.hex_to_rgb(DEFAULT_FONT)
+
+        # Only the first row has an event; the rest reset to default.
+        assert self._color(requests[1]) == default
 
 
 # ---------------------------------------------------------------------------

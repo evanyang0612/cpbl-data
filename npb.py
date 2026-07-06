@@ -49,6 +49,9 @@ DEFAULT_FONT = "000000"
 HOT_RATE_FONT = "ff0000"
 COLD_RATE_FONT = "38761d"
 OPPOSITE_FIELD_FONT = "ff0000"
+BAT_SIDE_R_FONT = "1155cc"
+BAT_SIDE_L_FONT = "cc0000"
+BAT_SIDE_S_FONT = "bf9000"
 HOT_AVG_THRESHOLD = 0.280
 COLD_AVG_THRESHOLD = 0.200
 HOT_OBP_THRESHOLD = 0.330
@@ -3032,6 +3035,15 @@ def _home_run_direction_font_requests(
     return NpbLeagueSheetService(
         module=sys.modules[__name__]
     ).home_run_direction_font_requests(sheet_id, games, hr_header_row, col_start)
+
+
+def _home_run_bat_side_font_requests(
+    sheet_id: int, games: list[dict], hr_header_row: int, col_start: int
+) -> list[dict]:
+    """Colour the 打位 cell by handedness: R blue, L red, S yellow."""
+    return NpbLeagueSheetService(
+        module=sys.modules[__name__]
+    ).home_run_bat_side_font_requests(sheet_id, games, hr_header_row, col_start)
 
 
 def update_league_sheet(
