@@ -1228,11 +1228,11 @@ class NpbLeagueSheetService(NpbModuleService):
         if not side:
             return ""
         if side.startswith("右"):
-            return "右"
+            return "R"
         if side.startswith("左"):
-            return "左"
+            return "L"
         if side.startswith(("兩", "両")):
-            return "両"
+            return "S"
         return side
 
     @staticmethod
@@ -1861,6 +1861,62 @@ class NpbLeagueSheetService(NpbModuleService):
             )
         return requests
 
+    def home_run_bat_side_font_requests(
+        self,
+        sheet_id: int,
+        games: list[dict],
+        hr_header_row: int,
+        col_start: int,
+        event_rows: int | None = None,
+    ) -> list[dict]:
+        """Colour the 打位 cell by handedness: R blue, L red, S yellow.
+
+        Every event row is emitted so a stale colour from a previous run is
+        reset to the default colour when a slot is empty or its side changes.
+        """
+        module = self.module
+        event_rows = event_rows or module.HOME_RUN_EVENT_ROWS
+        bat_side_col_0idx = col_start + 2
+        colors = {
+            "R": module.BAT_SIDE_R_FONT,
+            "L": module.BAT_SIDE_L_FONT,
+            "S": module.BAT_SIDE_S_FONT,
+        }
+        events = self._home_run_events(games)
+        requests = []
+        for i in range(event_rows):
+            event = events[i] if i < len(events) else None
+            side = (
+                self.display_bat_side(event.get("左右打", "")) if event else ""
+            )
+            color = colors.get(side, module.DEFAULT_FONT)
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": hr_header_row + i,
+                            "endRowIndex": hr_header_row + i + 1,
+                            "startColumnIndex": bat_side_col_0idx,
+                            "endColumnIndex": bat_side_col_0idx + 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "textFormat": {
+                                    "foregroundColor": self.hex_to_rgb(color),
+                                    "fontSize": 9,
+                                }
+                            }
+                        },
+                        "fields": (
+                            "userEnteredFormat.textFormat.foregroundColor,"
+                            "userEnteredFormat.textFormat.fontSize"
+                        ),
+                    }
+                }
+            )
+        return requests
+
     def update_league_sheet(
         self,
         sheet_name: str,
@@ -1945,6 +2001,15 @@ class NpbLeagueSheetService(NpbModuleService):
                     hr_layout["top_event_rows"],
                 )
             )
+            format_requests.extend(
+                self.home_run_bat_side_font_requests(
+                    sheet.id,
+                    away_games,
+                    hr_layout["top_header"],
+                    col_start,
+                    hr_layout["top_event_rows"],
+                )
+            )
             unmerge_requests.extend(
                 self.home_run_pitcher_unmerge_requests(
                     sheet.id,
@@ -2014,6 +2079,15 @@ class NpbLeagueSheetService(NpbModuleService):
             )
             format_requests.extend(
                 self.home_run_direction_font_requests(
+                    sheet.id,
+                    home_games,
+                    hr_layout["bottom_header"],
+                    col_start,
+                    hr_layout["bottom_event_rows"],
+                )
+            )
+            format_requests.extend(
+                self.home_run_bat_side_font_requests(
                     sheet.id,
                     home_games,
                     hr_layout["bottom_header"],
