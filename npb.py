@@ -61,6 +61,7 @@ NPB_TEAMS = {
     "巨人": {
         "id": 1,
         "name": "巨 人",
+        "jp": "巨人",
         "fill": "ff6600",
         "font": "000000",
         "league": "央盟",
@@ -68,6 +69,7 @@ NPB_TEAMS = {
     "ヤクルト": {
         "id": 2,
         "name": "燕 子",
+        "jp": "ヤクルト",
         "fill": "00009a",
         "font": "ffffff",
         "league": "央盟",
@@ -75,6 +77,7 @@ NPB_TEAMS = {
     "DeNA": {
         "id": 3,
         "name": "橫 濱",
+        "jp": "DeNA",
         "fill": "003366",
         "font": "b6dde8",
         "league": "央盟",
@@ -82,6 +85,7 @@ NPB_TEAMS = {
     "中日": {
         "id": 4,
         "name": "中 日",
+        "jp": "中日",
         "fill": "002774",
         "font": "ffffff",
         "league": "央盟",
@@ -89,6 +93,7 @@ NPB_TEAMS = {
     "阪神": {
         "id": 5,
         "name": "阪 神",
+        "jp": "阪神",
         "fill": "fcf600",
         "font": "000000",
         "league": "央盟",
@@ -96,6 +101,7 @@ NPB_TEAMS = {
     "広島": {
         "id": 6,
         "name": "廣 島",
+        "jp": "広島",
         "fill": "ea0000",
         "font": "ffffff",
         "league": "央盟",
@@ -103,6 +109,7 @@ NPB_TEAMS = {
     "西武": {
         "id": 7,
         "name": "西 武",
+        "jp": "西武",
         "fill": "99ccff",
         "font": "17365d",
         "league": "洋盟",
@@ -110,6 +117,7 @@ NPB_TEAMS = {
     "日本ハム": {
         "id": 8,
         "name": "火 腿",
+        "jp": "日本ハム",
         "fill": "2b67af",
         "font": "ffffff",
         "league": "洋盟",
@@ -117,6 +125,7 @@ NPB_TEAMS = {
     "ロッテ": {
         "id": 9,
         "name": "羅 德",
+        "jp": "ロッテ",
         "fill": "808080",
         "font": "ffffff",
         "league": "洋盟",
@@ -124,6 +133,7 @@ NPB_TEAMS = {
     "オリックス": {
         "id": 11,
         "name": "歐 牛",
+        "jp": "オリックス",
         "fill": "002060",
         "font": "c4bf00",
         "league": "洋盟",
@@ -131,6 +141,7 @@ NPB_TEAMS = {
     "ソフトバンク": {
         "id": 12,
         "name": "軟 銀",
+        "jp": "ソフトバンク",
         "fill": "ffcc00",
         "font": "000000",
         "league": "洋盟",
@@ -138,11 +149,16 @@ NPB_TEAMS = {
     "楽天": {
         "id": 376,
         "name": "樂 天",
+        "jp": "楽天",
         "fill": "800000",
         "font": "ffffff",
         "league": "洋盟",
     },
 }
+
+# Map each team's Chinese display name to its Japanese name, used to render the
+# 全壘打 對戰 column in Japanese while the rest of the sheet stays Chinese.
+NPB_TEAM_JP_BY_NAME = {info["name"]: info["jp"] for info in NPB_TEAMS.values()}
 
 HOME_TEAM_MATCHUP_ORDER = [
     "巨人",

@@ -1617,7 +1617,7 @@ class TestBuildBlockValues:
 
         rows = service.recent_home_run_rows("巨人", [game])
 
-        assert rows[0][:8] == [
+        assert rows[0][:10] == [
             "巨 人",
             "日 期",
             "打 者",
@@ -1625,9 +1625,11 @@ class TestBuildBlockValues:
             "方 向",
             "投 手",
             "",
+            "",
+            "",
             "對 戰",
         ]
-        assert rows[1][:8] == [
+        assert rows[1][:10] == [
             "",
             "6/21",
             "泉口 友汰",
@@ -1635,7 +1637,9 @@ class TestBuildBlockValues:
             "右本",
             "柳",
             "",
-            "中 日",
+            "",
+            "",
+            "中日",
         ]
 
     def test_home_run_rows_shorten_switch_hitter_side(self):
@@ -2648,7 +2652,7 @@ class TestLeagueSheetLayoutClear:
             "startRowIndex": 29,
             "endRowIndex": 30,
             "startColumnIndex": 6,
-            "endColumnIndex": 8,
+            "endColumnIndex": 9,
         }
 
     def test_home_run_pitcher_unmerge_requests_cover_pitcher_cells_only(self):
@@ -2667,8 +2671,103 @@ class TestLeagueSheetLayoutClear:
             "startRowIndex": 29,
             "endRowIndex": 30,
             "startColumnIndex": 6,
-            "endColumnIndex": 8,
+            "endColumnIndex": 9,
         }
+
+    def test_home_run_opponent_merge_requests_cover_opponent_cells_only(self):
+        service = NpbLeagueSheetService(module=npb)
+
+        requests = service.home_run_opponent_merge_requests(
+            sheet_id=99,
+            start_row=npb.TOP_HR_HEADER_ROW,
+            end_row=npb.TOP_HR_END_ROW,
+            col_start=2,
+        )
+
+        assert len(requests) == npb.HOME_RUN_EVENT_ROWS + 1
+        first = requests[0]["mergeCells"]
+        assert first["mergeType"] == "MERGE_ALL"
+        assert first["range"] == {
+            "sheetId": 99,
+            "startRowIndex": 29,
+            "endRowIndex": 30,
+            "startColumnIndex": 10,
+            "endColumnIndex": 12,
+        }
+
+    def test_home_run_opponent_unmerge_requests_cover_opponent_cells_only(self):
+        service = NpbLeagueSheetService(module=npb)
+
+        requests = service.home_run_opponent_unmerge_requests(
+            sheet_id=99,
+            start_row=npb.TOP_HR_HEADER_ROW,
+            end_row=npb.TOP_HR_END_ROW,
+            col_start=2,
+        )
+
+        assert len(requests) == npb.HOME_RUN_EVENT_ROWS + 1
+        assert requests[0]["unmergeCells"]["range"] == {
+            "sheetId": 99,
+            "startRowIndex": 29,
+            "endRowIndex": 30,
+            "startColumnIndex": 10,
+            "endColumnIndex": 12,
+        }
+
+    def test_opponent_font_size_shrinks_only_longest_name(self):
+        # ソフトバンク (6 chars) shrinks; everything else stays default.
+        assert NpbLeagueSheetService.opponent_font_size("ソフトバンク") == 9
+        assert NpbLeagueSheetService.opponent_font_size("オリックス") == 10
+        assert NpbLeagueSheetService.opponent_font_size("日本ハム") == 10
+        assert NpbLeagueSheetService.opponent_font_size("中日") == 10
+        assert NpbLeagueSheetService.opponent_font_size("") == 10
+
+    def test_home_run_opponent_font_requests_shrink_long_names(self):
+        service = NpbLeagueSheetService(module=npb)
+        game = _make_game(
+            "2026/06/21",
+            "軟 銀",
+            "柳",
+            "羅 德",
+            0,
+            2,
+            0,
+            0,
+            6,
+            0,
+            0,
+            0,
+            1,
+        )
+        game["全壘打明細"] = [
+            {
+                "日期": "2026/06/21",
+                "打者": "藤原 恭大",
+                "左右打": "左打",
+                "方向": "右本",
+                "投手": "北斗",
+                "對戰球隊": "軟 銀",
+            }
+        ]
+
+        requests = service.home_run_opponent_font_requests(
+            99,
+            [game],
+            npb.TOP_HR_HEADER_ROW,
+            2,
+            npb.HOME_RUN_EVENT_ROWS,
+        )
+
+        # first event row: 軟 銀 → ソフトバンク → 9pt; padded rows stay 10pt.
+        first = requests[0]["repeatCell"]
+        assert first["range"]["startColumnIndex"] == 10
+        assert first["cell"]["userEnteredFormat"]["textFormat"]["fontSize"] == 9
+        assert (
+            requests[-1]["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"][
+                "fontSize"
+            ]
+            == 10
+        )
 
 
 # ---------------------------------------------------------------------------

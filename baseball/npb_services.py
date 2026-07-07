@@ -1344,9 +1344,11 @@ class NpbLeagueSheetService(NpbModuleService):
                 event.get("方向", ""),
                 event.get("投手", ""),
                 "",
-                event["_對戰"],
+                "",
+                "",
+                module.NPB_TEAM_JP_BY_NAME.get(event["_對戰"], event["_對戰"]),
             ]
-            + [""] * 6
+            + [""] * 4
             for event in self._home_run_events(games)
         ]
         rows = [
@@ -1358,9 +1360,11 @@ class NpbLeagueSheetService(NpbModuleService):
                 "方 向",
                 "投 手",
                 "",
+                "",
+                "",
                 "對 戰",
             ]
-            + [""] * 6
+            + [""] * 4
         ]
         if events:
             rows.extend(events[:event_rows])
@@ -1781,7 +1785,7 @@ class NpbLeagueSheetService(NpbModuleService):
                         "startRowIndex": row - 1,
                         "endRowIndex": row,
                         "startColumnIndex": pitcher_col_0idx,
-                        "endColumnIndex": pitcher_col_0idx + 2,
+                        "endColumnIndex": pitcher_col_0idx + 3,
                     },
                     "mergeType": "MERGE_ALL",
                 }
@@ -1801,12 +1805,101 @@ class NpbLeagueSheetService(NpbModuleService):
                         "startRowIndex": row - 1,
                         "endRowIndex": row,
                         "startColumnIndex": pitcher_col_0idx,
-                        "endColumnIndex": pitcher_col_0idx + 2,
+                        "endColumnIndex": pitcher_col_0idx + 3,
                     }
                 }
             }
             for row in range(start_row, end_row + 1)
         ]
+
+    def home_run_opponent_merge_requests(
+        self, sheet_id: int, start_row: int, end_row: int, col_start: int
+    ) -> list[dict]:
+        opponent_col_0idx = col_start + 8
+        return [
+            {
+                "mergeCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row - 1,
+                        "endRowIndex": row,
+                        "startColumnIndex": opponent_col_0idx,
+                        "endColumnIndex": opponent_col_0idx + 2,
+                    },
+                    "mergeType": "MERGE_ALL",
+                }
+            }
+            for row in range(start_row, end_row + 1)
+        ]
+
+    def home_run_opponent_unmerge_requests(
+        self, sheet_id: int, start_row: int, end_row: int, col_start: int
+    ) -> list[dict]:
+        opponent_col_0idx = col_start + 8
+        return [
+            {
+                "unmergeCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row - 1,
+                        "endRowIndex": row,
+                        "startColumnIndex": opponent_col_0idx,
+                        "endColumnIndex": opponent_col_0idx + 2,
+                    }
+                }
+            }
+            for row in range(start_row, end_row + 1)
+        ]
+
+    @staticmethod
+    def opponent_font_size(name: str) -> int:
+        """10pt default; shrink the longest Japanese team name (ソフトバンク) to
+        fit the two-column 對戰 merge."""
+        n = len(name.replace(" ", ""))
+        if n >= 6:
+            return 9
+        return 10
+
+    def home_run_opponent_font_requests(
+        self,
+        sheet_id: int,
+        games: list[dict],
+        hr_header_row: int,
+        col_start: int,
+        event_rows: int | None = None,
+    ) -> list[dict]:
+        """Set the 對戰 cell font size per event row, shrinking long Japanese
+        names. Empty rows reset to the default so stale small fonts don't linger.
+        """
+        module = self.module
+        event_rows = event_rows or module.HOME_RUN_EVENT_ROWS
+        opponent_col_0idx = col_start + 8
+        events = self._home_run_events(games)
+        requests = []
+        for i in range(event_rows):
+            event = events[i] if i < len(events) else None
+            raw_name = event["_對戰"] if event else ""
+            name = module.NPB_TEAM_JP_BY_NAME.get(raw_name, raw_name)
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": hr_header_row + i,
+                            "endRowIndex": hr_header_row + i + 1,
+                            "startColumnIndex": opponent_col_0idx,
+                            "endColumnIndex": opponent_col_0idx + 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "textFormat": {"fontSize": self.opponent_font_size(name)}
+                            }
+                        },
+                        "fields": "userEnteredFormat.textFormat.fontSize",
+                    }
+                }
+            )
+        return requests
 
     def home_run_direction_font_requests(
         self,
@@ -1993,6 +2086,14 @@ class NpbLeagueSheetService(NpbModuleService):
                 )
             )
             format_requests.extend(
+                self.home_run_opponent_merge_requests(
+                    sheet.id,
+                    hr_layout["top_header"],
+                    hr_layout["top_end"],
+                    col_start,
+                )
+            )
+            format_requests.extend(
                 self.home_run_direction_font_requests(
                     sheet.id,
                     away_games,
@@ -2010,8 +2111,25 @@ class NpbLeagueSheetService(NpbModuleService):
                     hr_layout["top_event_rows"],
                 )
             )
+            format_requests.extend(
+                self.home_run_opponent_font_requests(
+                    sheet.id,
+                    away_games,
+                    hr_layout["top_header"],
+                    col_start,
+                    hr_layout["top_event_rows"],
+                )
+            )
             unmerge_requests.extend(
                 self.home_run_pitcher_unmerge_requests(
+                    sheet.id,
+                    hr_layout["top_header"],
+                    hr_layout["top_end"],
+                    col_start,
+                )
+            )
+            unmerge_requests.extend(
+                self.home_run_opponent_unmerge_requests(
                     sheet.id,
                     hr_layout["top_header"],
                     hr_layout["top_end"],
@@ -2078,6 +2196,14 @@ class NpbLeagueSheetService(NpbModuleService):
                 )
             )
             format_requests.extend(
+                self.home_run_opponent_merge_requests(
+                    sheet.id,
+                    hr_layout["bottom_header"],
+                    hr_layout["bottom_end"],
+                    col_start,
+                )
+            )
+            format_requests.extend(
                 self.home_run_direction_font_requests(
                     sheet.id,
                     home_games,
@@ -2095,8 +2221,25 @@ class NpbLeagueSheetService(NpbModuleService):
                     hr_layout["bottom_event_rows"],
                 )
             )
+            format_requests.extend(
+                self.home_run_opponent_font_requests(
+                    sheet.id,
+                    home_games,
+                    hr_layout["bottom_header"],
+                    col_start,
+                    hr_layout["bottom_event_rows"],
+                )
+            )
             unmerge_requests.extend(
                 self.home_run_pitcher_unmerge_requests(
+                    sheet.id,
+                    hr_layout["bottom_header"],
+                    hr_layout["bottom_end"],
+                    col_start,
+                )
+            )
+            unmerge_requests.extend(
+                self.home_run_opponent_unmerge_requests(
                     sheet.id,
                     hr_layout["bottom_header"],
                     hr_layout["bottom_end"],
