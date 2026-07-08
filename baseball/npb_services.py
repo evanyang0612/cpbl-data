@@ -1293,7 +1293,9 @@ class NpbLeagueSheetService(NpbModuleService):
     def _is_opposite_field_home_run(
         cls, side: str, direction: str, pitcher_throw: str = ""
     ) -> bool:
-        """A home run to the same side as the batter's box is opposite-field."""
+        """Whether the home-run direction should be highlighted in red."""
+        if direction.startswith("中"):
+            return True
         stance = cls._effective_bat_side(side, pitcher_throw)
         if not stance or not direction:
             return False
@@ -1909,10 +1911,10 @@ class NpbLeagueSheetService(NpbModuleService):
         col_start: int,
         event_rows: int | None = None,
     ) -> list[dict]:
-        """Colour the 方向 cell red for opposite-field home runs.
+        """Colour the 方向 cell red for opposite-field and center home runs.
 
         Every event row is emitted so stale red from a previous run is reset to
-        the default colour when a slot is no longer opposite-field.
+        the default colour when a slot is no longer highlighted.
         """
         module = self.module
         event_rows = event_rows or module.HOME_RUN_EVENT_ROWS
