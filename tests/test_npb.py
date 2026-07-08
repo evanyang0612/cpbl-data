@@ -2262,7 +2262,7 @@ class TestHomeRunDirectionFontRequests:
             {"打者": "D", "左右打": "左打", "方向": "左本"},  # opposite → red
             {"打者": "E", "左右打": "左打", "方向": "左中本"},  # opposite → red
             {"打者": "F", "左右打": "左打", "方向": "右本"},  # pull → default
-            {"打者": "G", "左右打": "右打", "方向": "中本"},  # center → default
+            {"打者": "G", "左右打": "右打", "方向": "中本"},  # center → red
         ]
 
         requests = self._requests_for(events)
@@ -2276,7 +2276,7 @@ class TestHomeRunDirectionFontRequests:
             red,
             red,
             default,
-            default,
+            red,
         ]
 
     def test_targets_direction_column_and_event_rows(self):
