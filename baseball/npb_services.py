@@ -1256,12 +1256,12 @@ class NpbLeagueSheetService(NpbModuleService):
         return (hits + walks + hbp) / denominator
 
     def _home_run_events(self, games: list[dict]) -> list[dict]:
-        """Ordered, capped home-run events across the last five games."""
+        """Ordered, capped home-run events across the last six games."""
         module = self.module
         sorted_games = sorted(
             games,
             key=lambda g: self.parse_game_date(g["日期"]),
-        )[-5:]
+        )[-6:]
         events = []
         for game in sorted_games:
             for event in game.get("全壘打明細", []):
@@ -1371,7 +1371,7 @@ class NpbLeagueSheetService(NpbModuleService):
         if events:
             rows.extend(events[:event_rows])
         else:
-            rows.append(["", "近五場無全壘打"] + [""] * 12)
+            rows.append(["", "近六場無全壘打"] + [""] * 12)
         while len(rows) < event_rows + 1:
             rows.append([""] * 14)
         return rows
