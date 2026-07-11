@@ -1612,6 +1612,7 @@ class TestBuildBlockValues:
                 "方向": "右本",
                 "投手": "柳",
                 "對戰球隊": "中 日",
+                "球場原名": "東京ドーム",
             }
         ]
 
@@ -1627,7 +1628,7 @@ class TestBuildBlockValues:
             "",
             "",
             "",
-            "對 戰",
+            "球 場",
         ]
         assert rows[1][:10] == [
             "",
@@ -1639,7 +1640,7 @@ class TestBuildBlockValues:
             "",
             "",
             "",
-            "中日",
+            "東京ドーム",
         ]
 
     def test_home_run_rows_shorten_switch_hitter_side(self):
@@ -2674,10 +2675,10 @@ class TestLeagueSheetLayoutClear:
             "endColumnIndex": 9,
         }
 
-    def test_home_run_opponent_merge_requests_cover_opponent_cells_only(self):
+    def test_home_run_venue_merge_requests_cover_venue_cells_only(self):
         service = NpbLeagueSheetService(module=npb)
 
-        requests = service.home_run_opponent_merge_requests(
+        requests = service.home_run_venue_merge_requests(
             sheet_id=99,
             start_row=npb.TOP_HR_HEADER_ROW,
             end_row=npb.TOP_HR_END_ROW,
@@ -2692,13 +2693,13 @@ class TestLeagueSheetLayoutClear:
             "startRowIndex": 29,
             "endRowIndex": 30,
             "startColumnIndex": 10,
-            "endColumnIndex": 12,
+            "endColumnIndex": 14,
         }
 
-    def test_home_run_opponent_unmerge_requests_cover_opponent_cells_only(self):
+    def test_home_run_venue_unmerge_requests_cover_venue_cells_only(self):
         service = NpbLeagueSheetService(module=npb)
 
-        requests = service.home_run_opponent_unmerge_requests(
+        requests = service.home_run_venue_unmerge_requests(
             sheet_id=99,
             start_row=npb.TOP_HR_HEADER_ROW,
             end_row=npb.TOP_HR_END_ROW,
@@ -2711,24 +2712,25 @@ class TestLeagueSheetLayoutClear:
             "startRowIndex": 29,
             "endRowIndex": 30,
             "startColumnIndex": 10,
-            "endColumnIndex": 12,
+            "endColumnIndex": 14,
         }
 
-    def test_opponent_font_size_shrinks_only_longest_name(self):
-        # ソフトバンク (6 chars) shrinks; everything else stays default.
-        assert NpbLeagueSheetService.opponent_font_size("ソフトバンク") == 9
-        assert NpbLeagueSheetService.opponent_font_size("オリックス") == 10
-        assert NpbLeagueSheetService.opponent_font_size("日本ハム") == 10
-        assert NpbLeagueSheetService.opponent_font_size("中日") == 10
-        assert NpbLeagueSheetService.opponent_font_size("") == 10
+    def test_venue_font_size_shrinks_only_longest_name(self):
+        # 8-char venues (バンテリンドーム) shrink; shorter ones stay default.
+        assert NpbLeagueSheetService.venue_font_size("バンテリンドーム") == 9
+        assert NpbLeagueSheetService.venue_font_size("マツダスタジアム") == 9
+        assert NpbLeagueSheetService.venue_font_size("ベルーナドーム") == 10
+        assert NpbLeagueSheetService.venue_font_size("東京ドーム") == 10
+        assert NpbLeagueSheetService.venue_font_size("甲子園") == 10
+        assert NpbLeagueSheetService.venue_font_size("") == 10
 
-    def test_home_run_opponent_font_requests_shrink_long_names(self):
+    def test_home_run_venue_font_requests_shrink_long_names(self):
         service = NpbLeagueSheetService(module=npb)
         game = _make_game(
             "2026/06/21",
-            "軟 銀",
+            "中 日",
             "柳",
-            "羅 德",
+            "名古屋",
             0,
             2,
             0,
@@ -2742,15 +2744,16 @@ class TestLeagueSheetLayoutClear:
         game["全壘打明細"] = [
             {
                 "日期": "2026/06/21",
-                "打者": "藤原 恭大",
-                "左右打": "左打",
-                "方向": "右本",
-                "投手": "北斗",
-                "對戰球隊": "軟 銀",
+                "打者": "岡本 和真",
+                "左右打": "右打",
+                "方向": "左本",
+                "投手": "柳",
+                "對戰球隊": "中 日",
+                "球場原名": "バンテリンドーム",
             }
         ]
 
-        requests = service.home_run_opponent_font_requests(
+        requests = service.home_run_venue_font_requests(
             99,
             [game],
             npb.TOP_HR_HEADER_ROW,
@@ -2758,7 +2761,7 @@ class TestLeagueSheetLayoutClear:
             npb.HOME_RUN_EVENT_ROWS,
         )
 
-        # first event row: 軟 銀 → ソフトバンク → 9pt; padded rows stay 10pt.
+        # first event row: バンテリンドーム (8 chars) → 9pt; padded rows stay 10pt.
         first = requests[0]["repeatCell"]
         assert first["range"]["startColumnIndex"] == 10
         assert first["cell"]["userEnteredFormat"]["textFormat"]["fontSize"] == 9
