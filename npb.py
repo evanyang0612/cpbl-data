@@ -156,10 +156,6 @@ NPB_TEAMS = {
     },
 }
 
-# Map each team's Chinese display name to its Japanese name, used to render the
-# 全壘打 對戰 column in Japanese while the rest of the sheet stays Chinese.
-NPB_TEAM_JP_BY_NAME = {info["name"]: info["jp"] for info in NPB_TEAMS.values()}
-
 HOME_TEAM_MATCHUP_ORDER = [
     "巨人",
     "中日",

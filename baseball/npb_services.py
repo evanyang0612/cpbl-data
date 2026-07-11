@@ -1267,7 +1267,11 @@ class NpbLeagueSheetService(NpbModuleService):
             for event in game.get("全壘打明細", []):
                 enriched = dict(event)
                 enriched["_日期"] = event.get("日期") or game.get("日期", "")
-                enriched["_對戰"] = event.get("對戰球隊", game.get("對戰球隊", ""))
+                enriched["_球場"] = (
+                    event.get("球場原名")
+                    or game.get("球場原名")
+                    or game.get("球場", "")
+                )
                 events.append(enriched)
         return events[: module.HOME_RUN_EVENT_ROWS]
 
@@ -1348,7 +1352,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 "",
                 "",
                 "",
-                module.NPB_TEAM_JP_BY_NAME.get(event["_對戰"], event["_對戰"]),
+                event.get("_球場", ""),
             ]
             + [""] * 4
             for event in self._home_run_events(games)
@@ -1364,7 +1368,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 "",
                 "",
                 "",
-                "對 戰",
+                "球 場",
             ]
             + [""] * 4
         ]
@@ -1814,10 +1818,10 @@ class NpbLeagueSheetService(NpbModuleService):
             for row in range(start_row, end_row + 1)
         ]
 
-    def home_run_opponent_merge_requests(
+    def home_run_venue_merge_requests(
         self, sheet_id: int, start_row: int, end_row: int, col_start: int
     ) -> list[dict]:
-        opponent_col_0idx = col_start + 8
+        venue_col_0idx = col_start + 8
         return [
             {
                 "mergeCells": {
@@ -1825,8 +1829,8 @@ class NpbLeagueSheetService(NpbModuleService):
                         "sheetId": sheet_id,
                         "startRowIndex": row - 1,
                         "endRowIndex": row,
-                        "startColumnIndex": opponent_col_0idx,
-                        "endColumnIndex": opponent_col_0idx + 2,
+                        "startColumnIndex": venue_col_0idx,
+                        "endColumnIndex": venue_col_0idx + 4,
                     },
                     "mergeType": "MERGE_ALL",
                 }
@@ -1834,10 +1838,10 @@ class NpbLeagueSheetService(NpbModuleService):
             for row in range(start_row, end_row + 1)
         ]
 
-    def home_run_opponent_unmerge_requests(
+    def home_run_venue_unmerge_requests(
         self, sheet_id: int, start_row: int, end_row: int, col_start: int
     ) -> list[dict]:
-        opponent_col_0idx = col_start + 8
+        venue_col_0idx = col_start + 8
         return [
             {
                 "unmergeCells": {
@@ -1845,8 +1849,8 @@ class NpbLeagueSheetService(NpbModuleService):
                         "sheetId": sheet_id,
                         "startRowIndex": row - 1,
                         "endRowIndex": row,
-                        "startColumnIndex": opponent_col_0idx,
-                        "endColumnIndex": opponent_col_0idx + 2,
+                        "startColumnIndex": venue_col_0idx,
+                        "endColumnIndex": venue_col_0idx + 4,
                     }
                 }
             }
@@ -1854,15 +1858,15 @@ class NpbLeagueSheetService(NpbModuleService):
         ]
 
     @staticmethod
-    def opponent_font_size(name: str) -> int:
-        """10pt default; shrink the longest Japanese team name (ソフトバンク) to
-        fit the two-column 對戰 merge."""
+    def venue_font_size(name: str) -> int:
+        """10pt default; shrink the longest Yahoo venue names (e.g.
+        バンテリンドーム / マツダスタジアム) so they fit the widened 球場 merge."""
         n = len(name.replace(" ", ""))
-        if n >= 6:
+        if n >= 8:
             return 9
         return 10
 
-    def home_run_opponent_font_requests(
+    def home_run_venue_font_requests(
         self,
         sheet_id: int,
         games: list[dict],
@@ -1870,18 +1874,17 @@ class NpbLeagueSheetService(NpbModuleService):
         col_start: int,
         event_rows: int | None = None,
     ) -> list[dict]:
-        """Set the 對戰 cell font size per event row, shrinking long Japanese
+        """Set the 球場 cell font size per event row, shrinking long venue
         names. Empty rows reset to the default so stale small fonts don't linger.
         """
         module = self.module
         event_rows = event_rows or module.HOME_RUN_EVENT_ROWS
-        opponent_col_0idx = col_start + 8
+        venue_col_0idx = col_start + 8
         events = self._home_run_events(games)
         requests = []
         for i in range(event_rows):
             event = events[i] if i < len(events) else None
-            raw_name = event["_對戰"] if event else ""
-            name = module.NPB_TEAM_JP_BY_NAME.get(raw_name, raw_name)
+            name = event.get("_球場", "") if event else ""
             requests.append(
                 {
                     "repeatCell": {
@@ -1889,12 +1892,12 @@ class NpbLeagueSheetService(NpbModuleService):
                             "sheetId": sheet_id,
                             "startRowIndex": hr_header_row + i,
                             "endRowIndex": hr_header_row + i + 1,
-                            "startColumnIndex": opponent_col_0idx,
-                            "endColumnIndex": opponent_col_0idx + 1,
+                            "startColumnIndex": venue_col_0idx,
+                            "endColumnIndex": venue_col_0idx + 1,
                         },
                         "cell": {
                             "userEnteredFormat": {
-                                "textFormat": {"fontSize": self.opponent_font_size(name)}
+                                "textFormat": {"fontSize": self.venue_font_size(name)}
                             }
                         },
                         "fields": "userEnteredFormat.textFormat.fontSize",
@@ -2088,7 +2091,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 )
             )
             format_requests.extend(
-                self.home_run_opponent_merge_requests(
+                self.home_run_venue_merge_requests(
                     sheet.id,
                     hr_layout["top_header"],
                     hr_layout["top_end"],
@@ -2114,7 +2117,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 )
             )
             format_requests.extend(
-                self.home_run_opponent_font_requests(
+                self.home_run_venue_font_requests(
                     sheet.id,
                     away_games,
                     hr_layout["top_header"],
@@ -2131,7 +2134,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 )
             )
             unmerge_requests.extend(
-                self.home_run_opponent_unmerge_requests(
+                self.home_run_venue_unmerge_requests(
                     sheet.id,
                     hr_layout["top_header"],
                     hr_layout["top_end"],
@@ -2198,7 +2201,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 )
             )
             format_requests.extend(
-                self.home_run_opponent_merge_requests(
+                self.home_run_venue_merge_requests(
                     sheet.id,
                     hr_layout["bottom_header"],
                     hr_layout["bottom_end"],
@@ -2224,7 +2227,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 )
             )
             format_requests.extend(
-                self.home_run_opponent_font_requests(
+                self.home_run_venue_font_requests(
                     sheet.id,
                     home_games,
                     hr_layout["bottom_header"],
@@ -2241,7 +2244,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 )
             )
             unmerge_requests.extend(
-                self.home_run_opponent_unmerge_requests(
+                self.home_run_venue_unmerge_requests(
                     sheet.id,
                     hr_layout["bottom_header"],
                     hr_layout["bottom_end"],
@@ -2379,6 +2382,7 @@ class NpbRecentGamesService:
         return {
             "日期": NpbRecentGamesService._date_for_recent_sheet(data["日期"]),
             "球場": data.get("球場", ""),
+            "球場原名": data.get("球場原名", ""),
             "對戰球隊": opponent_name,
             "對戰先發": opponent_starter,
             "実分": opponent_pitching[12],
@@ -2400,6 +2404,7 @@ class NpbRecentGamesService:
                     **event,
                     "日期": NpbRecentGamesService._date_for_recent_sheet(data["日期"]),
                     "對戰球隊": opponent_name,
+                    "球場原名": data.get("球場原名", ""),
                 }
                 for event in home_runs
             ],
