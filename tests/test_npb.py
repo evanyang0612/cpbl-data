@@ -1627,7 +1627,7 @@ class TestBuildBlockValues:
             "投 手",
             "",
             "",
-            "",
+            "球 隊",
             "球 場",
         ]
         assert rows[1][:10] == [
@@ -1639,7 +1639,7 @@ class TestBuildBlockValues:
             "柳",
             "",
             "",
-            "",
+            "D",
             "東京ドーム",
         ]
 
@@ -1677,12 +1677,15 @@ class TestBuildBlockValues:
 
     def test_home_run_rows_keep_up_to_configured_capacity(self):
         service = NpbLeagueSheetService(module=npb)
-        game = _make_home_run_game(npb.HOME_RUN_EVENT_ROWS + 2)
+        extra = 2
+        game = _make_home_run_game(npb.HOME_RUN_EVENT_ROWS + extra)
 
         rows = service.recent_home_run_rows("日本ハム", [game])
 
+        # Capped at capacity, keeping the most recent rows (oldest dropped).
         assert len(rows) == npb.HOME_RUN_EVENT_ROWS + 1
-        assert rows[-1][2] == f"打者{npb.HOME_RUN_EVENT_ROWS - 1}"
+        assert rows[1][2] == f"打者{extra}"
+        assert rows[-1][2] == f"打者{npb.HOME_RUN_EVENT_ROWS + extra - 1}"
 
     def test_two_character_local_field_gets_spaced(self):
         games = [

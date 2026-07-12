@@ -39,7 +39,13 @@ BASE_URL = "https://baseball.yahoo.co.jp/npb/"
 NPB_OFFICIAL_BASE_URL = "https://npb.jp"
 MAX_RETRY = 3
 GAMES_COUNT = 10
-MAX_CONCURRENT = 5
+MAX_CONCURRENT = 3
+# Global ceiling on concurrent HTTP requests. Each scraped game fans out to
+# several Yahoo pages (stats/top/play-by-play/player), so capping the total
+# in-flight requests here — not just the per-game batch — is what actually keeps
+# us under Yahoo's IP rate limit.
+MAX_CONCURRENT_REQUESTS = 4
+BATCH_PAUSE_SECONDS = 4
 
 SCORE_WIN_FONT = "ff0000"
 SCORE_LOSS_FONT = "38761d"
@@ -62,6 +68,7 @@ NPB_TEAMS = {
         "id": 1,
         "name": "巨 人",
         "jp": "巨人",
+        "en": "G",
         "fill": "ff6600",
         "font": "000000",
         "league": "央盟",
@@ -70,6 +77,7 @@ NPB_TEAMS = {
         "id": 2,
         "name": "燕 子",
         "jp": "ヤクルト",
+        "en": "S",
         "fill": "00009a",
         "font": "ffffff",
         "league": "央盟",
@@ -78,6 +86,7 @@ NPB_TEAMS = {
         "id": 3,
         "name": "橫 濱",
         "jp": "DeNA",
+        "en": "YB",
         "fill": "003366",
         "font": "b6dde8",
         "league": "央盟",
@@ -86,22 +95,27 @@ NPB_TEAMS = {
         "id": 4,
         "name": "中 日",
         "jp": "中日",
+        "en": "D",
         "fill": "002774",
         "font": "ffffff",
+        "hr_font": "1155cc",
         "league": "央盟",
     },
     "阪神": {
         "id": 5,
         "name": "阪 神",
         "jp": "阪神",
-        "fill": "fcf600",
+        "en": "T",
+        "fill": "fce300",
         "font": "000000",
+        "hr_font": "e69138",
         "league": "央盟",
     },
     "広島": {
         "id": 6,
         "name": "廣 島",
         "jp": "広島",
+        "en": "C",
         "fill": "ea0000",
         "font": "ffffff",
         "league": "央盟",
@@ -110,14 +124,17 @@ NPB_TEAMS = {
         "id": 7,
         "name": "西 武",
         "jp": "西武",
+        "en": "L",
         "fill": "99ccff",
         "font": "17365d",
+        "hr_font": "1155cc",
         "league": "洋盟",
     },
     "日本ハム": {
         "id": 8,
         "name": "火 腿",
         "jp": "日本ハム",
+        "en": "F",
         "fill": "2b67af",
         "font": "ffffff",
         "league": "洋盟",
@@ -126,14 +143,17 @@ NPB_TEAMS = {
         "id": 9,
         "name": "羅 德",
         "jp": "ロッテ",
+        "en": "M",
         "fill": "808080",
         "font": "ffffff",
+        "hr_font": "404040",
         "league": "洋盟",
     },
     "オリックス": {
         "id": 11,
         "name": "歐 牛",
         "jp": "オリックス",
+        "en": "B",
         "fill": "002060",
         "font": "c4bf00",
         "league": "洋盟",
@@ -142,18 +162,28 @@ NPB_TEAMS = {
         "id": 12,
         "name": "軟 銀",
         "jp": "ソフトバンク",
+        "en": "H",
         "fill": "ffcc00",
         "font": "000000",
+        "hr_font": "dca705",
         "league": "洋盟",
     },
     "楽天": {
         "id": 376,
         "name": "樂 天",
         "jp": "楽天",
+        "en": "E",
         "fill": "800000",
         "font": "ffffff",
         "league": "洋盟",
     },
+}
+
+# Reverse lookup: display name (spaces stripped) → team key, used to resolve the
+# opponent recorded on a game (stored as the opponent's display 名) back to its
+# team key so the recent home-run block can show its 英文縮寫 in team colour.
+NPB_TEAM_BY_DISPLAY_NAME = {
+    re.sub(r"\s+", "", info["name"]): key for key, info in NPB_TEAMS.items()
 }
 
 HOME_TEAM_MATCHUP_ORDER = [
@@ -928,13 +958,32 @@ async def update_npb_prediction_reveals(
 
 # --- Scraping ---
 
+# Per-event-loop semaphore capping the total number of concurrent Yahoo
+# requests across the whole program (game batches AND their internal fan-out).
+# Keyed by loop so repeated asyncio.run() calls each get a fresh, correctly
+# bound semaphore instead of reusing one tied to a closed loop.
+_REQUEST_SEMAPHORES: "dict[asyncio.AbstractEventLoop, asyncio.Semaphore]" = {}
+
+
+def _request_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _REQUEST_SEMAPHORES.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        _REQUEST_SEMAPHORES[loop] = sem
+    return sem
+
 
 async def _fetch(session: aiohttp.ClientSession, url: str) -> Optional[str]:
+    semaphore = _request_semaphore()
     for attempt in range(MAX_RETRY + 1):
         try:
-            async with session.get(url) as res:
-                if res.status == 200:
-                    return await res.text()
+            # Hold the semaphore only around the request itself; release it while
+            # backing off so a retry sleep doesn't block other requests.
+            async with semaphore:
+                async with session.get(url) as res:
+                    if res.status == 200:
+                        return await res.text()
         except Exception:
             pass
         if attempt < MAX_RETRY:
@@ -944,9 +993,10 @@ async def _fetch(session: aiohttp.ClientSession, url: str) -> Optional[str]:
 
 async def _fetch_once(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     try:
-        async with session.get(url) as res:
-            if res.status == 200:
-                return await res.text()
+        async with _request_semaphore():
+            async with session.get(url) as res:
+                if res.status == 200:
+                    return await res.text()
     except Exception:
         pass
     return None
