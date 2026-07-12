@@ -1256,7 +1256,15 @@ class NpbLeagueSheetService(NpbModuleService):
         return (hits + walks + hbp) / denominator
 
     def _home_run_events(self, games: list[dict]) -> list[dict]:
-        """Ordered, capped home-run events across the last six games."""
+        """Ordered, capped home-run rows across the last six games.
+
+        Each row carries its opponent (``_對戰``), venue (``_球場``) and, on the
+        first row of a game, its date (``_日期``) — later rows of the same game
+        leave the date blank so the same-game date shows only once. A game with
+        no home run still yields one placeholder row (``_no_hr``) that keeps its
+        date, opponent, venue and facing starter while leaving the batting cells
+        blank, so every recent game is accounted for.
+        """
         module = self.module
         sorted_games = sorted(
             games,
@@ -1264,16 +1272,49 @@ class NpbLeagueSheetService(NpbModuleService):
         )[-6:]
         events = []
         for game in sorted_games:
-            for event in game.get("全壘打明細", []):
-                enriched = dict(event)
-                enriched["_日期"] = event.get("日期") or game.get("日期", "")
-                enriched["_球場"] = (
-                    event.get("球場原名")
-                    or game.get("球場原名")
-                    or game.get("球場", "")
+            game_date = game.get("日期", "")
+            venue = game.get("球場原名") or game.get("球場", "")
+            opponent = game.get("對戰球隊", "")
+            details = game.get("全壘打明細", [])
+            if details:
+                for idx, event in enumerate(details):
+                    enriched = dict(event)
+                    first = idx == 0
+                    # Same game → same date, opponent and venue, so show them
+                    # only on the first row and leave later rows blank.
+                    enriched["_日期"] = (event.get("日期") or game_date) if first else ""
+                    enriched["_球場"] = (event.get("球場原名") or venue) if first else ""
+                    enriched["_對戰"] = opponent if first else ""
+                    events.append(enriched)
+            else:
+                events.append(
+                    {
+                        "_日期": game_date,
+                        "_球場": venue,
+                        "_對戰": opponent,
+                        # A run of box-drawing lines fills the merged 打者/打位/
+                        # 方向 span as one continuous bar (centred + clipped).
+                        "打者": "─" * 12,
+                        "投手": game.get("對戰先發", ""),
+                        "_no_hr": True,
+                    }
                 )
-                events.append(enriched)
-        return events[: module.HOME_RUN_EVENT_ROWS]
+        # Bounded by the 6-game window, so this cap is only a backstop. If it is
+        # ever hit, keep the most recent rows (drop the oldest) rather than the
+        # other way round, since this is a "recent" home-run view.
+        return events[-module.HOME_RUN_EVENT_ROWS :]
+
+    def _opponent_team_key(self, opponent_display: str) -> str:
+        """Resolve a game's opponent display 名 back to its team key."""
+        module = self.module
+        stripped = re.sub(r"\s+", "", opponent_display or "")
+        return module.NPB_TEAM_BY_DISPLAY_NAME.get(stripped, "")
+
+    def opponent_abbr(self, opponent_display: str) -> str:
+        """English abbreviation for a game's opponent (e.g. 阪神 → T)."""
+        module = self.module
+        key = self._opponent_team_key(opponent_display)
+        return module.NPB_TEAMS[key]["en"] if key else ""
 
     @staticmethod
     def _effective_bat_side(side: str, pitcher_throw: str) -> str:
@@ -1351,7 +1392,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 event.get("投手", ""),
                 "",
                 "",
-                "",
+                self.opponent_abbr(event.get("_對戰", "")),
                 event.get("_球場", ""),
             ]
             + [""] * 4
@@ -1367,7 +1408,7 @@ class NpbLeagueSheetService(NpbModuleService):
                 "投 手",
                 "",
                 "",
-                "",
+                "球 隊",
                 "球 場",
             ]
             + [""] * 4
@@ -1866,6 +1907,130 @@ class NpbLeagueSheetService(NpbModuleService):
             return 9
         return 10
 
+    @staticmethod
+    def batter_font_size(name: str) -> int:
+        """10pt default; shrink long batter names (e.g. エンカーナシオン) so the
+        single 打者 column doesn't truncate them."""
+        n = len(name.replace(" ", ""))
+        if n >= 8:
+            return 6
+        if n >= 6:
+            return 8
+        if n >= 5:
+            return 9
+        return 10
+
+    def home_run_batter_font_requests(
+        self,
+        sheet_id: int,
+        games: list[dict],
+        hr_header_row: int,
+        col_start: int,
+        event_rows: int | None = None,
+    ) -> list[dict]:
+        """Set the 打者 cell font size per event row, shrinking long batter
+        names. Empty rows reset to the default so stale small fonts don't linger.
+        """
+        module = self.module
+        event_rows = event_rows or module.HOME_RUN_EVENT_ROWS
+        batter_col_0idx = col_start + 1
+        events = self._home_run_events(games)
+        requests = []
+        for i in range(event_rows):
+            event = events[i] if i < len(events) else None
+            name = event.get("打者", "") if event else ""
+            # No-home-run rows show a bar centred across 打者/打位/方向 at a fixed
+            # size (so the box-line run isn't shrunk); every other row keeps the
+            # normal left-aligned, length-shrunk batter name.
+            no_hr = bool(event and event.get("_no_hr"))
+            align = "CENTER" if no_hr else "LEFT"
+            size = 10 if no_hr else self.batter_font_size(name)
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": hr_header_row + i,
+                            "endRowIndex": hr_header_row + i + 1,
+                            "startColumnIndex": batter_col_0idx,
+                            "endColumnIndex": batter_col_0idx + 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "horizontalAlignment": align,
+                                "textFormat": {"fontSize": size},
+                            }
+                        },
+                        "fields": (
+                            "userEnteredFormat.horizontalAlignment,"
+                            "userEnteredFormat.textFormat.fontSize"
+                        ),
+                    }
+                }
+            )
+        return requests
+
+    def home_run_no_hr_merge_requests(
+        self,
+        sheet_id: int,
+        games: list[dict],
+        hr_header_row: int,
+        col_start: int,
+        event_rows: int | None = None,
+    ) -> list[dict]:
+        """Merge 打者/打位/方向 on no-home-run rows so the dash spans all three."""
+        module = self.module
+        event_rows = event_rows or module.HOME_RUN_EVENT_ROWS
+        span_start_0idx = col_start + 1
+        events = self._home_run_events(games)
+        requests = []
+        for i in range(event_rows):
+            event = events[i] if i < len(events) else None
+            if not (event and event.get("_no_hr")):
+                continue
+            requests.append(
+                {
+                    "mergeCells": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": hr_header_row + i,
+                            "endRowIndex": hr_header_row + i + 1,
+                            "startColumnIndex": span_start_0idx,
+                            "endColumnIndex": span_start_0idx + 3,
+                        },
+                        "mergeType": "MERGE_ALL",
+                    }
+                }
+            )
+        return requests
+
+    def home_run_no_hr_unmerge_requests(
+        self,
+        sheet_id: int,
+        hr_header_row: int,
+        col_start: int,
+        event_rows: int | None = None,
+    ) -> list[dict]:
+        """Clear the 打者/打位/方向 span merge on every event row so a stale merge
+        from a previous run doesn't linger where a real home run now sits."""
+        module = self.module
+        event_rows = event_rows or module.HOME_RUN_EVENT_ROWS
+        span_start_0idx = col_start + 1
+        return [
+            {
+                "unmergeCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": hr_header_row + i,
+                        "endRowIndex": hr_header_row + i + 1,
+                        "startColumnIndex": span_start_0idx,
+                        "endColumnIndex": span_start_0idx + 3,
+                    }
+                }
+            }
+            for i in range(event_rows)
+        ]
+
     def home_run_venue_font_requests(
         self,
         sheet_id: int,
@@ -2015,6 +2180,60 @@ class NpbLeagueSheetService(NpbModuleService):
             )
         return requests
 
+    def home_run_opponent_font_requests(
+        self,
+        sheet_id: int,
+        games: list[dict],
+        hr_header_row: int,
+        col_start: int,
+        event_rows: int | None = None,
+    ) -> list[dict]:
+        """Colour the 對戰 (opponent) cell in each event row with the opponent's
+        team colour.
+
+        Every event row is emitted so a stale colour from a previous run is reset
+        to the default colour when a slot is empty or its opponent changes.
+        """
+        module = self.module
+        event_rows = event_rows or module.HOME_RUN_EVENT_ROWS
+        opponent_col_0idx = col_start + 7
+        events = self._home_run_events(games)
+        requests = []
+        for i in range(event_rows):
+            event = events[i] if i < len(events) else None
+            key = self._opponent_team_key(event.get("_對戰", "")) if event else ""
+            if key:
+                team = module.NPB_TEAMS[key]
+                color = team.get("hr_font") or team["fill"]
+            else:
+                color = module.DEFAULT_FONT
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": hr_header_row + i,
+                            "endRowIndex": hr_header_row + i + 1,
+                            "startColumnIndex": opponent_col_0idx,
+                            "endColumnIndex": opponent_col_0idx + 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "textFormat": {
+                                    "foregroundColor": self.hex_to_rgb(color),
+                                    "fontSize": 10,
+                                }
+                            }
+                        },
+                        "fields": (
+                            "userEnteredFormat.textFormat.foregroundColor,"
+                            "userEnteredFormat.textFormat.fontSize"
+                        ),
+                    }
+                }
+            )
+        return requests
+
     def update_league_sheet(
         self,
         sheet_name: str,
@@ -2025,7 +2244,9 @@ class NpbLeagueSheetService(NpbModuleService):
         sheet = module.get_worksheet(sheet_name)
         value_updates = []
         format_requests = []
-        reset_requests = [self.home_run_base_format_request(sheet.id)]
+        reset_requests = [
+            self.home_run_base_format_request(sheet.id),
+        ]
         unmerge_requests = []
         hr_layout = self.home_run_layout(matchups, all_games)
 
@@ -2125,6 +2346,33 @@ class NpbLeagueSheetService(NpbModuleService):
                     hr_layout["top_event_rows"],
                 )
             )
+            format_requests.extend(
+                self.home_run_opponent_font_requests(
+                    sheet.id,
+                    away_games,
+                    hr_layout["top_header"],
+                    col_start,
+                    hr_layout["top_event_rows"],
+                )
+            )
+            format_requests.extend(
+                self.home_run_batter_font_requests(
+                    sheet.id,
+                    away_games,
+                    hr_layout["top_header"],
+                    col_start,
+                    hr_layout["top_event_rows"],
+                )
+            )
+            format_requests.extend(
+                self.home_run_no_hr_merge_requests(
+                    sheet.id,
+                    away_games,
+                    hr_layout["top_header"],
+                    col_start,
+                    hr_layout["top_event_rows"],
+                )
+            )
             unmerge_requests.extend(
                 self.home_run_pitcher_unmerge_requests(
                     sheet.id,
@@ -2139,6 +2387,14 @@ class NpbLeagueSheetService(NpbModuleService):
                     hr_layout["top_header"],
                     hr_layout["top_end"],
                     col_start,
+                )
+            )
+            unmerge_requests.extend(
+                self.home_run_no_hr_unmerge_requests(
+                    sheet.id,
+                    hr_layout["top_header"],
+                    col_start,
+                    hr_layout["top_event_rows"],
                 )
             )
 
@@ -2235,6 +2491,33 @@ class NpbLeagueSheetService(NpbModuleService):
                     hr_layout["bottom_event_rows"],
                 )
             )
+            format_requests.extend(
+                self.home_run_opponent_font_requests(
+                    sheet.id,
+                    home_games,
+                    hr_layout["bottom_header"],
+                    col_start,
+                    hr_layout["bottom_event_rows"],
+                )
+            )
+            format_requests.extend(
+                self.home_run_batter_font_requests(
+                    sheet.id,
+                    home_games,
+                    hr_layout["bottom_header"],
+                    col_start,
+                    hr_layout["bottom_event_rows"],
+                )
+            )
+            format_requests.extend(
+                self.home_run_no_hr_merge_requests(
+                    sheet.id,
+                    home_games,
+                    hr_layout["bottom_header"],
+                    col_start,
+                    hr_layout["bottom_event_rows"],
+                )
+            )
             unmerge_requests.extend(
                 self.home_run_pitcher_unmerge_requests(
                     sheet.id,
@@ -2249,6 +2532,14 @@ class NpbLeagueSheetService(NpbModuleService):
                     hr_layout["bottom_header"],
                     hr_layout["bottom_end"],
                     col_start,
+                )
+            )
+            unmerge_requests.extend(
+                self.home_run_no_hr_unmerge_requests(
+                    sheet.id,
+                    hr_layout["bottom_header"],
+                    col_start,
+                    hr_layout["bottom_event_rows"],
                 )
             )
 
@@ -2532,7 +2823,7 @@ class NpbRecentGamesService:
                         else:
                             game_cache[gid] = result
                 if i + module.MAX_CONCURRENT < len(id_list):
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(module.BATCH_PAUSE_SECONDS)
 
             all_games: dict[str, list[dict]] = {}
             for team_key in team_keys:
