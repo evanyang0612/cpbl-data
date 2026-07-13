@@ -1690,8 +1690,13 @@ async def _player_bat_hand(player_id: str, session: aiohttp.ClientSession) -> st
         return ""
     if player_id in _PLAYER_BAT_HAND_CACHE:
         return _PLAYER_BAT_HAND_CACHE[player_id]
-    html = await _fetch_once(session, f"{BASE_URL}player/{player_id}/top")
-    hand = _parse_player_bat_hand(html or "")
+    # Use the retrying fetch, not _fetch_once: a single dropped request here used
+    # to get memoized as "" forever, permanently blanking 打位 for that player for
+    # the rest of the run even though the player page itself was fine.
+    html = await _fetch(session, f"{BASE_URL}player/{player_id}/top")
+    if html is None:
+        return ""
+    hand = _parse_player_bat_hand(html)
     _PLAYER_BAT_HAND_CACHE[player_id] = hand
     return hand
 
@@ -1713,8 +1718,10 @@ async def _player_throw_hand(player_id: str, session: aiohttp.ClientSession) -> 
         return ""
     if player_id in _PLAYER_THROW_HAND_CACHE:
         return _PLAYER_THROW_HAND_CACHE[player_id]
-    html = await _fetch_once(session, f"{BASE_URL}player/{player_id}/top")
-    hand = _parse_player_throw_hand(html or "")
+    html = await _fetch(session, f"{BASE_URL}player/{player_id}/top")
+    if html is None:
+        return ""
+    hand = _parse_player_throw_hand(html)
     _PLAYER_THROW_HAND_CACHE[player_id] = hand
     return hand
 

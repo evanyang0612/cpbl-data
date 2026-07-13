@@ -1794,12 +1794,14 @@ class NpbLeagueSheetService(NpbModuleService):
                         "backgroundColor": self.hex_to_rgb("ffffff"),
                         "textFormat": {
                             "foregroundColor": self.hex_to_rgb(module.DEFAULT_FONT),
+                            "fontSize": 10,
                         },
                     }
                 },
                 "fields": (
                     "userEnteredFormat.backgroundColor,"
-                    "userEnteredFormat.textFormat.foregroundColor"
+                    "userEnteredFormat.textFormat.foregroundColor,"
+                    "userEnteredFormat.textFormat.fontSize"
                 ),
             }
         }
@@ -2246,6 +2248,12 @@ class NpbLeagueSheetService(NpbModuleService):
         format_requests = []
         reset_requests = [
             self.home_run_base_format_request(sheet.id),
+            # Full-range, layout-independent unmerge: the per-team unmerge calls
+            # below only clear this run's freshly computed row range, so a merge
+            # left over from a previous run (whose header row landed elsewhere
+            # because event-row counts differed) never gets cleared and can end
+            # up sitting on this run's header row, hiding its labels.
+            self.layout_unmerge_request(sheet.id),
         ]
         unmerge_requests = []
         hr_layout = self.home_run_layout(matchups, all_games)
