@@ -30,6 +30,9 @@ jobs:
       - name: Scrape NPB odds
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          # PS3838 geo-blocks datacenter IPs; tunnel through the same
+          # residential proxy the CPBL scraper uses.
+          DECODO_PROXY_URL: ${{ secrets.DECODO_PROXY_URL }}
         run: uv run python -m baseball.pinnacle_odds
 
       - name: Send failure Telegram message

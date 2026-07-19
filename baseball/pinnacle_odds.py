@@ -131,9 +131,24 @@ def normalize_team(zh_name: str) -> str:
     return ""
 
 
+def _build_session() -> requests.Session:
+    """Session that routes through the Decodo proxy when configured.
+
+    PS3838 geo-blocks datacenter IPs (e.g. GitHub Actions runners get 403), so
+    on CI we tunnel through the same residential proxy the CPBL scraper uses.
+    Locally, with no proxy set, requests go out directly.
+    """
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    proxy_url = os.environ.get("DECODO_PROXY_URL")
+    if proxy_url:
+        session.proxies = {"http": proxy_url, "https": proxy_url}
+    return session
+
+
 def fetch_baseball_events(*, session: requests.Session | None = None,
                           timeout: int = 30) -> dict:
-    getter = session or requests
+    getter = session or _build_session()
     resp = getter.get(
         f"{BASE_URL}{EVENTS_PATH}", params=EVENTS_PARAMS,
         headers=HEADERS, timeout=timeout,
