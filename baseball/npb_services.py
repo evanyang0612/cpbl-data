@@ -724,10 +724,16 @@ class NpbRowsService(NpbModuleService):
         return int(batting[4] or 0) + int(batting[5] or 0) + int(batting[6] or 0)
 
     @staticmethod
-    def analysis_qs(starter_pitch: list):
-        ip_raw = str(starter_pitch[0] or "")
+    def qs_outs(ip_raw) -> int:
+        """Parse an innings-pitched value into outs.
+
+        Accepts both formats used across the sheets:
+        - NPB page style     "5", "5.1", "5.2"        (.1 = 1 out, .2 = 2 outs)
+        - decimal-thirds     "5", "5.3333", "5.6667"  (as written by
+          get_schedule_game_data and the CPBL importer)
+        """
         try:
-            parts = ip_raw.split(".")
+            parts = str(ip_raw or "").strip().split(".")
             partial = 0
             if len(parts) > 1:
                 frac = parts[1]
@@ -737,21 +743,59 @@ class NpbRowsService(NpbModuleService):
                     partial = 2
                 else:
                     partial = int(frac[:1] or 0)
-            outs = int(parts[0]) * 3 + partial
+            return int(parts[0]) * 3 + partial
         except (TypeError, ValueError):
-            outs = 0
-        try:
-            earned_runs = int(starter_pitch[12] or 0)
-        except (TypeError, ValueError):
-            earned_runs = 0
+            return 0
 
-        if outs >= 21 and earned_runs <= 3:
-            return "QS"
-        if outs >= 18 and earned_runs <= 2:
-            return "QS"
-        if outs >= 15 and earned_runs <= 1:
-            return "QS"
-        return "x"
+    @staticmethod
+    def sailu_ip_str(ip_raw) -> str:
+        """Format innings pitched for 賽錄 AT/AU (客投局 / 主投局).
+
+        賽錄 displays innings in baseball notation — "5.1" = 5⅓ IP, "5.2" = 5⅔ IP
+        — and the sheet's 客先局/主先局 formulas (BK/BL) convert that notation into
+        real decimals for arithmetic. 分析表 uses decimal-thirds instead, which is
+        what get_schedule_game_data emits, so the two must be reconciled here at
+        the 賽錄 boundary rather than in the scraper.
+
+        Idempotent: values already in .1/.2 notation are returned unchanged.
+        """
+        raw = str(ip_raw if ip_raw is not None else "").strip()
+        if not raw:
+            return ""
+        if not re.fullmatch(r"\d+(\.\d+)?", raw):
+            return raw  # leave anything unexpected untouched
+        full, rem = divmod(NpbRowsService.qs_outs(raw), 3)
+        return str(full) if rem == 0 else f"{full}.{rem}"
+
+    @staticmethod
+    def is_quality_start(ip_raw, earned_runs) -> bool:
+        """Tiered 優質先發 rule shared by 賽錄 and 分析表.
+
+        ≥7 IP & ER ≤3, or ≥6 IP & ER ≤2, or ≥5 IP & ER ≤1.
+        """
+        outs = NpbRowsService.qs_outs(ip_raw)
+        try:
+            er = int(earned_runs or 0)
+        except (TypeError, ValueError):
+            er = 0
+        return (
+            (outs >= 21 and er <= 3)
+            or (outs >= 18 and er <= 2)
+            or (outs >= 15 and er <= 1)
+        )
+
+    @staticmethod
+    def qs_flag(ip_raw, earned_runs) -> int:
+        """1/0 form of is_quality_start, for the 賽錄 客QS / 主QS columns."""
+        return 1 if NpbRowsService.is_quality_start(ip_raw, earned_runs) else 0
+
+    @staticmethod
+    def analysis_qs(starter_pitch: list):
+        return (
+            "QS"
+            if NpbRowsService.is_quality_start(starter_pitch[0], starter_pitch[12])
+            else "x"
+        )
 
     def analysis_starter_block(self, starter_pitch: list) -> list:
         return [
@@ -907,8 +951,8 @@ class NpbRowsService(NpbModuleService):
             home_code,
             data["客投別"],
             data["主投別"],
-            away_ip,
-            home_ip,
+            self.sailu_ip_str(away_ip),
+            self.sailu_ip_str(home_ip),
             away_er,
             data["客QS"],
             home_er,

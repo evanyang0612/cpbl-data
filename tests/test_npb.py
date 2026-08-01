@@ -611,6 +611,40 @@ class TestNpbRowsService:
         assert row[45] == "6"
         assert row[47] == 3
 
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # decimal-thirds (what get_schedule_game_data emits) -> .1/.2 notation
+            ("5.3333", "5.1"),
+            ("5.6667", "5.2"),
+            ("8.6667", "8.2"),
+            # already in .1/.2 notation -> unchanged (idempotent)
+            ("5.1", "5.1"),
+            ("5.2", "5.2"),
+            # whole innings unchanged in either convention
+            ("6", "6"),
+            (6, "6"),
+            ("0", "0"),
+            # nothing to format
+            ("", ""),
+            (None, ""),
+            # unexpected values are passed through untouched
+            ("--", "--"),
+        ],
+    )
+    def test_sailu_ip_str_normalizes_to_baseball_notation(self, raw, expected):
+        assert NpbRowsService.sailu_ip_str(raw) == expected
+
+    def test_sailu_row_writes_innings_in_baseball_notation(self):
+        data = _make_schedule_game_data("game-2")
+        data["客先發投球"] = ["5.6667"] + data["客先發投球"][1:]
+        data["主先發投球"] = ["6.3333"] + data["主先發投球"][1:]
+
+        row = NpbRowsService(module=Namespace(NPB_TEAMS=NPB_TEAMS)).sailu_row(0, data)
+
+        assert row[45] == "5.2"  # AT 客投局
+        assert row[46] == "6.1"  # AU 主投局
+
     def test_exhibition_row_accepts_schedule_game_data_shape(self):
         data = _make_schedule_game_data("2021044685")
         service = NpbRowsService(
