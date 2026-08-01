@@ -2258,20 +2258,7 @@ async def get_sailu_game_data(
             er = 0
 
         # QS: 7+ IP & <=3 ER, or 6+ IP & <=2 ER, or 5+ IP & <=1 ER.
-        try:
-            ip_parts = str(ip).split(".")
-            outs = int(ip_parts[0]) * 3 + (int(ip_parts[1]) if len(ip_parts) > 1 else 0)
-        except Exception:
-            outs = 0
-        qs = (
-            1
-            if (
-                (outs >= 21 and er <= 3)
-                or (outs >= 18 and er <= 2)
-                or (outs >= 15 and er <= 1)
-            )
-            else 0
-        )
+        qs = NpbRowsService.qs_flag(ip, er)
 
         if p_idx == 0:
             away_starter, away_ip, away_er, away_qs = name, ip, er, qs
@@ -2541,14 +2528,9 @@ async def get_schedule_game_data(
     if len(pitch_tables) >= 2:
         home_s_pitch, home_t_pitch, home_starter = _parse_pitch_block(pitch_tables[1])
 
-    # ── QS ─────────────────────────────────────────────────────────────────
-    def _qs(s):
-        ip_str = str(s[0])
-        ip_full = int(ip_str.split(".")[0]) if ip_str and ip_str[0].isdigit() else 0
-        return 1 if ip_full >= 6 and s[12] <= 3 else 0
-
-    away_qs = _qs(away_s_pitch)
-    home_qs = _qs(home_s_pitch)
+    # ── QS: 7+ IP & <=3 ER, or 6+ IP & <=2 ER, or 5+ IP & <=1 ER ───────────
+    away_qs = NpbRowsService.qs_flag(away_s_pitch[0], away_s_pitch[12])
+    home_qs = NpbRowsService.qs_flag(home_s_pitch[0], home_s_pitch[12])
 
     # ── Pitcher handedness ─────────────────────────────────────────────────
     away_hand = home_hand = ""
