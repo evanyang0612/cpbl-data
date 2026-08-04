@@ -1,0 +1,44 @@
+name: MLB Odds Scraper
+
+on:
+  schedule:
+    # MLB first pitches land between ~17:00 UTC (weekend day games) and ~02:40
+    # UTC (west-coast night games), and PS3838 only posts baseball lines a few
+    # hours out. So: hourly while the early lines open, then every 30 min
+    # through the start windows so each game gets a snapshot within 30 min of
+    # its close. ~26 runs/day — thin the second cron if Actions minutes matter.
+    - cron: "0 13-16 * * *"
+    - cron: "*/30 17-23,0-3 * * *"
+  workflow_dispatch:
+
+jobs:
+  scrape-odds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Scrape MLB odds
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          # PS3838 geo-blocks datacenter IPs; tunnel through the same
+          # residential proxy the CPBL scraper uses.
+          DECODO_PROXY_URL: ${{ secrets.DECODO_PROXY_URL }}
+        run: uv run python -m baseball.pinnacle_odds --league mlb
+
+      - name: Send failure Telegram message
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=MLB odds scraper failed. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
