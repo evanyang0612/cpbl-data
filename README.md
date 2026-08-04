@@ -13,10 +13,15 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 ├── requirements.txt
 ├── lastTenGames.gs                  # Google Apps Script for CPBL 近十場 sheet
 ├── lastTenGamesPreseason.gs         # Google Apps Script for CPBL 熱身賽 近十場 sheet
+├── baseball/
+│   ├── pinnacle_odds.py             # PS3838 odds scraper (NPB + MLB) -> 盤口 sheets
+│   └── mlb_games.py                 # Resolves MLB gamePk for an odds event
 └── .github/workflows/
     ├── cpbl_scheduler.yml           # Cron: every 30 min, 07:00–16:00 UTC (via Japan VPN)
     ├── mlb_record_scheduler.yml     # Cron: daily, 12:00 UTC
-    └── npb_scheduler.yml            # Cron: every 30 min, 08:00–14:00 UTC
+    ├── npb_scheduler.yml            # Cron: every 30 min, 08:00–14:00 UTC
+    ├── npb_odds_scheduler.yml       # Cron: every 30 min, 01:00–10:30 UTC
+    └── mlb_odds_scheduler.yml       # Cron: hourly 13:00–16:00, then every 30 min 17:00–03:30 UTC
 ```
 
 ---
@@ -103,6 +108,56 @@ uv run python migration/update_mlb_last10.py
 
 ---
 
+## Odds / 盤口 (`baseball/pinnacle_odds.py`)
+
+Snapshots pre-game betting lines from the PS3838 public compact feed
+(`/sports-service/sv/compact/events`, no login and no API access needed) and
+appends them to a `盤口` worksheet, so opening and closing lines can be compared
+against recorded results to measure edge.
+
+One scraper serves both leagues; pick one with `--league`:
+
+| League | `--league` | PS3838 league id | Target spreadsheet | Join key    |
+| ------ | ---------- | ---------------- | ------------------ | ----------- |
+| NPB    | `npb`      | 187703           | NPB (with 彙資)     | —           |
+| MLB    | `mlb`      | 246              | MLB (with 紀錄)     | `mlb_game_pk` |
+
+```bash
+uv run python -m baseball.pinnacle_odds --league mlb --dry-run   # print, write nothing
+uv run python -m baseball.pinnacle_odds --league mlb             # append snapshot rows
+```
+
+### Notes
+
+- One row per (event, period): `final` (full game) and `half` (first 5 innings),
+  each with moneyline, the main total, the main run line, and JSON of **every**
+  total/spread line for backtesting. MLB half markets have no moneyline.
+- Period `3` is the 1st-inning 3-way market. Deliberately not recorded.
+- Only pre-game lines are kept. Once a game starts it moves to the feed's live
+  (走地) bucket and is skipped, so `--include-live` is for inspection only.
+- Baseball lines only appear a few hours before first pitch, not days ahead.
+- MLB rows carry `mlb_game_pk`, `home_abbr`/`away_abbr`, and MLB's own
+  `officialDate` as `game_date`, all resolved from the MLB Stats API schedule so
+  every row joins to `紀錄`. Teams are matched by alias (PS3838 says "Arizona
+  Diamondbacks" where the API's `teamName` is "D-backs") plus nearest start
+  time, which also disambiguates doubleheaders.
+- PS3838 geo-blocks datacenter IPs, so CI tunnels through the Decodo residential
+  proxy (`DECODO_PROXY_URL`). Locally, with no proxy set, requests go direct.
+- Override the target sheet with `ODDS_SPREADSHEET_KEY` (NPB) or
+  `MLB_ODDS_SPREADSHEET_KEY` (MLB).
+
+### CPBL
+
+PS3838 does not appear to book CPBL — only MLB, NPB and KBO have shown up in the
+feed. Since the feed lists only leagues with currently open markets, confirm on a
+CPBL game day, 2–4 hours before first pitch:
+
+```bash
+uv run python migration/probe_cpbl_odds.py
+```
+
+---
+
 ## GitHub Secrets
 
 | Secret               | Used by        | Description                             |
@@ -110,6 +165,7 @@ uv run python migration/update_mlb_last10.py
 | `GOOGLE_CREDENTIALS` | CPBL, NPB, MLB | Google service account JSON (full body) |
 | `SPREADSHEET_KEY`    | CPBL           | Google Sheets spreadsheet ID for CPBL   |
 | `NORDVPN_TOKEN`      | CPBL           | NordVPN token for WireGuard tunnel      |
+| `DECODO_PROXY_URL`   | Odds           | Decodo residential proxy for PS3838     |
 | `TELEGRAM_BOT_TOKEN` | CPBL, NPB, MLB | Telegram bot token for failure alerts   |
 | `TELEGRAM_CHAT_ID`   | CPBL, NPB, MLB | Telegram chat ID for failure alerts     |
 
