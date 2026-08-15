@@ -106,6 +106,22 @@ uv run python migration/update_mlb_record.py --recent-days 3
 uv run python migration/update_mlb_last10.py
 ```
 
+### Team codes (`baseball/mlb_teams.py`)
+
+MLB Stats API changed the Athletics' abbreviation from `OAK` to `ATH` for 2025, when
+the club dropped "Oakland". `紀錄` holds a decade keyed on `OAK`, and every sheet that
+aggregates by team label matches on it — `MLB勝敗表` returned 0 wins for the franchise
+as soon as its window reached 2025. So one code per franchise is kept:
+
+- `canonical_team_code()` maps the API's code on the way in, for both `紀錄`
+  (`update_mlb_record.py`) and the odds join (`baseball/mlb_games.py`).
+- `migration/normalize_mlb_team_codes.py` fixed the 282 rows written before that
+  (2025/3/27–2026/8/12). It backs every change up to `.cache/` first, only touches
+  `客隊隊伍` / `主隊隊伍`, and is a no-op on a second run.
+
+If MLB renames another club mid-history, add it to `TEAM_CODE_ALIASES` and re-run that
+script — nothing else needs to know.
+
 ---
 
 ## Odds / 盤口 (`baseball/pinnacle_odds.py`)

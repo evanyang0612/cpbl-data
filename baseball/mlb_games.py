@@ -23,6 +23,8 @@ from typing import Any
 
 import requests
 
+from baseball.mlb_teams import canonical_team_code
+
 MLB_API = os.getenv("MLB_STATS_API", "https://statsapi.mlb.com/api").rstrip("/")
 REQUEST_TIMEOUT = (10, 60)
 
@@ -82,8 +84,8 @@ class MlbGameIndex:
                 "official_date": game.get("officialDate", ""),
                 "home_aliases": _aliases(home),
                 "away_aliases": _aliases(away),
-                "home_abbr": home.get("abbreviation", ""),
-                "away_abbr": away.get("abbreviation", ""),
+                "home_abbr": canonical_team_code(home.get("abbreviation", "")),
+                "away_abbr": canonical_team_code(away.get("abbreviation", "")),
                 "start": start,
             })
 
