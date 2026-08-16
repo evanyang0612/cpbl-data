@@ -219,6 +219,18 @@ def test_index_rejects_start_beyond_drift_window():
     assert _index().find("New York Yankees", "St. Louis Cardinals", far) is None
 
 
+def test_index_stores_the_code_紀錄_uses_for_the_athletics():
+    # the API says ATH from 2025; 紀錄 keys the franchise as OAK, and 盤口 rows are
+    # read alongside it, so the odds sheet stores the same code
+    athletics = ("Athletics", "Athletics", "Athletics", "ATH")
+    index = MlbGameIndex([
+        _sched_game(830000, "2026-08-03", athletics, YANKEES, "2026-08-04T01:40:00Z"),
+    ])
+    game = index.find("Athletics", "New York Yankees", _utc("2026-08-04T01:40:00"))
+    assert game["home_abbr"] == "OAK"
+    assert game["away_abbr"] == "NYY"
+
+
 def test_index_returns_none_for_unknown_teams():
     assert _index().find("Yokohama DeNA BayStars", "Hanshin Tigers",
                          _utc("2026-08-03T23:05:00")) is None

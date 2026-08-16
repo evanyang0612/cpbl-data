@@ -53,7 +53,7 @@ TEAM_ORDER = [
     "TEX",
     "SEA",
     "LAA",
-    "ATH",
+    "OAK",
     "ATL",
     "NYM",
     "PHI",
@@ -86,7 +86,9 @@ TEAM_COLORS = {
     "TEX": ("#003278", "#ffffff"),
     "SEA": ("#005c5c", "#ffffff"),
     "LAA": ("#ba0021", "#ffffff"),
-    "ATH": ("#003831", "#efb21e"),
+    # 紀錄 stores the Athletics as OAK for every season, including 2025 onwards when
+    # the API switched to ATH — see canonical_team_code() in baseball/mlb_teams.py.
+    "OAK": ("#003831", "#efb21e"),
     "ATL": ("#13274f", "#ffffff"),
     "NYM": ("#ff5910", "#002d72"),
     "PHI": ("#e81828", "#ffffff"),

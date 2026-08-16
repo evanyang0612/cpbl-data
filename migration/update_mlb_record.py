@@ -22,6 +22,7 @@ from gspread.exceptions import APIError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from baseball.mlb_teams import TEAM_CODE_ALIASES, canonical_team_code  # noqa: F401
 from cpbl import _sheets_client
 
 
@@ -34,6 +35,7 @@ RAW_COLUMN_COUNT = 41
 RAW_END_COLUMN = "AO"
 FORMULA_START_COL_0IDX = 41
 FORMULA_END_COL_0IDX = 56
+
 
 
 def _get_json(session: requests.Session, url: str, **params: Any) -> dict[str, Any]:
@@ -149,14 +151,14 @@ def _row_from_game(
     row: list[Any] = [
         f"{official_date.year}/{official_date.month}/{official_date.day}",
         game_pk,
-        away_team.get("abbreviation", ""),
+        canonical_team_code(away_team.get("abbreviation", "")),
         away_starter.get("person", {}).get("fullName", ""),
         _pitch_hand(game_data, away_starter_id),
         *_inning_runs(linescore, "away"),
         away_line.get("runs", ""),
         away_line.get("hits", ""),
         away_line.get("errors", ""),
-        home_team.get("abbreviation", ""),
+        canonical_team_code(home_team.get("abbreviation", "")),
         *_inning_runs(linescore, "home"),
         home_line.get("runs", ""),
         home_line.get("hits", ""),
