@@ -34,6 +34,13 @@ jobs:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: uv run python migration/update_mlb_last10.py
 
+      # 12:00 UTC is 08:00 ET, by which point the day's probables are announced
+      # (tomorrow's usually are too; two days out they rarely are).
+      - name: Fill 設定 with probable starters and refresh the 先発 lists
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: uv run python migration/update_mlb_probables.py
+
       - name: Send failure Telegram message
         if: failure()
         run: |
