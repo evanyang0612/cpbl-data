@@ -106,6 +106,59 @@ uv run python migration/update_mlb_record.py --recent-days 3
 uv run python migration/update_mlb_last10.py
 ```
 
+### 設定 / 對戰 (n) matchup sheets (`migration/add_mlb_matchup_sheets.py`)
+
+A one-off build of the MLB spreadsheet's starter-matchup tabs, ported from the NPB
+spreadsheet's `設定` + `対戦 (n)` layout. Nothing scrapes them — they are formulas over
+`紀錄`, so they refresh themselves whenever the daily record run appends rows.
+
+- `設定` — one 7-column block per matchup (`對戰 1`…`對戰 15`, stride 7 from column B),
+  three row bands per block for the three games of a series. Pick 隊伍 and 先發 from the
+  dropdowns; the 先發 list is filtered to that team via a hidden `=INDIRECT(<team>)`
+  helper column. The 24/25/26 columns preview the starter's ERA against that opponent
+  (`VS.`) and overall (`合`), dividing the helper rows 39-71.
+- `對戰 (1)`…`(15)` — one tab per matchup: six blocks (three games × two starters), each
+  showing the starter's 客/主/合 line (場次, QS, QS%, ERA, IP, opponent runs through 5,
+  opponent runs total) overall, versus the actual opponent, and versus every team in
+  that starter's own league. Row 1 holds the date window per game, as two dropdowns off
+  the `開賽年度` / `閉幕年度` named ranges (`資料!G2:H41`). Those two lists are single
+  spilling `ARRAYFORMULA(DATE(SEQUENCE(...)))` cells running from 2017 to next year, so
+  a new season shows up on its own every January — nothing to maintain by hand.
+
+Colours match NPB: ERA `≤3.5` green / `≥4` red, opponent runs through 5 `<2` / `≥2.5`,
+opponent runs total `<4` / `≥4.5`, and 場次 + QS + QS% (columns C:E per block) keyed off
+the quality-start rate, green above 65% and red below 41%. Zeros are hidden through the
+number format (`0.00;-0.00;;@`) rather than a conditional-format rule.
+
+`設定` fills itself daily (`migration/update_mlb_probables.py`, run from the MLB record
+workflow at 12:00 UTC / 08:00 ET):
+
+- Game 1 of every block gets both teams and both announced starters from MLB Stats API
+  (`schedule?hydrate=probablePitcher,team`); game 2 gets starters only, and only where
+  the pairing repeats, so the `=B4` / `=B6` mirrors survive. Game 3 is usually blank —
+  probables two days out are rarely announced.
+- The `AL-P` / `NL-P` lists behind the 先發 dropdowns are rebuilt from `紀錄`'s own
+  starter columns, most recent start first. Only pitchers who actually started for that
+  club appear, so no relievers get in. They had been hand-kept and still held 2019
+  rosters.
+- The ballpark cell is `=VLOOKUP(<home team>,資料!$A$2:$B$31,2,FALSE)`;
+  `refresh_home_parks()` in the sheet builder re-derives that lookup table from `紀錄`
+  (modal home venue per club), with `HOME_PARK_OVERRIDES` pinning names MLB feeds under
+  a sponsor.
+
+Re-run it only to rebuild from scratch — it deletes the tabs it owns and recreates them.
+`--restyle` refreshes just the colour layer, number formats and date dropdowns on the
+live tabs, leaving formulas and `設定` untouched:
+
+```bash
+uv run python migration/add_mlb_matchup_sheets.py --dry-run   # plan + formula sample
+uv run python migration/add_mlb_matchup_sheets.py
+uv run python migration/add_mlb_matchup_sheets.py --restyle
+```
+
+Note: ERA divides `客自責`/`主自責` by the decimal starter innings `客先局`/`主先局` (not
+`客局數`, which is in `.1`/`.2` notation and cannot be summed).
+
 ### Team codes (`baseball/mlb_teams.py`)
 
 MLB Stats API changed the Athletics' abbreviation from `OAK` to `ATH` for 2025, when
