@@ -1,4 +1,6 @@
 import pathlib
+
+import migration.update_mlb_last10 as m
 from migration.update_mlb_last10 import (
     _aggregate_batting_average,
     _appearance_reset_request,
@@ -6,7 +8,11 @@ from migration.update_mlb_last10 import (
     _batting_average,
     _direction_from_description,
     _game_font_color_requests,
+    _home_run_events_by_team,
+    _base_font_request,
     _hide_gridlines_request,
+    _header_format_request,
+    _hide_top_rows_request,
     HR_BATTER_SPAN,
     HR_BAT_SIDE_COL,
     HR_DASH_SPAN,
@@ -342,3 +348,66 @@ def test_unmerge_is_issued_before_values_are_written():
     body = source[source.index("clear_col_l = "):]
     assert body.index('f"unmerge ') < body.index('f"write ')
     assert body.index('f"write ') < body.index('f"format ')
+
+
+class TestSheetChrome:
+    def test_the_two_empty_top_rows_are_hidden(self):
+        request = _hide_top_rows_request(7)["updateDimensionProperties"]
+        assert request["range"] == {"sheetId": 7, "dimension": "ROWS",
+                                    "startIndex": 0, "endIndex": 2}
+        assert request["properties"] == {"hiddenByUser": True}
+
+    def test_the_seam_between_blocks_is_hairline(self):
+        from migration.update_mlb_last10 import GAP_COLUMN_WIDTH
+        assert GAP_COLUMN_WIDTH == 2  # as NPB's P / AE are
+
+    def test_one_typeface_across_the_area(self):
+        request = _base_font_request(7, 3, 52, 2, 45)["repeatCell"]
+        text = request["cell"]["userEnteredFormat"]["textFormat"]
+        assert text == {"fontFamily": "Arial Black", "fontSize": 10, "bold": True}
+        # colour is left alone here — it is set per cell further down
+        assert "foregroundColor" not in request["fields"]
+
+    def test_the_header_keeps_the_typeface_it_overwrites(self):
+        # this request replaces the whole textFormat, so it has to restate the font
+        text = _header_format_request(7, "NYY", 3, 2)["repeatCell"]["cell"][
+            "userEnteredFormat"]["textFormat"]
+        assert text["fontFamily"] == "Arial Black"
+        assert text["fontSize"] == 10
+        assert text["bold"] is True
+
+    def test_base_font_is_applied_before_the_smaller_overrides(self):
+        source = pathlib.Path("migration/update_mlb_last10.py").read_text()
+        body = source[source.index("def _update_sheet"):]
+        assert body.index("_base_font_request") < body.index("_hr_pitcher_font_requests")
+
+
+class TestScheduleTeamCodes:
+    """近十場 reads the API directly, so it needs the same code mapping 紀錄 uses.
+
+    The schedule still calls the Athletics ATH; 紀錄 stores OAK. Left unmapped, the
+    block header said ATH while its ten game rows — looked up by 紀錄's code — came
+    back empty.
+    """
+
+    def test_matchups_from_the_schedule_are_canonical(self):
+        payload = {"dates": [{"games": [{
+            "gameType": "R", "gameDate": "2026-08-15T20:10:00Z",
+            "teams": {"away": {"team": {"abbreviation": "TEX"}},
+                      "home": {"team": {"abbreviation": "ATH"}}},
+        }]}]}
+        assert m._matchups_from_schedule(payload) == [("TEX", "OAK")]
+
+    def test_home_run_events_are_keyed_by_the_canonical_code(self):
+        feed = {"liveData": {"plays": {"allPlays": [{
+            "result": {"eventType": "home_run", "description": "homers to left field"},
+            "about": {"isTopInning": False},
+            "matchup": {"batter": {"fullName": "Brent Rooker"},
+                        "batSide": {"code": "R"},
+                        "pitcher": {"fullName": "Jacob deGrom"}},
+        }]}}}
+        game_data = {"teams": {"away": {"abbreviation": "TEX"},
+                               "home": {"abbreviation": "ATH"}}}
+        events = _home_run_events_by_team(feed, game_data)
+        assert set(events) == {"TEX", "OAK"}
+        assert events["OAK"][0]["打者"] == "Brent Rooker"

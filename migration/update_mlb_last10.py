@@ -16,6 +16,7 @@ from gspread.exceptions import APIError, WorksheetNotFound
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from baseball.mlb_teams import canonical_team_code
 from cpbl import _sheets_client
 
 SPREADSHEET_KEY = "11FV70TXVAxLTwYH6pLj7HwK1qq-fIa61QrePRCC8YUM"
@@ -386,7 +387,8 @@ def _home_run_events_by_team(
     feed: dict[str, Any], game_data: dict[str, Any]
 ) -> dict[str, list[dict[str, Any]]]:
     abbrev_by_side = {
-        side: game_data["teams"][side].get("abbreviation") for side in ("away", "home")
+        side: canonical_team_code(game_data["teams"][side].get("abbreviation", ""))
+        for side in ("away", "home")
     }
     events: dict[str, list[dict[str, Any]]] = {
         abbrev_by_side["away"]: [],
@@ -427,7 +429,9 @@ def _team_stats_from_feed(
     team_stats: dict[str, dict[str, int]] = {}
     for side in ("away", "home"):
         team = boxscore["teams"][side]
-        abbrev = game_data["teams"][side].get("abbreviation")
+        abbrev = canonical_team_code(
+            game_data["teams"][side].get("abbreviation", "")
+        )
         batting = team.get("teamStats", {}).get("batting", {})
         team_stats[abbrev] = {
             "三振": _to_int(batting.get("strikeOuts")),
@@ -558,23 +562,34 @@ def _next_matchups() -> list[tuple[str, str]]:
             endDate=target.isoformat(),
             hydrate="team",
         )
-        games = [
-            game
-            for day in data.get("dates", [])
-            for game in day.get("games", [])
-            if game.get("gameType") == "R"
-        ]
-        if games:
-            games.sort(key=lambda g: g.get("gameDate", ""))
-            matchups = [
-                (
-                    game["teams"]["away"]["team"].get("abbreviation", ""),
-                    game["teams"]["home"]["team"].get("abbreviation", ""),
-                )
-                for game in games
-            ]
-            return [(a, h) for a, h in matchups if a and h]
+        matchups = _matchups_from_schedule(data)
+        if matchups:
+            return matchups
     return []
+
+
+def _matchups_from_schedule(data: dict[str, Any]) -> list[tuple[str, str]]:
+    """Today's regular-season pairings, in first-pitch order.
+
+    Codes go through canonical_team_code() because the schedule feed and 紀錄 can
+    disagree — the API says ATH where 紀錄 stores OAK, and a block headed with a
+    code 紀錄 does not use finds no games to list under it.
+    """
+    games = [
+        game
+        for day in data.get("dates", [])
+        for game in day.get("games", [])
+        if game.get("gameType") == "R"
+    ]
+    games.sort(key=lambda g: g.get("gameDate", ""))
+    matchups = [
+        (
+            canonical_team_code(game["teams"]["away"]["team"].get("abbreviation", "")),
+            canonical_team_code(game["teams"]["home"]["team"].get("abbreviation", "")),
+        )
+        for game in games
+    ]
+    return [(a, h) for a, h in matchups if a and h]
 
 
 def _fallback_matchups() -> list[tuple[str, str]]:
@@ -631,6 +646,57 @@ def _hide_gridlines_request(sheet_id: int) -> dict:
                 "gridProperties": {"hideGridlines": True},
             },
             "fields": "gridProperties.hideGridlines",
+        }
+    }
+
+
+def _hide_top_rows_request(sheet_id: int) -> dict:
+    """Rows 1-2 hold nothing — NPB squeezes them to 2px, we take them out of view."""
+    return {
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": sheet_id,
+                "dimension": "ROWS",
+                "startIndex": 0,
+                "endIndex": HIDDEN_TOP_ROWS,
+            },
+            "properties": {"hiddenByUser": True},
+            "fields": "hiddenByUser",
+        }
+    }
+
+
+def _base_font_request(
+    sheet_id: int, start_row: int, end_row: int, start_col: int, end_col: int
+) -> dict:
+    """One typeface for the whole area, as NPB's 近十場 uses.
+
+    Issued before anything else touches the text so the few cells that want a
+    smaller size — a long pitcher name, the home-run 打位 / 方向 — still win.
+    """
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": start_row - 1,
+                "endRowIndex": end_row,
+                "startColumnIndex": start_col - 1,
+                "endColumnIndex": end_col,
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "textFormat": {
+                        "fontFamily": BLOCK_FONT,
+                        "fontSize": BLOCK_FONT_SIZE,
+                        "bold": True,
+                    }
+                }
+            },
+            "fields": (
+                "userEnteredFormat.textFormat.fontFamily,"
+                "userEnteredFormat.textFormat.fontSize,"
+                "userEnteredFormat.textFormat.bold"
+            ),
         }
     }
 
@@ -699,6 +765,11 @@ def _header_format_request(
                 "userEnteredFormat": {
                     "backgroundColor": _hex_to_rgb(fill),
                     "textFormat": {
+                        # the family and size are restated because this request
+                        # replaces the whole textFormat — omitting them would drop
+                        # the header row back to the default typeface
+                        "fontFamily": BLOCK_FONT,
+                        "fontSize": BLOCK_FONT_SIZE,
                         "bold": True,
                         "foregroundColor": _hex_to_rgb(font),
                     },
@@ -1140,8 +1211,12 @@ def _hr_pitcher_font_requests(
     return requests
 
 
+BLOCK_FONT = "Arial Black"
+BLOCK_FONT_SIZE = 10
+HIDDEN_TOP_ROWS = 2  # rows 1-2 carry nothing; NPB squeezes them, we hide them
+
 COLUMN_WIDTHS = [40, 40, 130, 90, 35, 35, 35, 35, 35, 35, 35, 35, 55, 55]
-GAP_COLUMN_WIDTH = 20
+GAP_COLUMN_WIDTH = 2  # NPB keeps the seam between blocks hairline-thin
 
 
 def _column_width_requests(sheet_id: int) -> list[dict]:
@@ -1213,6 +1288,14 @@ def _update_sheet(
             max(BLOCK_COLS) + 13,
         ),
         _hide_gridlines_request(sheet.id),
+        _hide_top_rows_request(sheet.id),
+        _base_font_request(
+            sheet.id,
+            TOP_HEADER_ROW,
+            BOTTOM_HR_END_ROW,
+            min(BLOCK_COLS),
+            max(BLOCK_COLS) + 13,
+        ),
         *_column_width_requests(sheet.id),
     ]
     for col_idx, (away, home) in enumerate(active_matchups):
