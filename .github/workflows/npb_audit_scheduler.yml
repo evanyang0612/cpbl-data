@@ -1,0 +1,56 @@
+name: NPB History Auditor
+
+on:
+  schedule:
+    # Monday 05:00 UTC / 14:00 JST. The weekend's games are all settled by
+    # then, and NPB's 公式記録の訂正 for the prior week have had time to land.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Window size in days"
+        required: false
+        default: "30"
+
+jobs:
+  audit-history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync
+
+      # Re-scrapes ~130 games, so it is far heavier than the daily run. Yahoo
+      # rate-limits the game endpoints from a residential IP well before this
+      # finishes; Actions runners have not hit that.
+      - name: Audit recent NPB games against the sheets
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: >
+          uv run python migration/audit_npb_history.py
+          --days ${{ github.event.inputs.days || '30' }}
+          --write-sheet
+
+      - name: Upload the audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npb-audit-report
+          path: .cache/npb_audit_*.json
+          if-no-files-found: ignore
+
+      - name: Send failure Telegram message
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=NPB history auditor failed. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

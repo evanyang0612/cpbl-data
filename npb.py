@@ -47,6 +47,16 @@ MAX_CONCURRENT = 3
 MAX_CONCURRENT_REQUESTS = 4
 BATCH_PAUSE_SECONDS = 4
 
+# Yahoo answers the default aiohttp User-Agent with 500s on the game endpoints
+# once a run gets long, so every session that scrapes them must send this.
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
 SCORE_WIN_FONT = "ff0000"
 SCORE_LOSS_FONT = "38761d"
 SCORE_TIE_FONT = "0000ff"

@@ -15,11 +15,15 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 ├── lastTenGamesPreseason.gs         # Google Apps Script for CPBL 熱身賽 近十場 sheet
 ├── baseball/
 │   ├── pinnacle_odds.py             # PS3838 odds scraper (NPB + MLB) -> 盤口 sheets
+│   ├── npb_audit.py                 # Comparator for the weekly NPB history audit
 │   └── mlb_games.py                 # Resolves MLB gamePk for an odds event
+├── migration/
+│   └── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
 └── .github/workflows/
     ├── cpbl_scheduler.yml           # Cron: every 30 min, 07:00–16:00 UTC (via Japan VPN)
     ├── mlb_record_scheduler.yml     # Cron: daily, 12:00 UTC
     ├── npb_scheduler.yml            # Cron: every 30 min, 08:00–14:00 UTC
+    ├── npb_audit_scheduler.yml      # Cron: weekly, Monday 05:00 UTC
     ├── npb_odds_scheduler.yml       # Cron: every 30 min, 01:00–10:30 UTC
     └── mlb_odds_scheduler.yml       # Cron: hourly 13:00–16:00, then every 30 min 17:00–03:30 UTC
 ```
@@ -82,6 +86,56 @@ Scrapes [baseball.yahoo.co.jp](https://baseball.yahoo.co.jp/npb/) for the last 1
 ### Scheduler
 
 Runs every 30 minutes between **08:00–14:00 UTC** (17:00–23:00 JST), covering NPB evening games. No VPN required.
+
+### History audit (`migration/audit_npb_history.py`)
+
+The daily run is append-only: once a game lands in 賽錄 / 分析表紀錄 it is never
+looked at again. NPB publishes [公式記録の訂正](https://npb.jp/news/) days after
+the fact, a scrape can fail half-way, and a parser fix only helps games scraped
+after it shipped. This walks back over a window of days, re-scrapes every game
+we recorded, rebuilds its rows, and reports every cell that disagrees with the
+sheets.
+
+```bash
+uv run python migration/audit_npb_history.py --days 30
+uv run python migration/audit_npb_history.py --days 30 --write-sheet
+uv run python migration/audit_npb_history.py --game-ids 2021039221
+```
+
+- Game IDs come from 賽錄 column B, filtered on the date in column AO, so the
+  audit only ever revisits games we actually recorded — no re-discovering the
+  schedule from Yahoo.
+- 分析表紀錄 is matched on (日期, 客隊, 主隊); a duplicate matchup on one date is
+  skipped with a note rather than guessed at. 賽錄 is matched on the game ID and
+  compared in **both** spreadsheets, since `NpbSailuService` writes both.
+- Only raw columns are compared. 賽錄 stops at `AY`; `AZ` onward is
+  `sailu_formula_row` and is never read or written.
+- A blank never equals a zero: 分析表紀錄 writes `""` for an inning that was never
+  batted and `0` for a scoreless one, so treating them as equal would hide a
+  real correction.
+- Diffs on the final score or either side's first five innings are tagged
+  `[SCORE — do not auto-apply]`. Those columns settle 預測紀錄, where
+  `balance_after` is cumulative, so one changed score invalidates every running
+  balance below it.
+- Reports are written to `.cache/npb_audit_<ts>.json` and uploaded as a workflow
+  artifact.
+
+`--write-sheet` pastes the games needing changes into the **資料更新** tab from
+`B3`, using the same 83-column layout as 彙資, so they can be eyeballed before
+anything is overwritten in place. The tab holds 143 games; a longer list is
+truncated to the oldest 143 with a warning.
+
+Writing corrections back in place (`--apply`) is deliberately not implemented
+yet — the first few weeks are report-only, to shake out format noise before
+anything overwrites recorded history.
+
+Note: Yahoo rate-limits `/npb/game/<id>/*` with HTTP 500 once a run gets long.
+A 30-day window is ~130 games and several requests each, which trips it from a
+residential IP; GitHub Actions runners have not hit it. Every session that
+scrapes Yahoo must send `npb.BROWSER_HEADERS`.
+
+Runs Monday **05:00 UTC** (14:00 JST), by which point the weekend's games are
+settled and the prior week's 訂正 have had time to land.
 
 ---
 

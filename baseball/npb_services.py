@@ -2625,13 +2625,7 @@ class NpbUpdateService:
         recent_only: bool = False,
     ):
         module = self.module
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        }
+        headers = module.BROWSER_HEADERS
         errors = []
         matchup_start_date = module._resolve_matchup_start_date(matchup_date)
         print(f"Matchup start date: {matchup_start_date:%Y-%m-%d}")
