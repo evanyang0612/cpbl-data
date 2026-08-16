@@ -30,6 +30,7 @@ from migration.update_mlb_last10 import (
     _home_run_layout,
     _on_base_percentage,
     _rate_text,
+    _score_bracket_requests,
     _recent_home_runs,
 )
 
@@ -411,3 +412,26 @@ class TestScheduleTeamCodes:
         events = _home_run_events_by_team(feed, game_data)
         assert set(events) == {"TEX", "OAK"}
         assert events["OAK"][0]["打者"] == "Brent Rooker"
+
+
+class TestScoreBracket:
+    def test_dashed_rules_hug_得点_and_失点(self):
+        clear, bracket = _score_bracket_requests(7, 4, 2)
+        area = bracket["updateBorders"]["range"]
+        assert (area["startColumnIndex"], area["endColumnIndex"]) == (6, 8)  # G:H
+        assert bracket["updateBorders"]["left"]["style"] == "DASHED"
+        assert bracket["updateBorders"]["right"]["style"] == "DASHED"
+        assert "innerVertical" not in bracket["updateBorders"]
+        assert clear["updateBorders"]["left"] == {"style": "NONE"}
+
+    def test_only_the_ten_game_rows_are_bracketed(self):
+        _, bracket = _score_bracket_requests(7, 4, 2)
+        area = bracket["updateBorders"]["range"]
+        # rows 4-13; the 近十場 / 近五場 averages at 14-15 stay open
+        assert area["startRowIndex"] == 3
+        assert area["endRowIndex"] == 13
+
+    def test_the_clear_covers_the_whole_block_not_just_the_pair(self):
+        clear, _ = _score_bracket_requests(7, 17, 17)
+        area = clear["updateBorders"]["range"]
+        assert (area["startColumnIndex"], area["endColumnIndex"]) == (16, 30)

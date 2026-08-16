@@ -701,6 +701,36 @@ def _base_font_request(
     }
 
 
+def _score_bracket_requests(
+    sheet_id: int, game_start_row: int, col_start: int
+) -> list[dict]:
+    """Dashed rules either side of 得点 / 失点, as NPB's 近十場a draws them.
+
+    Only the ten game rows are bracketed — the 近十場 / 近五場 averages below them
+    are left open, which is what makes the pair read as a running tally.
+    """
+    dashed = {"style": "DASHED", "width": 1, "color": _hex_to_rgb("#000000")}
+    none = {"style": "NONE"}
+    area = {
+        "sheetId": sheet_id,
+        "startRowIndex": game_start_row - 1,
+        "endRowIndex": game_start_row - 1 + GAMES_COUNT,
+        "startColumnIndex": col_start + 4,
+        "endColumnIndex": col_start + 6,
+    }
+    return [
+        # clear first: a bracket drawn under an earlier column layout would
+        # otherwise stay put next to whatever now sits there
+        {"updateBorders": {
+            "range": {**area, "startColumnIndex": col_start - 1,
+                      "endColumnIndex": col_start + 13},
+            "top": none, "bottom": none, "left": none, "right": none,
+            "innerHorizontal": none, "innerVertical": none,
+        }},
+        {"updateBorders": {"range": area, "left": dashed, "right": dashed}},
+    ]
+
+
 def _appearance_reset_request(
     sheet_id: int, start_row: int, end_row: int, start_col: int, end_col: int
 ) -> dict:
@@ -1315,6 +1345,9 @@ def _update_sheet(
             _header_format_request(sheet.id, away, TOP_HEADER_ROW, col_start)
         )
         format_requests.extend(
+            _score_bracket_requests(sheet.id, TOP_GAME_START, col_start)
+        )
+        format_requests.extend(
             _pitcher_font_requests(sheet.id, away_games, TOP_GAME_START, col_start)
         )
         format_requests.extend(
@@ -1330,6 +1363,9 @@ def _update_sheet(
         )
         format_requests.append(
             _header_format_request(sheet.id, home, BOTTOM_HEADER_ROW, col_start)
+        )
+        format_requests.extend(
+            _score_bracket_requests(sheet.id, BOTTOM_GAME_START, col_start)
         )
         format_requests.extend(
             _pitcher_font_requests(sheet.id, home_games, BOTTOM_GAME_START, col_start)
