@@ -384,11 +384,15 @@ def _games_by_team(rows: list[list[str]]) -> dict[str, list[dict[str, Any]]]:
 def _read_team_games() -> dict[str, list[dict[str, Any]]]:
     """Read the last ten games per team from the bottom of 紀錄.
 
-    Asking for all of A2:AO is a response the Sheets backend cannot finish: it
-    times out after roughly three minutes and answers 503, so the retry loop
-    turned a single read into 605s on CI runners where the same call takes 4s
-    locally. Only the tail of the sheet is ever used, so only the tail is read,
-    widening the window if a team comes up short of its ten games.
+    Only the tail is ever used, so only the tail is read, widening the window
+    if a team comes up short of its ten games.
+
+    This trims what is transferred; it does not cure the stalls that time the
+    job out. Read latency on this spreadsheet is independent of range size --
+    measured live, a single-cell read stalled 376s behind repeated 503s while
+    a 2000-row read moments later returned in 2.6s. The cost is per-document
+    and episodic, so keep the window honest but do not expect it to help when
+    the document itself is cold.
     """
     worksheet = _sheets_client.worksheet(SPREADSHEET_KEY, RECORD_SHEET_NAME)
     last_row = worksheet.row_count
