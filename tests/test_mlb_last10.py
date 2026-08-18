@@ -435,3 +435,71 @@ class TestScoreBracket:
         clear, _ = _score_bracket_requests(7, 17, 17)
         area = clear["updateBorders"]["range"]
         assert (area["startColumnIndex"], area["endColumnIndex"]) == (16, 30)
+
+
+def _record_row(date_text, game_id, away, home):
+    """Minimal 紀錄 raw row: only the columns _record_to_team_games reads."""
+    row = [""] * 41
+    row[0], row[1], row[2], row[17] = date_text, game_id, away, home
+    return row
+
+
+class TestRecordTailRead:
+    """紀錄 is read from the bottom, not in full.
+
+    Reading A2:AO over all 22k rows made the Sheets backend time out and answer
+    503 after ~185s a time; the retry loop turned one read into 605s in CI while
+    the same call took 4s locally. Only the last ten games per team are ever
+    used, so the read is windowed to the end of the sheet.
+    """
+
+    class _Worksheet:
+        def __init__(self, row_count, rows_by_range=None):
+            self.row_count = row_count
+            self.ranges = []
+            self._rows_by_range = rows_by_range or {}
+
+        def get(self, range_name, **_):
+            self.ranges.append(range_name)
+            return self._rows_by_range.get(range_name, [])
+
+    def _patch(self, monkeypatch, worksheet):
+        monkeypatch.setattr(
+            m._sheets_client, "worksheet", lambda *a, **k: worksheet, raising=False
+        )
+
+    def test_reads_only_the_tail_of_the_sheet(self, monkeypatch):
+        worksheet = self._Worksheet(22322)
+        self._patch(monkeypatch, worksheet)
+
+        m._read_team_games()
+
+        assert worksheet.ranges == [f"A{22322 - m.RECORD_TAIL_ROWS + 1}:AO22322"]
+
+    def test_short_sheets_still_start_below_the_header(self, monkeypatch):
+        worksheet = self._Worksheet(50)
+        self._patch(monkeypatch, worksheet)
+
+        m._read_team_games()
+
+        assert worksheet.ranges == ["A2:AO50"]
+
+    def test_widens_the_window_when_a_team_is_short_of_ten_games(self, monkeypatch):
+        tail = f"A{22322 - m.RECORD_TAIL_ROWS + 1}:AO22322"
+        wider = f"A{22322 - m.RECORD_TAIL_ROWS * 4 + 1}:AO22322"
+        worksheet = self._Worksheet(
+            22322,
+            {
+                tail: [_record_row("2026/08/17", "1", "NYY", "BOS")],
+                wider: [
+                    _record_row(f"2026/08/{day:02d}", str(day), "NYY", "BOS")
+                    for day in range(1, 12)
+                ],
+            },
+        )
+        self._patch(monkeypatch, worksheet)
+
+        games = m._read_team_games()
+
+        assert worksheet.ranges == [tail, wider]
+        assert len(games["NYY"]) == m.GAMES_COUNT

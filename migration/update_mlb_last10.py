@@ -26,6 +26,9 @@ MLB_API = "https://statsapi.mlb.com/api"
 REQUEST_TIMEOUT = (10, 45)
 
 GAMES_COUNT = 10
+# Ten games per team spans about two weeks, ~250 rows; this leaves wide margin
+# while keeping the read at ~10% of the sheet.
+RECORD_TAIL_ROWS = 2000
 BLOCK_COLS = [2, 17, 32]
 TOP_HEADER_ROW = 3
 TOP_GAME_START = 4
@@ -362,17 +365,7 @@ def _record_to_team_games(row: list[str]) -> list[tuple[str, dict[str, Any]]]:
     return [(away, away_game), (home, home_game)]
 
 
-def _read_team_games() -> dict[str, list[dict[str, Any]]]:
-    started = time.time()
-    worksheet = _sheets_client.worksheet(SPREADSHEET_KEY, RECORD_SHEET_NAME)
-    rows = _with_retries(
-        "read record raw columns",
-        lambda: worksheet.get("A2:AO", value_render_option="UNFORMATTED_VALUE"),
-    )
-    print(
-        f"Read {len(rows)} {RECORD_SHEET_NAME} row(s) in {time.time() - started:.1f}s",
-        flush=True,
-    )
+def _games_by_team(rows: list[list[str]]) -> dict[str, list[dict[str, Any]]]:
     games_by_team: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         for team, game in _record_to_team_games(row):
@@ -386,6 +379,44 @@ def _read_team_games() -> dict[str, list[dict[str, Any]]]:
         )
         games_by_team[team] = games_by_team[team][-GAMES_COUNT:]
     return games_by_team
+
+
+def _read_team_games() -> dict[str, list[dict[str, Any]]]:
+    """Read the last ten games per team from the bottom of 紀錄.
+
+    Asking for all of A2:AO is a response the Sheets backend cannot finish: it
+    times out after roughly three minutes and answers 503, so the retry loop
+    turned a single read into 605s on CI runners where the same call takes 4s
+    locally. Only the tail of the sheet is ever used, so only the tail is read,
+    widening the window if a team comes up short of its ten games.
+    """
+    worksheet = _sheets_client.worksheet(SPREADSHEET_KEY, RECORD_SHEET_NAME)
+    last_row = worksheet.row_count
+    window = RECORD_TAIL_ROWS
+    while True:
+        started = time.time()
+        first_row = max(2, last_row - window + 1)
+        range_name = f"A{first_row}:AO{last_row}"
+        rows = _with_retries(
+            f"read record raw columns {range_name}",
+            lambda: worksheet.get(range_name, value_render_option="UNFORMATTED_VALUE"),
+        )
+        print(
+            f"Read {len(rows)} {RECORD_SHEET_NAME} row(s) from {range_name} "
+            f"in {time.time() - started:.1f}s",
+            flush=True,
+        )
+        games_by_team = _games_by_team(rows)
+        short = [t for t, g in games_by_team.items() if len(g) < GAMES_COUNT]
+        if not short or first_row == 2 or window >= RECORD_TAIL_ROWS * 4:
+            if short:
+                print(
+                    f"Short of {GAMES_COUNT} games: {', '.join(sorted(short))}",
+                    flush=True,
+                )
+            return games_by_team
+        window *= 4
+        print(f"Widening the 紀錄 window to {window} rows for {len(short)} team(s).", flush=True)
 
 
 def _home_run_events_by_team(
