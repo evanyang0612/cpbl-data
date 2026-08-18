@@ -10,7 +10,7 @@ on:
 jobs:
   update-record:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -36,13 +36,18 @@ jobs:
 
       # 12:00 UTC is 08:00 ET, by which point the day's probables are announced
       # (tomorrow's usually are too; two days out they rarely are).
+      # Runs even if an earlier step failed: 設定 going stale is worse than it
+      # being filled on a day 紀錄 could not be updated.
       - name: Fill 設定 with probable starters and refresh the 先発 lists
+        if: always()
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: uv run python migration/update_mlb_probables.py
 
+      # A timeout cancels the job rather than failing it, so failure() alone
+      # stayed silent through five straight days of 20-minute timeouts.
       - name: Send failure Telegram message
-        if: failure()
+        if: failure() || cancelled()
         run: |
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \

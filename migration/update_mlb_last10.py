@@ -363,10 +363,15 @@ def _record_to_team_games(row: list[str]) -> list[tuple[str, dict[str, Any]]]:
 
 
 def _read_team_games() -> dict[str, list[dict[str, Any]]]:
+    started = time.time()
     worksheet = _sheets_client.worksheet(SPREADSHEET_KEY, RECORD_SHEET_NAME)
     rows = _with_retries(
         "read record raw columns",
         lambda: worksheet.get("A2:AO", value_render_option="UNFORMATTED_VALUE"),
+    )
+    print(
+        f"Read {len(rows)} {RECORD_SHEET_NAME} row(s) in {time.time() - started:.1f}s",
+        flush=True,
     )
     games_by_team: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -456,10 +461,15 @@ def _enrich_batting_stats(games_by_team: dict[str, list[dict[str, Any]]]) -> Non
         {g["賽事編號"] for games in games_by_team.values() for g in games}
     )
     game_cache: dict[str, dict[str, Any]] = {}
+    started = time.time()
     for index, game_id in enumerate(game_ids, start=1):
         game_cache[game_id] = _team_stats_from_feed(session, game_id)
-        if index % 25 == 0 or index == len(game_ids):
-            print(f"Fetched batting stats {index}/{len(game_ids)}", flush=True)
+        if index == 1 or index % 25 == 0 or index == len(game_ids):
+            print(
+                f"Fetched batting stats {index}/{len(game_ids)} "
+                f"({time.time() - started:.1f}s)",
+                flush=True,
+            )
         time.sleep(0.03)
     for games in games_by_team.values():
         for game in games:
