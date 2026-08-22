@@ -53,6 +53,9 @@ def rename_map(
         if not name or not name.strip():
             continue
         matches = by_key.get(normalise(name), set())
+        if name in matches:
+            # Already the spelling one of them uses; nothing to decide.
+            continue
         if len(matches) > 1:
             if name not in ambiguous:
                 ambiguous.append(name)

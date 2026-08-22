@@ -52,6 +52,15 @@ class RenameMapTest(unittest.TestCase):
         self.assertEqual(renames, {})
         self.assertEqual(ambiguous, ["Jose Ramirez"])
 
+    def test_a_shared_spelling_is_not_ambiguous_when_it_is_already_exact(self):
+        # Two current pitchers normalise to "luis garcia", but 紀錄 holds the
+        # spelling one of them uses today, so there is nothing to decide.
+        renames, ambiguous = rename_map(
+            seen=["Luis Garcia"], current=["Luis García", "Luis Garcia"]
+        )
+        self.assertEqual(renames, {})
+        self.assertEqual(ambiguous, [])
+
     def test_blank_and_missing_names_are_skipped(self):
         renames, ambiguous = rename_map(seen=["", "   "], current=["Chris Sale"])
         self.assertEqual(renames, {})
