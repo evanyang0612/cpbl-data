@@ -387,12 +387,14 @@ def _pending_name_fixes(
     and can cover the whole window the formulas read.
     """
     seasons = [date.today().year - offset for offset in range(NAME_SEASONS)]
-    current: set[str] = set()
-    for season in seasons:
+    current: dict[int, dict[str, Any]] = {}
+    for season in sorted(seasons):
         people = _get_json(
             session, f"{MLB_API}/v1/sports/1/players", season=season
         ).get("people", [])
-        current |= {person["fullName"] for person in people}
+        # Newest season last, so a player who has been renamed is carried under
+        # the name MLB publishes today rather than the one it published in 2024.
+        current.update({person["id"]: person for person in people})
 
     first_row = _first_row_of_season(date_values, min(seasons))
     if first_row > last_row:
@@ -411,7 +413,7 @@ def _pending_name_fixes(
         for column in (AWAY_STARTER_0IDX, HOME_STARTER_0IDX)
         if len(row) > column and str(row[column]).strip()
     }
-    renames, ambiguous = rename_map(seen, current)
+    renames, ambiguous = rename_map(seen, current.values())
     if ambiguous:
         print(
             f"Two current players share a spelling, so these are left alone: "

@@ -1,22 +1,32 @@
-"""Follow MLB when it respells one of its own players.
+"""Follow MLB when it renames one of its own players.
 
 紀錄 stores a starter's name as MLB published it on the night, and 設定 matches
-a pitcher's games against that column. MLB has been adding accents to names for
-years -- and in at least one case taking one away -- so 'Jesus Luzardo' sits in
-紀錄 while 設定 is filled with 'Jesús Luzardo' from today's schedule, and those
-starts drop out of his totals without any sign that they have. Measured across
-the two seasons the formulas look back over: 36 spellings adrift, the worst of
-them covering 27 games.
+a pitcher's games against that column, so the two only agree while 紀錄 carries
+the spelling MLB publishes now. Two things break that:
 
-The dropdown behind 設定's pitcher cell is itself built from 紀錄, so the two
-sides agree only while 紀錄 carries the spelling MLB publishes now.
+Accents. MLB has spent years adding them to its own players -- and in one case
+taking one away -- so 'Jesus Luzardo' sits in 紀錄 while 設定 is filled with
+'Jesús Luzardo' from today's schedule. Across the two seasons the formulas look
+back over, 36 spellings were adrift, the worst covering 27 games.
+
+Shortened first names. Thornton went from 'Zach' to 'Zac' mid-season while his
+legal first name stayed 'Zachary'. Folding accents cannot see that, and
+comparing a row against its game feed only reaches games inside the revision
+window -- his two starts were 41 and 57 days old when they were found.
+
+The dropdown behind 設定's pitcher cell is itself built from 紀錄, so keeping
+this column current keeps both sides of the match honest at once.
 """
 
 from __future__ import annotations
 
 import unicodedata
 from collections import defaultdict
-from typing import Iterable
+from typing import Any, Iterable
+
+# Below this, a first name is an initial rather than a name, and prefix
+# matching would happily fold 'Ja Smith' into any James or Jason on the roster.
+MIN_PREFIX_LENGTH = 3
 
 
 def normalise(name: str) -> str:
@@ -32,30 +42,54 @@ def normalise(name: str) -> str:
     return " ".join(without_accents.lower().split())
 
 
+def _prefix_compatible(one: str, other: str) -> bool:
+    if len(one) < MIN_PREFIX_LENGTH or len(other) < MIN_PREFIX_LENGTH:
+        return False
+    return one.startswith(other) or other.startswith(one)
+
+
 def rename_map(
-    seen: Iterable[str], current: Iterable[str]
+    seen: Iterable[str], current: Iterable[dict[str, Any]]
 ) -> tuple[dict[str, str], list[str]]:
     """Map each stale spelling in `seen` to the name MLB publishes now.
 
-    A name only maps when exactly one current player normalises to it. Two
-    players who share a spelling are reported rather than guessed at, and a
-    name no current player resembles is left alone -- he has retired, and
-    設定 will never ask for him again.
+    A name that is already one a current player uses is left alone -- there is
+    nothing to decide, even when someone else shares the spelling.
+
+    Otherwise the same spelling, accents folded, identifies the player. Failing
+    that, a two-word name whose surname matches and whose first name is a
+    prefix of (or prefixed by) the player's legal or preferred first name does:
+    that is what carries 'Zach Thornton' to 'Zac Thornton' by way of 'Zachary'.
+    A middle initial takes the name out of prefix matching entirely, because
+    MLB uses one to tell two Luis Ortizes apart.
+
+    Either way the answer has to be a single player. Two candidates are
+    reported rather than guessed at, and none at all means he has retired --
+    設定 will never ask for him, so his rows stay as they are.
     """
-    by_key: dict[str, set[str]] = defaultdict(set)
-    for name in current:
-        if name and name.strip():
-            by_key[normalise(name)].add(name)
+    exact: set[str] = set()
+    by_spelling: dict[str, set[str]] = defaultdict(set)
+    by_surname: dict[str, list[tuple[str, tuple[str, str]]]] = defaultdict(list)
+    for player in current:
+        full = player.get("fullName") or ""
+        if not full.strip():
+            continue
+        exact.add(full)
+        by_spelling[normalise(full)].add(full)
+        surname = normalise(player.get("lastName") or full.split()[-1])
+        first = normalise(player.get("firstName") or full.split()[0])
+        used = normalise(player.get("useName") or first)
+        by_surname[surname].append((full, (first, used)))
 
     renames: dict[str, str] = {}
     ambiguous: list[str] = []
     for name in seen:
-        if not name or not name.strip():
+        if not name or not name.strip() or name in exact:
             continue
-        matches = by_key.get(normalise(name), set())
-        if name in matches:
-            # Already the spelling one of them uses; nothing to decide.
-            continue
+
+        matches = by_spelling.get(normalise(name), set())
+        if not matches:
+            matches = _prefix_matches(name, by_surname)
         if len(matches) > 1:
             if name not in ambiguous:
                 ambiguous.append(name)
@@ -65,3 +99,17 @@ def rename_map(
             if current_name != name:
                 renames[name] = current_name
     return renames, sorted(ambiguous)
+
+
+def _prefix_matches(
+    name: str, by_surname: dict[str, list[tuple[str, tuple[str, str]]]]
+) -> set[str]:
+    parts = normalise(name).split()
+    if len(parts) != 2:
+        return set()
+    first, surname = parts
+    return {
+        full
+        for full, forms in by_surname.get(surname, [])
+        if any(_prefix_compatible(first, form) for form in forms)
+    }
