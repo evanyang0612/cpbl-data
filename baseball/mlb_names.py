@@ -113,3 +113,49 @@ def _prefix_matches(
         for full, forms in by_surname.get(surname, [])
         if any(_prefix_compatible(first, form) for form in forms)
     }
+
+
+def name_corrections(
+    entries: Iterable[tuple[int, int, str, int | None]],
+    published: dict[int, str],
+) -> dict[int, dict[int, str]]:
+    """Cells whose stored name is not what MLB publishes for that player id.
+
+    `entries` are (row, column, stored name, player id). With an id in hand
+    nothing has to be inferred from spelling, which is what lets this reach
+    the cases rename_map cannot: 'Louie Varland' is not a prefix of 'Louis',
+    and 'Luis L. Ortiz' carries a middle initial that has to be respected
+    because MLB uses one to tell two players apart elsewhere.
+
+    An id MLB no longer lists belongs to someone who has retired, and a row
+    with no id at all is left to rename_map.
+    """
+    corrections: dict[int, dict[int, str]] = {}
+    for row, column, stored, player_id in entries:
+        if player_id is None:
+            continue
+        current = published.get(player_id)
+        if current is None or current == str(stored).strip():
+            continue
+        corrections.setdefault(row, {})[column] = current
+    return corrections
+
+
+def shared_names(
+    player_ids: Iterable[int], published: dict[int, str]
+) -> dict[str, list[int]]:
+    """Names that more than one of these players is published under.
+
+    No spelling rule can survive this: the two are not two spellings of one
+    pitcher but two pitchers MLB calls the same thing. Worth being told about
+    the day a second one of a pair starts a game, rather than discovering it
+    in a total that is quietly wrong.
+    """
+    ids_by_name: dict[str, set[int]] = defaultdict(set)
+    for player_id in player_ids:
+        name = published.get(player_id)
+        if name:
+            ids_by_name[name].add(player_id)
+    return {
+        name: sorted(ids) for name, ids in ids_by_name.items() if len(ids) > 1
+    }

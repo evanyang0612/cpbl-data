@@ -145,3 +145,89 @@ class NicknameChangeTest(unittest.TestCase):
         current = [_player("Zac Thornton", first="Zachary", use="Zac")]
         renames, _ = rename_map(seen=["Zach Thorton"], current=current)
         self.assertEqual(renames, {})
+
+
+class NameCorrectionsTest(unittest.TestCase):
+    """With an id in hand, the name is not a guess any more.
+
+    rename_map has to reason from spelling, so it cannot carry 'Louie Varland'
+    to 'Louis Varland' or 'Luis L. Ortiz' to 'Luis Ortiz' -- 43 starts split
+    across two pitchers. The id says who pitched, and MLB says what it calls
+    him today; nothing has to be inferred.
+    """
+
+    PUBLISHED = {682847: "Luis Ortiz", 686973: "Louis Varland"}
+
+    def test_a_name_matching_the_id_is_left_alone(self):
+        from baseball.mlb_names import name_corrections
+
+        entries = [(100, 3, "Luis Ortiz", 682847)]
+        self.assertEqual(name_corrections(entries, self.PUBLISHED), {})
+
+    def test_a_name_the_id_disagrees_with_is_corrected(self):
+        from baseball.mlb_names import name_corrections
+
+        entries = [(100, 3, "Luis L. Ortiz", 682847)]
+        self.assertEqual(name_corrections(entries, self.PUBLISHED), {100: {3: "Luis Ortiz"}})
+
+    def test_both_columns_of_one_row_are_kept_together(self):
+        from baseball.mlb_names import name_corrections
+
+        entries = [(100, 3, "Luis L. Ortiz", 682847), (100, 30, "Louie Varland", 686973)]
+        self.assertEqual(
+            name_corrections(entries, self.PUBLISHED),
+            {100: {3: "Luis Ortiz", 30: "Louis Varland"}},
+        )
+
+    def test_an_id_mlb_no_longer_lists_is_left_alone(self):
+        from baseball.mlb_names import name_corrections
+
+        entries = [(100, 3, "Adam Wainwright", 425794)]
+        self.assertEqual(name_corrections(entries, self.PUBLISHED), {})
+
+    def test_a_row_without_an_id_is_left_to_rename_map(self):
+        from baseball.mlb_names import name_corrections
+
+        entries = [(100, 3, "Jesus Luzardo", None)]
+        self.assertEqual(name_corrections(entries, self.PUBLISHED), {})
+
+    def test_a_blank_name_beside_a_known_id_is_filled_in(self):
+        from baseball.mlb_names import name_corrections
+
+        entries = [(100, 3, "", 682847)]
+        self.assertEqual(name_corrections(entries, self.PUBLISHED), {100: {3: "Luis Ortiz"}})
+
+
+class SharedNamesTest(unittest.TestCase):
+    """Two pitchers published under one name is the failure a name cannot survive.
+
+    MLB lists ids 682847 and 656814 both as 'Luis Ortiz', and 671106 shares
+    'Logan Allen' with someone else. Today only one of each pair ever starts,
+    so nothing is actually miscounted -- but it is the one thing no spelling
+    rule can ever fix, so it is worth being told about rather than discovering.
+    """
+
+    def test_two_ids_under_one_name_are_reported(self):
+        from baseball.mlb_names import shared_names
+
+        published = {682847: "Luis Ortiz", 656814: "Luis Ortiz", 621244: "José Berríos"}
+        self.assertEqual(
+            shared_names([682847, 656814, 621244], published),
+            {"Luis Ortiz": [656814, 682847]},
+        )
+
+    def test_distinct_names_report_nothing(self):
+        from baseball.mlb_names import shared_names
+
+        published = {1: "A Pitcher", 2: "B Pitcher"}
+        self.assertEqual(shared_names([1, 2], published), {})
+
+    def test_the_same_id_twice_is_not_a_clash(self):
+        from baseball.mlb_names import shared_names
+
+        self.assertEqual(shared_names([1, 1, 1], {1: "A Pitcher"}), {})
+
+    def test_ids_mlb_no_longer_lists_are_ignored(self):
+        from baseball.mlb_names import shared_names
+
+        self.assertEqual(shared_names([1, 99], {1: "A Pitcher"}), {})
