@@ -140,6 +140,16 @@ def _row_from_game(
 ) -> list[Any]:
     game_pk = int(game["gamePk"])
     feed = _get_json(session, f"{MLB_API}/v1.1/game/{game_pk}/feed/live")
+    return row_from_feed(feed, game)
+
+
+def row_from_feed(feed: dict[str, Any], game: dict[str, Any]) -> list[Any]:
+    """Build one A:AO 紀錄 row from an already-fetched live feed.
+
+    Split out so 近十場 can build the same rows from the same feed it already
+    pulls for batting stats, instead of reading them back out of 紀錄.
+    """
+    game_pk = int(game["gamePk"])
     game_data = feed["gameData"]
     live_data = feed["liveData"]
     boxscore = live_data["boxscore"]

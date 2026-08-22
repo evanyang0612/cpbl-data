@@ -444,62 +444,96 @@ def _record_row(date_text, game_id, away, home):
     return row
 
 
-class TestRecordTailRead:
-    """紀錄 is read from the bottom, not in full.
+def _schedule_game(pk, day, away, home):
+    return {
+        "gamePk": pk,
+        "officialDate": f"2026-08-{day:02d}",
+        "teams": {
+            "away": {"team": {"abbreviation": away}},
+            "home": {"team": {"abbreviation": home}},
+        },
+    }
 
-    Reading A2:AO over all 22k rows made the Sheets backend time out and answer
-    503 after ~185s a time; the retry loop turned one read into 605s in CI while
-    the same call took 4s locally. Only the last ten games per team are ever
-    used, so the read is windowed to the end of the sheet.
+
+class TestScheduleSourcedGames:
+    """近十場 takes its games from the schedule, the way NPB's 近十場 does.
+
+    Reading them back out of 紀錄 meant reading a workbook the record step had
+    just written. Measured live: the same read takes 4.0s when the document is
+    settled and 482.9s straight after a write that changed nothing at all. The
+    schedule already says which ten games each team last played, and the live
+    feed for each -- pulled anyway for the batting stats -- carries every field
+    紀錄 was being asked for.
     """
 
-    class _Worksheet:
-        def __init__(self, row_count, rows_by_range=None):
-            self.row_count = row_count
-            self.ranges = []
-            self._rows_by_range = rows_by_range or {}
+    def test_keeps_only_each_teams_most_recent_games(self):
+        games = [_schedule_game(100 + d, d, "NYY", "BOS") for d in range(1, 15)]
 
-        def get(self, range_name, **_):
-            self.ranges.append(range_name)
-            return self._rows_by_range.get(range_name, [])
+        ids_by_team, short = m._last_game_ids_by_team(games, count=10)
 
-    def _patch(self, monkeypatch, worksheet):
+        assert ids_by_team["NYY"] == [str(100 + d) for d in range(5, 15)]
+        assert short == []
+
+    def test_one_game_counts_for_both_teams(self):
+        games = [_schedule_game(1, 1, "NYY", "BOS")]
+
+        ids_by_team, _ = m._last_game_ids_by_team(games, count=10)
+
+        assert ids_by_team["NYY"] == ["1"]
+        assert ids_by_team["BOS"] == ["1"]
+
+    def test_names_the_teams_short_of_their_ten(self):
+        games = [_schedule_game(d, d, "NYY", "BOS") for d in range(1, 12)]
+        games.append(_schedule_game(99, 12, "TOR", "TB"))
+
+        _, short = m._last_game_ids_by_team(games, count=10)
+
+        assert short == ["TB", "TOR"]
+
+    def test_team_codes_are_canonical(self):
+        games = [_schedule_game(1, 1, "ATH", "AZ")]
+
+        ids_by_team, _ = m._last_game_ids_by_team(games, count=10)
+
+        assert "OAK" in ids_by_team
+
+    def test_input_order_does_not_matter(self):
+        games = [_schedule_game(100 + d, d, "NYY", "BOS") for d in range(1, 15)]
+
+        forwards, _ = m._last_game_ids_by_team(games, count=3)
+        backwards, _ = m._last_game_ids_by_team(list(reversed(games)), count=3)
+
+        assert forwards == backwards
+        assert forwards["NYY"] == ["112", "113", "114"]
+
+
+class TestFeedsAreFetchedOnce:
+    """Each game's feed is pulled once and shared, the way NPB's cache does.
+
+    The old path fetched every feed twice: once to turn 紀錄 rows into games,
+    then again to enrich them with batting stats.
+    """
+
+    def test_a_game_shared_by_two_teams_is_fetched_once(self, monkeypatch):
+        calls = []
+
+        def fake_feed(session, game_id):
+            calls.append(game_id)
+            return {"gameData": {}, "liveData": {}}
+
+        monkeypatch.setattr(m, "_game_feed", fake_feed)
+        games = [_schedule_game(7, 1, "NYY", "BOS")]
+
+        m._feeds_for_games(None, games)
+
+        assert calls == ["7"]
+
+    def test_every_requested_game_is_fetched(self, monkeypatch):
         monkeypatch.setattr(
-            m._sheets_client, "worksheet", lambda *a, **k: worksheet, raising=False
+            m, "_game_feed", lambda s, gid: {"gameData": {}, "liveData": {}}
         )
+        games = [_schedule_game(n, n, "NYY", "BOS") for n in range(1, 6)]
 
-    def test_reads_only_the_tail_of_the_sheet(self, monkeypatch):
-        worksheet = self._Worksheet(22322)
-        self._patch(monkeypatch, worksheet)
+        feeds = m._feeds_for_games(None, games)
 
-        m._read_team_games()
-
-        assert worksheet.ranges == [f"A{22322 - m.RECORD_TAIL_ROWS + 1}:AO22322"]
-
-    def test_short_sheets_still_start_below_the_header(self, monkeypatch):
-        worksheet = self._Worksheet(50)
-        self._patch(monkeypatch, worksheet)
-
-        m._read_team_games()
-
-        assert worksheet.ranges == ["A2:AO50"]
-
-    def test_widens_the_window_when_a_team_is_short_of_ten_games(self, monkeypatch):
-        tail = f"A{22322 - m.RECORD_TAIL_ROWS + 1}:AO22322"
-        wider = f"A{22322 - m.RECORD_TAIL_ROWS * 4 + 1}:AO22322"
-        worksheet = self._Worksheet(
-            22322,
-            {
-                tail: [_record_row("2026/08/17", "1", "NYY", "BOS")],
-                wider: [
-                    _record_row(f"2026/08/{day:02d}", str(day), "NYY", "BOS")
-                    for day in range(1, 12)
-                ],
-            },
-        )
-        self._patch(monkeypatch, worksheet)
-
-        games = m._read_team_games()
-
-        assert worksheet.ranges == [tail, wider]
-        assert len(games["NYY"]) == m.GAMES_COUNT
+        assert sorted(feeds) == ["1", "2", "3", "4", "5"]
