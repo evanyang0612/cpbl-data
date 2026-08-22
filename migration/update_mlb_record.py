@@ -1,8 +1,18 @@
 """Backfill MLB regular-season games into the 紀錄 worksheet.
 
 The target worksheet stores raw box-score fields in A:AO and formula-driven
-fields in AP:BD. This script writes only A:AO, then copies formulas from the
-last existing dated row down across the inserted range.
+fields in AP:BD. This script writes only A:AO; it copies formulas down from
+the last dated row only when the rows it is about to fill do not already have
+them.
+
+That condition is the whole point. 紀錄 is meant to be kept the way NPB keeps
+賽錄: rows are pre-built as numbered placeholders with their formulas already
+in place, and the daily run does nothing but drop values into them. Every
+separate write to this workbook starts a recalculation that the next call has
+to wait out -- about eight minutes at 23k rows, because ~30k SUMPRODUCT and
+COUNTIFS cells across twenty sheets each scan whole columns of it. Adding
+rows, pasting formulas and writing values used to be three such waits a day;
+against pre-built rows it is one.
 """
 
 from __future__ import annotations
@@ -35,6 +45,7 @@ RAW_COLUMN_COUNT = 41
 RAW_END_COLUMN = "AO"
 FORMULA_START_COL_0IDX = 41
 FORMULA_END_COL_0IDX = 56
+FORMULA_FIRST_COLUMN = "AP"
 
 
 
@@ -206,6 +217,26 @@ def _final_regular_games(
     return sorted(games, key=lambda g: (g["officialDate"], int(g["gamePk"])))
 
 
+def placeholder_formulas_ready(
+    formula_cells: list[list[Any]], start_row: int, end_row: int
+) -> bool:
+    """True when every row in start_row..end_row already carries a formula.
+
+    紀錄 keeps pre-built rows whose AP:BD formulas are already in place, the
+    way NPB's 賽錄 keeps numbered placeholders. Pasting formulas over rows
+    that already have them buys nothing and costs a full recalculation of the
+    workbook -- around eight minutes at this size -- because every later call
+    queues behind it.
+    """
+    needed = end_row - start_row + 1
+    if len(formula_cells) < needed:
+        return False
+    return all(
+        str(row[0] if row else "").startswith("=")
+        for row in formula_cells[:needed]
+    )
+
+
 def _last_dated_row(date_values: list[str]) -> int:
     for index in range(len(date_values), 0, -1):
         if str(date_values[index - 1]).strip():
@@ -303,54 +334,81 @@ def update_record_sheet(start_date: str, end_date: str, dry_run: bool = False) -
         cache_path.write_text(json.dumps(rows, ensure_ascii=False))
         print(f"Cached {len(rows)} row(s) to {cache_path}", flush=True)
 
+    spreadsheet = worksheet.spreadsheet
     if worksheet.row_count < end_row:
         rows_to_add = end_row - worksheet.row_count
         _with_retries("add_rows", lambda: worksheet.add_rows(rows_to_add))
         print(f"Added {rows_to_add} worksheet row(s).", flush=True)
+        formulas_ready = False
+    else:
+        formula_range = (
+            f"'{WORKSHEET_NAME}'!{FORMULA_FIRST_COLUMN}{start_row}"
+            f":{FORMULA_FIRST_COLUMN}{end_row}"
+        )
+        cells = _with_retries(
+            "read placeholder formulas",
+            lambda: spreadsheet.values_batch_get(
+                [formula_range], params={"valueRenderOption": "FORMULA"}
+            )["valueRanges"][0].get("values", []),
+        )
+        formulas_ready = placeholder_formulas_ready(cells, start_row, end_row)
 
-    spreadsheet = worksheet.spreadsheet
-    _with_retries(
-        "copy formulas",
-        lambda: spreadsheet.batch_update(
-            {
-                "requests": [
-                    {
-                        "copyPaste": {
-                            "source": {
-                                "sheetId": worksheet.id,
-                                "startRowIndex": last_row - 1,
-                                "endRowIndex": last_row,
-                                "startColumnIndex": FORMULA_START_COL_0IDX,
-                                "endColumnIndex": FORMULA_END_COL_0IDX,
-                            },
-                            "destination": {
-                                "sheetId": worksheet.id,
-                                "startRowIndex": start_row - 1,
-                                "endRowIndex": end_row,
-                                "startColumnIndex": FORMULA_START_COL_0IDX,
-                                "endColumnIndex": FORMULA_END_COL_0IDX,
-                            },
-                            "pasteType": "PASTE_FORMULA",
-                        }
-                    }
-                ]
-            }
-        ),
-    )
-
-    for offset in range(0, len(rows), 500):
-        chunk = rows[offset : offset + 500]
-        chunk_start = start_row + offset
-        chunk_end = chunk_start + len(chunk) - 1
+    if formulas_ready:
+        print(
+            f"Rows {start_row}:{end_row} already carry their formulas; "
+            "writing values only.",
+            flush=True,
+        )
+    else:
         _with_retries(
-            f"write rows {chunk_start}:{chunk_end}",
-            lambda: worksheet.update(
-                range_name=f"A{chunk_start}:{RAW_END_COLUMN}{chunk_end}",
-                values=chunk,
-                value_input_option="USER_ENTERED",
+            "copy formulas",
+            lambda: spreadsheet.batch_update(
+                {
+                    "requests": [
+                        {
+                            "copyPaste": {
+                                "source": {
+                                    "sheetId": worksheet.id,
+                                    "startRowIndex": last_row - 1,
+                                    "endRowIndex": last_row,
+                                    "startColumnIndex": FORMULA_START_COL_0IDX,
+                                    "endColumnIndex": FORMULA_END_COL_0IDX,
+                                },
+                                "destination": {
+                                    "sheetId": worksheet.id,
+                                    "startRowIndex": start_row - 1,
+                                    "endRowIndex": end_row,
+                                    "startColumnIndex": FORMULA_START_COL_0IDX,
+                                    "endColumnIndex": FORMULA_END_COL_0IDX,
+                                },
+                                "pasteType": "PASTE_FORMULA",
+                            }
+                        }
+                    ]
+                }
             ),
         )
-        print(f"Wrote rows {chunk_start}:{chunk_end}", flush=True)
+
+    # One request, not one per chunk: each separate write starts its own
+    # recalculation, and the next call waits the whole of it out.
+    data = [
+        {
+            "range": (
+                f"'{WORKSHEET_NAME}'!A{start_row + offset}"
+                f":{RAW_END_COLUMN}{start_row + offset + len(rows[offset : offset + 500]) - 1}"
+            ),
+            "values": rows[offset : offset + 500],
+        }
+        for offset in range(0, len(rows), 500)
+    ]
+    _with_retries(
+        f"write rows {start_row}:{end_row}",
+        lambda: spreadsheet.values_batch_update(
+            {"valueInputOption": "USER_ENTERED", "data": data}
+        ),
+    )
+    print(f"Wrote rows {start_row}:{end_row}", flush=True)
+
 
     return len(rows)
 
