@@ -34,6 +34,7 @@ from gspread.utils import rowcol_to_a1
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from baseball.mlb_names import rename_map
 from baseball.mlb_teams import TEAM_CODE_ALIASES, canonical_team_code  # noqa: F401
 from cpbl import _sheets_client
 
@@ -49,6 +50,12 @@ FORMULA_START_COL_0IDX = 41
 FORMULA_END_COL_0IDX = 56
 FORMULA_FIRST_COLUMN = "AP"
 MAX_CONCURRENT = 8
+AWAY_STARTER_0IDX = 3
+HOME_STARTER_0IDX = 30
+STARTER_END_COLUMN = "AE"
+# 設定 and the 對戰 sheets look two years back, so those are the seasons whose
+# spellings still have to agree with what MLB publishes today.
+NAME_SEASONS = 3
 
 
 
@@ -342,6 +349,88 @@ def _cache_path(start_date: str, end_date: str, count: int) -> Path:
     return CACHE_DIR / f"mlb_record_rows_{safe_start}_{safe_end}_{count}.json"
 
 
+def starter_name_fixes(
+    rows: list[list[Any]], first_row: int, renames: dict[str, str]
+) -> dict[int, dict[int, str]]:
+    """Rows of A:AE whose starter names MLB has since respelt."""
+    fixes: dict[int, dict[int, str]] = {}
+    for offset, row in enumerate(rows):
+        for column in (AWAY_STARTER_0IDX, HOME_STARTER_0IDX):
+            name = str(row[column]).strip() if len(row) > column else ""
+            current = renames.get(name)
+            if current:
+                fixes.setdefault(first_row + offset, {})[column] = current
+    return fixes
+
+
+def _first_row_of_season(date_values: list[str], earliest_year: int) -> int:
+    """The first row dated in `earliest_year` or later; 紀錄 runs oldest first."""
+    for index, value in enumerate(date_values[1:], start=2):
+        text = str(value).strip()
+        if not text:
+            continue
+        year = text.split("/")[0]
+        if year.isdigit() and int(year) >= earliest_year:
+            return index
+    return len(date_values) + 1
+
+
+def _pending_name_fixes(
+    session: requests.Session,
+    worksheet: Any,
+    date_values: list[str],
+    last_row: int,
+) -> dict[int, dict[int, str]]:
+    """Starter names in 紀錄 that no longer match what MLB publishes.
+
+    One request per season answers for every player, so this costs no feeds
+    and can cover the whole window the formulas read.
+    """
+    seasons = [date.today().year - offset for offset in range(NAME_SEASONS)]
+    current: set[str] = set()
+    for season in seasons:
+        people = _get_json(
+            session, f"{MLB_API}/v1/sports/1/players", season=season
+        ).get("people", [])
+        current |= {person["fullName"] for person in people}
+
+    first_row = _first_row_of_season(date_values, min(seasons))
+    if first_row > last_row:
+        return {}
+
+    rows = _with_retries(
+        f"read starter names {first_row}:{last_row}",
+        lambda: worksheet.get(
+            f"A{first_row}:{STARTER_END_COLUMN}{last_row}",
+            value_render_option="UNFORMATTED_VALUE",
+        ),
+    )
+    seen = {
+        str(row[column]).strip()
+        for row in rows
+        for column in (AWAY_STARTER_0IDX, HOME_STARTER_0IDX)
+        if len(row) > column and str(row[column]).strip()
+    }
+    renames, ambiguous = rename_map(seen, current)
+    if ambiguous:
+        print(
+            f"Two current players share a spelling, so these are left alone: "
+            f"{', '.join(ambiguous)}",
+            flush=True,
+        )
+    if not renames:
+        return {}
+
+    fixes = starter_name_fixes(rows, first_row, renames)
+    print(
+        f"MLB has respelt {len(renames)} name(s); "
+        f"{sum(len(columns) for columns in fixes.values())} cell(s) to follow: "
+        + ", ".join(f"{old} -> {new}" for old, new in sorted(renames.items())[:6]),
+        flush=True,
+    )
+    return fixes
+
+
 def _pending_revisions(
     session: requests.Session,
     worksheet: Any,
@@ -439,6 +528,10 @@ def update_record_sheet(start_date: str, end_date: str, dry_run: bool = False) -
     print(f"Found {len(games)} missing final regular-season game(s).", flush=True)
 
     revisions = _pending_revisions(session, worksheet, already_written, row_by_game_pk)
+    for row, columns in _pending_name_fixes(
+        session, worksheet, date_values, last_row
+    ).items():
+        revisions.setdefault(row, {}).update(columns)
 
     if dry_run or (not games and not revisions):
         for game in games[:10]:

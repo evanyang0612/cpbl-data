@@ -74,3 +74,52 @@ class RevisedCellsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StarterNameFixesTest(unittest.TestCase):
+    """Which rows of 紀錄 carry a spelling MLB has since changed."""
+
+    RENAMES = {"Jesus Luzardo": "Jesús Luzardo", "Ranger Suárez": "Ranger Suarez"}
+
+    def _rows(self):
+        # A:AE, so index 3 is the away starter and index 30 the home starter.
+        blank = [""] * 31
+        away = list(blank)
+        away[3] = "Jesus Luzardo"
+        home = list(blank)
+        home[30] = "Ranger Suárez"
+        both = list(blank)
+        both[3] = "Jesus Luzardo"
+        both[30] = "Ranger Suárez"
+        return [list(blank), away, home, both]
+
+    def test_both_starter_columns_are_checked(self):
+        from migration.update_mlb_record import starter_name_fixes
+
+        fixes = starter_name_fixes(self._rows(), 100, self.RENAMES)
+
+        self.assertEqual(
+            fixes,
+            {
+                101: {3: "Jesús Luzardo"},
+                102: {30: "Ranger Suarez"},
+                103: {3: "Jesús Luzardo", 30: "Ranger Suarez"},
+            },
+        )
+
+    def test_a_name_that_needs_no_change_is_absent(self):
+        from migration.update_mlb_record import starter_name_fixes
+
+        row = [""] * 31
+        row[3] = "Chris Sale"
+        self.assertEqual(starter_name_fixes([row], 2, self.RENAMES), {})
+
+    def test_rows_trimmed_short_by_the_api_do_not_raise(self):
+        from migration.update_mlb_record import starter_name_fixes
+
+        self.assertEqual(starter_name_fixes([["2026/6/23"]], 2, self.RENAMES), {})
+
+    def test_no_renames_means_no_work(self):
+        from migration.update_mlb_record import starter_name_fixes
+
+        self.assertEqual(starter_name_fixes(self._rows(), 100, {}), {})
