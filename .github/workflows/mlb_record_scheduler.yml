@@ -38,11 +38,16 @@ jobs:
         run: |
           uv run python migration/update_mlb_last10.py 2>&1 | tee -a mlb-job.log
 
+      # Thirty days, not three: the official scorer revises hits, errors and
+      # earned runs well after the night in question, and a game already in
+      # 紀錄 is otherwise never looked at again. Over sixty days that left 94
+      # stale values across 756 games. The window costs one concurrent sweep
+      # of the feeds and still writes once.
       - name: Run MLB record updater
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: |
-          uv run python migration/update_mlb_record.py --recent-days 3 \
+          uv run python migration/update_mlb_record.py --recent-days 30 \
             2>&1 | tee -a mlb-job.log
 
       # 12:00 UTC is 08:00 ET, by which point the day's probables are announced
