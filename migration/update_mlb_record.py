@@ -1,8 +1,18 @@
 """Backfill MLB regular-season games into the 紀錄 worksheet.
 
 The target worksheet stores raw box-score fields in A:AO and formula-driven
-fields in AP:BD. This script writes only A:AO, then copies formulas from the
-last existing dated row down across the inserted range.
+fields in AP:BD. This script writes only A:AO; it copies formulas down from
+the last dated row only when the rows it is about to fill do not already have
+them.
+
+That condition is the whole point. 紀錄 is meant to be kept the way NPB keeps
+賽錄: rows are pre-built as numbered placeholders with their formulas already
+in place, and the daily run does nothing but drop values into them. Every
+separate write to this workbook starts a recalculation that the next call has
+to wait out -- about eight minutes at 23k rows, because ~30k SUMPRODUCT and
+COUNTIFS cells across twenty sheets each scan whole columns of it. Adding
+rows, pasting formulas and writing values used to be three such waits a day;
+against pre-built rows it is one.
 """
 
 from __future__ import annotations
@@ -12,6 +22,7 @@ import json
 import sys
 import time
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from datetime import timedelta
 from pathlib import Path
@@ -19,9 +30,11 @@ from typing import Any
 
 import requests
 from gspread.exceptions import APIError
+from gspread.utils import rowcol_to_a1
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from baseball.mlb_names import rename_map
 from baseball.mlb_teams import TEAM_CODE_ALIASES, canonical_team_code  # noqa: F401
 from cpbl import _sheets_client
 
@@ -35,6 +48,14 @@ RAW_COLUMN_COUNT = 41
 RAW_END_COLUMN = "AO"
 FORMULA_START_COL_0IDX = 41
 FORMULA_END_COL_0IDX = 56
+FORMULA_FIRST_COLUMN = "AP"
+MAX_CONCURRENT = 8
+AWAY_STARTER_0IDX = 3
+HOME_STARTER_0IDX = 30
+STARTER_END_COLUMN = "AE"
+# 設定 and the 對戰 sheets look two years back, so those are the seasons whose
+# spellings still have to agree with what MLB publishes today.
+NAME_SEASONS = 3
 
 
 
@@ -129,6 +150,16 @@ def _row_from_game(
 ) -> list[Any]:
     game_pk = int(game["gamePk"])
     feed = _get_json(session, f"{MLB_API}/v1.1/game/{game_pk}/feed/live")
+    return row_from_feed(feed, game)
+
+
+def row_from_feed(feed: dict[str, Any], game: dict[str, Any]) -> list[Any]:
+    """Build one A:AO 紀錄 row from an already-fetched live feed.
+
+    Split out so 近十場 can build the same rows from the same feed it already
+    pulls for batting stats, instead of reading them back out of 紀錄.
+    """
+    game_pk = int(game["gamePk"])
     game_data = feed["gameData"]
     live_data = feed["liveData"]
     boxscore = live_data["boxscore"]
@@ -206,6 +237,79 @@ def _final_regular_games(
     return sorted(games, key=lambda g: (g["officialDate"], int(g["gamePk"])))
 
 
+def placeholder_formulas_ready(
+    formula_cells: list[list[Any]], start_row: int, end_row: int
+) -> bool:
+    """True when every row in start_row..end_row already carries a formula.
+
+    紀錄 keeps pre-built rows whose AP:BD formulas are already in place, the
+    way NPB's 賽錄 keeps numbered placeholders. Pasting formulas over rows
+    that already have them buys nothing and costs a full recalculation of the
+    workbook -- around eight minutes at this size -- because every later call
+    queues behind it.
+    """
+    needed = end_row - start_row + 1
+    if len(formula_cells) < needed:
+        return False
+    return all(
+        str(row[0] if row else "").startswith("=")
+        for row in formula_cells[:needed]
+    )
+
+
+DATE_COL_0IDX = 0
+# Sheets counts days from 1899-12-30, so an UNFORMATTED_VALUE read of a date
+# cell comes back as 46196 rather than 2026/6/23.
+SHEETS_EPOCH = date(1899, 12, 30)
+
+
+def _as_serial(value: Any) -> float | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        return float((datetime.strptime(text, "%Y/%m/%d").date() - SHEETS_EPOCH).days)
+    except ValueError:
+        return None
+
+
+def _same_cell(api_value: Any, sheet_value: Any, column: int) -> bool:
+    if column == DATE_COL_0IDX:
+        api_serial, sheet_serial = _as_serial(api_value), _as_serial(sheet_value)
+        if api_serial is not None and sheet_serial is not None:
+            return api_serial == sheet_serial
+    try:
+        return float(str(api_value).strip()) == float(str(sheet_value).strip())
+    except ValueError:
+        return str(api_value).strip() == str(sheet_value).strip()
+
+
+def revised_cells(api_row: list[Any], sheet_row: list[Any]) -> dict[int, Any]:
+    """Columns where the API now disagrees with what 紀錄 holds.
+
+    A game already in 紀錄 is never looked at again, so an official scorer's
+    later ruling on a hit, an error or an earned run never reaches the sheet.
+    Measured over sixty days: 94 stale values across 756 games, every one of
+    them in those fields and none anywhere else.
+
+    A blank from the API is missing data rather than a correction, so it never
+    clears a cell that already holds something.
+    """
+    padded = list(sheet_row) + [""] * (RAW_COLUMN_COUNT - len(sheet_row))
+    revised: dict[int, Any] = {}
+    for column in range(RAW_COLUMN_COUNT):
+        api_value = api_row[column]
+        if str(api_value).strip() == "":
+            continue
+        if not _same_cell(api_value, padded[column], column):
+            revised[column] = api_value
+    return revised
+
+
 def _last_dated_row(date_values: list[str]) -> int:
     for index in range(len(date_values), 0, -1):
         if str(date_values[index - 1]).strip():
@@ -245,6 +349,158 @@ def _cache_path(start_date: str, end_date: str, count: int) -> Path:
     return CACHE_DIR / f"mlb_record_rows_{safe_start}_{safe_end}_{count}.json"
 
 
+def starter_name_fixes(
+    rows: list[list[Any]], first_row: int, renames: dict[str, str]
+) -> dict[int, dict[int, str]]:
+    """Rows of A:AE whose starter names MLB has since respelt."""
+    fixes: dict[int, dict[int, str]] = {}
+    for offset, row in enumerate(rows):
+        for column in (AWAY_STARTER_0IDX, HOME_STARTER_0IDX):
+            name = str(row[column]).strip() if len(row) > column else ""
+            current = renames.get(name)
+            if current:
+                fixes.setdefault(first_row + offset, {})[column] = current
+    return fixes
+
+
+def _first_row_of_season(date_values: list[str], earliest_year: int) -> int:
+    """The first row dated in `earliest_year` or later; 紀錄 runs oldest first."""
+    for index, value in enumerate(date_values[1:], start=2):
+        text = str(value).strip()
+        if not text:
+            continue
+        year = text.split("/")[0]
+        if year.isdigit() and int(year) >= earliest_year:
+            return index
+    return len(date_values) + 1
+
+
+def _pending_name_fixes(
+    session: requests.Session,
+    worksheet: Any,
+    date_values: list[str],
+    last_row: int,
+) -> dict[int, dict[int, str]]:
+    """Starter names in 紀錄 that no longer match what MLB publishes.
+
+    One request per season answers for every player, so this costs no feeds
+    and can cover the whole window the formulas read.
+    """
+    seasons = [date.today().year - offset for offset in range(NAME_SEASONS)]
+    current: set[str] = set()
+    for season in seasons:
+        people = _get_json(
+            session, f"{MLB_API}/v1/sports/1/players", season=season
+        ).get("people", [])
+        current |= {person["fullName"] for person in people}
+
+    first_row = _first_row_of_season(date_values, min(seasons))
+    if first_row > last_row:
+        return {}
+
+    rows = _with_retries(
+        f"read starter names {first_row}:{last_row}",
+        lambda: worksheet.get(
+            f"A{first_row}:{STARTER_END_COLUMN}{last_row}",
+            value_render_option="UNFORMATTED_VALUE",
+        ),
+    )
+    seen = {
+        str(row[column]).strip()
+        for row in rows
+        for column in (AWAY_STARTER_0IDX, HOME_STARTER_0IDX)
+        if len(row) > column and str(row[column]).strip()
+    }
+    renames, ambiguous = rename_map(seen, current)
+    if ambiguous:
+        print(
+            f"Two current players share a spelling, so these are left alone: "
+            f"{', '.join(ambiguous)}",
+            flush=True,
+        )
+    if not renames:
+        return {}
+
+    fixes = starter_name_fixes(rows, first_row, renames)
+    print(
+        f"MLB has respelt {len(renames)} name(s); "
+        f"{sum(len(columns) for columns in fixes.values())} cell(s) to follow: "
+        + ", ".join(f"{old} -> {new}" for old, new in sorted(renames.items())[:6]),
+        flush=True,
+    )
+    return fixes
+
+
+def _pending_revisions(
+    session: requests.Session,
+    worksheet: Any,
+    games: list[dict[str, Any]],
+    row_by_game_pk: dict[str, int],
+) -> dict[int, dict[int, Any]]:
+    """Cells in games already written that the API has since corrected.
+
+    The feeds are fetched, and the sheet rows read, before anything is
+    written, so this costs no recalculation wait. What it finds is merged
+    into the one write the run makes.
+    """
+    rows_wanted = sorted(
+        row_by_game_pk[str(game["gamePk"])]
+        for game in games
+        if str(game["gamePk"]) in row_by_game_pk
+    )
+    if not rows_wanted:
+        return {}
+
+    first, last = rows_wanted[0], rows_wanted[-1]
+    sheet_rows = _with_retries(
+        f"read rows {first}:{last} to check for revisions",
+        lambda: worksheet.get(
+            f"A{first}:{RAW_END_COLUMN}{last}",
+            value_render_option="UNFORMATTED_VALUE",
+        ),
+    )
+
+    feeds = _feeds_for_games(session, games)
+    revisions: dict[int, dict[int, Any]] = {}
+    for game in games:
+        game_pk = str(game["gamePk"])
+        row = row_by_game_pk.get(game_pk)
+        feed = feeds.get(game_pk)
+        if row is None or feed is None:
+            continue
+        offset = row - first
+        sheet_row = sheet_rows[offset] if offset < len(sheet_rows) else []
+        changed = revised_cells(row_from_feed(feed, game), sheet_row)
+        if changed:
+            revisions[row] = changed
+
+    if revisions:
+        cells = sum(len(columns) for columns in revisions.values())
+        print(
+            f"{cells} cell(s) revised by the API across {len(revisions)} game(s).",
+            flush=True,
+        )
+    return revisions
+
+
+def _feeds_for_games(
+    session: requests.Session, games: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Fetch each game's live feed once, a few at a time."""
+    game_pks = sorted({str(game["gamePk"]) for game in games}, key=int)
+    feeds: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as pool:
+        futures = {
+            pool.submit(
+                _get_json, session, f"{MLB_API}/v1.1/game/{game_pk}/feed/live"
+            ): game_pk
+            for game_pk in game_pks
+        }
+        for future in as_completed(futures):
+            feeds[futures[future]] = future.result()
+    return feeds
+
+
 def update_record_sheet(start_date: str, end_date: str, dry_run: bool = False) -> int:
     session = requests.Session()
     worksheet = _sheets_client.worksheet(SPREADSHEET_KEY, WORKSHEET_NAME)
@@ -256,101 +512,162 @@ def update_record_sheet(start_date: str, end_date: str, dry_run: bool = False) -
         str(value).strip() for value in game_pk_values[1:] if str(value).strip()
     }
 
+    row_by_game_pk = {
+        str(value).strip(): index
+        for index, value in enumerate(game_pk_values[1:], start=2)
+        if str(value).strip()
+    }
+
+    schedule = _final_regular_games(session, start_date, end_date)
     games = [
-        game
-        for game in _final_regular_games(session, start_date, end_date)
-        if str(game["gamePk"]) not in existing_game_pks
+        game for game in schedule if str(game["gamePk"]) not in existing_game_pks
+    ]
+    already_written = [
+        game for game in schedule if str(game["gamePk"]) in existing_game_pks
     ]
     print(f"Found {len(games)} missing final regular-season game(s).", flush=True)
-    if dry_run or not games:
+
+    revisions = _pending_revisions(session, worksheet, already_written, row_by_game_pk)
+    for row, columns in _pending_name_fixes(
+        session, worksheet, date_values, last_row
+    ).items():
+        revisions.setdefault(row, {}).update(columns)
+
+    if dry_run or (not games and not revisions):
         for game in games[:10]:
             print(game["officialDate"], game["gamePk"])
         if len(games) > 10:
             print(f"... {len(games) - 10} more")
         return len(games)
 
-    start_row = last_row + 1
-    end_row = start_row + len(games) - 1
-    if _protected_range_blocks_edit(
-        worksheet, start_row - 1, end_row, 0, FORMULA_END_COL_0IDX
-    ):
-        raise RuntimeError(
-            f"{WORKSHEET_NAME} has a protected range covering rows "
-            f"{start_row}:{end_row}. Grant edit access to the service account or "
-            "remove/unprotect that range before running this backfill."
-        )
+    spreadsheet = worksheet.spreadsheet
+    data: list[dict[str, Any]] = []
+    rows: list[list[Any]] = []
 
-    cache_path = _cache_path(start_date, end_date, len(games))
-    if cache_path.exists():
-        rows = json.loads(cache_path.read_text())
-        if any(len(row) != RAW_COLUMN_COUNT for row in rows):
+    if games:
+        start_row = last_row + 1
+        end_row = start_row + len(games) - 1
+        if _protected_range_blocks_edit(
+            worksheet, start_row - 1, end_row, 0, FORMULA_END_COL_0IDX
+        ):
+            raise RuntimeError(
+                f"{WORKSHEET_NAME} has a protected range covering rows "
+                f"{start_row}:{end_row}. Grant edit access to the service account "
+                "or remove/unprotect that range before running this backfill."
+            )
+
+        cache_path = _cache_path(start_date, end_date, len(games))
+        if cache_path.exists():
+            rows = json.loads(cache_path.read_text())
+            if any(len(row) != RAW_COLUMN_COUNT for row in rows):
+                print(
+                    f"Ignoring stale cache with old raw column count: {cache_path}",
+                    flush=True,
+                )
+                rows = []
+            else:
+                print(f"Loaded {len(rows)} cached row(s) from {cache_path}", flush=True)
+        if not rows:
+            for index, game in enumerate(games, start=1):
+                rows.append(_row_from_game(session, game))
+                if index % 100 == 0 or index == len(games):
+                    print(f"Built {index}/{len(games)} rows", flush=True)
+                time.sleep(0.05)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(rows, ensure_ascii=False))
+            print(f"Cached {len(rows)} row(s) to {cache_path}", flush=True)
+
+        if worksheet.row_count < end_row:
+            rows_to_add = end_row - worksheet.row_count
+            _with_retries("add_rows", lambda: worksheet.add_rows(rows_to_add))
+            print(f"Added {rows_to_add} worksheet row(s).", flush=True)
+            formulas_ready = False
+        else:
+            formula_range = (
+                f"'{WORKSHEET_NAME}'!{FORMULA_FIRST_COLUMN}{start_row}"
+                f":{FORMULA_FIRST_COLUMN}{end_row}"
+            )
+            cells = _with_retries(
+                "read placeholder formulas",
+                lambda: spreadsheet.values_batch_get(
+                    [formula_range], params={"valueRenderOption": "FORMULA"}
+                )["valueRanges"][0].get("values", []),
+            )
+            formulas_ready = placeholder_formulas_ready(cells, start_row, end_row)
+
+        if formulas_ready:
             print(
-                f"Ignoring stale cache with old raw column count: {cache_path}",
+                f"Rows {start_row}:{end_row} already carry their formulas; "
+                "writing values only.",
                 flush=True,
             )
-            rows = []
         else:
-            print(f"Loaded {len(rows)} cached row(s) from {cache_path}", flush=True)
-    else:
-        rows: list[list[Any]] = []
-    if not rows:
-        for index, game in enumerate(games, start=1):
-            rows.append(_row_from_game(session, game))
-            if index % 100 == 0 or index == len(games):
-                print(f"Built {index}/{len(games)} rows", flush=True)
-            time.sleep(0.05)
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(rows, ensure_ascii=False))
-        print(f"Cached {len(rows)} row(s) to {cache_path}", flush=True)
-
-    if worksheet.row_count < end_row:
-        rows_to_add = end_row - worksheet.row_count
-        _with_retries("add_rows", lambda: worksheet.add_rows(rows_to_add))
-        print(f"Added {rows_to_add} worksheet row(s).", flush=True)
-
-    spreadsheet = worksheet.spreadsheet
-    _with_retries(
-        "copy formulas",
-        lambda: spreadsheet.batch_update(
-            {
-                "requests": [
+            _with_retries(
+                "copy formulas",
+                lambda: spreadsheet.batch_update(
                     {
-                        "copyPaste": {
-                            "source": {
-                                "sheetId": worksheet.id,
-                                "startRowIndex": last_row - 1,
-                                "endRowIndex": last_row,
-                                "startColumnIndex": FORMULA_START_COL_0IDX,
-                                "endColumnIndex": FORMULA_END_COL_0IDX,
-                            },
-                            "destination": {
-                                "sheetId": worksheet.id,
-                                "startRowIndex": start_row - 1,
-                                "endRowIndex": end_row,
-                                "startColumnIndex": FORMULA_START_COL_0IDX,
-                                "endColumnIndex": FORMULA_END_COL_0IDX,
-                            },
-                            "pasteType": "PASTE_FORMULA",
-                        }
+                        "requests": [
+                            {
+                                "copyPaste": {
+                                    "source": {
+                                        "sheetId": worksheet.id,
+                                        "startRowIndex": last_row - 1,
+                                        "endRowIndex": last_row,
+                                        "startColumnIndex": FORMULA_START_COL_0IDX,
+                                        "endColumnIndex": FORMULA_END_COL_0IDX,
+                                    },
+                                    "destination": {
+                                        "sheetId": worksheet.id,
+                                        "startRowIndex": start_row - 1,
+                                        "endRowIndex": end_row,
+                                        "startColumnIndex": FORMULA_START_COL_0IDX,
+                                        "endColumnIndex": FORMULA_END_COL_0IDX,
+                                    },
+                                    "pasteType": "PASTE_FORMULA",
+                                }
+                            }
+                        ]
                     }
-                ]
-            }
+                ),
+            )
+
+        for offset in range(0, len(rows), 500):
+            chunk = rows[offset : offset + 500]
+            chunk_start = start_row + offset
+            data.append(
+                {
+                    "range": (
+                        f"'{WORKSHEET_NAME}'!A{chunk_start}"
+                        f":{RAW_END_COLUMN}{chunk_start + len(chunk) - 1}"
+                    ),
+                    "values": chunk,
+                }
+            )
+
+    for row in sorted(revisions):
+        for column, value in sorted(revisions[row].items()):
+            letter = rowcol_to_a1(1, column + 1).rstrip("1")
+            data.append(
+                {
+                    "range": f"'{WORKSHEET_NAME}'!{letter}{row}",
+                    "values": [[value]],
+                }
+            )
+
+    # One request, not one per chunk: each separate write starts its own
+    # recalculation, and the next call waits the whole of it out.
+    _with_retries(
+        f"write {len(data)} range(s)",
+        lambda: spreadsheet.values_batch_update(
+            {"valueInputOption": "USER_ENTERED", "data": data}
         ),
     )
+    print(
+        f"Wrote {len(rows)} new row(s) and "
+        f"{sum(len(c) for c in revisions.values())} revised cell(s).",
+        flush=True,
+    )
 
-    for offset in range(0, len(rows), 500):
-        chunk = rows[offset : offset + 500]
-        chunk_start = start_row + offset
-        chunk_end = chunk_start + len(chunk) - 1
-        _with_retries(
-            f"write rows {chunk_start}:{chunk_end}",
-            lambda: worksheet.update(
-                range_name=f"A{chunk_start}:{RAW_END_COLUMN}{chunk_end}",
-                values=chunk,
-                value_input_option="USER_ENTERED",
-            ),
-        )
-        print(f"Wrote rows {chunk_start}:{chunk_end}", flush=True)
 
     return len(rows)
 

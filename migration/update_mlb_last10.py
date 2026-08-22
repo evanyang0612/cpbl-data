@@ -1,4 +1,20 @@
-"""Build MLB 近十場 sheets from the MLB 紀錄 worksheet."""
+"""Build MLB 近十場 sheets from the MLB schedule and live feeds.
+
+The games used to come out of 紀錄, which the record step writes minutes
+earlier in the same job. Every write to that workbook starts a
+recalculation -- ~30k SUMPRODUCT and COUNTIFS cells across twenty sheets,
+each scanning whole columns of a 23k-row 紀錄 -- and reads queue behind it
+until the backend gives up at three minutes and answers 503. Measured on
+the live sheet: the same read takes 4.0s settled and 482.9s straight after
+a write that changed nothing at all.
+
+NPB's 近十場 never had the problem because it asks the source for each
+team's last ten game ids and scrapes those games directly, before 賽錄 is
+written. This does the same: the MLB schedule says which games each team
+last played, and the live feed for each -- pulled anyway for the batting
+stats -- carries every field 紀錄 was being asked for. One feed per game,
+fetched concurrently, shared by both passes.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +23,7 @@ import re
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from baseball.mlb_teams import canonical_team_code
 from cpbl import _sheets_client
+from migration.update_mlb_record import _final_regular_games, row_from_feed
 
 SPREADSHEET_KEY = "11FV70TXVAxLTwYH6pLj7HwK1qq-fIa61QrePRCC8YUM"
 RECORD_SHEET_NAME = "紀錄"
@@ -26,6 +44,13 @@ MLB_API = "https://statsapi.mlb.com/api"
 REQUEST_TIMEOUT = (10, 45)
 
 GAMES_COUNT = 10
+# Ten games spans about two weeks; start wider than that and widen again rather
+# than miss a team that has been idle.
+SCHEDULE_LOOKBACK_DAYS = 21
+SCHEDULE_LOOKBACK_MAX_DAYS = 60
+# NPB fetches its games in batches of MAX_CONCURRENT; the MLB feed endpoint is
+# comfortable with the same handful at a time.
+MAX_CONCURRENT = 8
 BLOCK_COLS = [2, 17, 32]
 TOP_HEADER_ROW = 3
 TOP_GAME_START = 4
@@ -362,12 +387,7 @@ def _record_to_team_games(row: list[str]) -> list[tuple[str, dict[str, Any]]]:
     return [(away, away_game), (home, home_game)]
 
 
-def _read_team_games() -> dict[str, list[dict[str, Any]]]:
-    worksheet = _sheets_client.worksheet(SPREADSHEET_KEY, RECORD_SHEET_NAME)
-    rows = _with_retries(
-        "read record raw columns",
-        lambda: worksheet.get("A2:AO", value_render_option="UNFORMATTED_VALUE"),
-    )
+def _games_by_team(rows: list[list[str]]) -> dict[str, list[dict[str, Any]]]:
     games_by_team: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         for team, game in _record_to_team_games(row):
@@ -381,6 +401,93 @@ def _read_team_games() -> dict[str, list[dict[str, Any]]]:
         )
         games_by_team[team] = games_by_team[team][-GAMES_COUNT:]
     return games_by_team
+
+
+def _game_feed(session: requests.Session, game_id: str) -> dict[str, Any]:
+    return _get_json(session, f"{MLB_API}/v1.1/game/{game_id}/feed/live")
+
+
+def _schedule_team_codes(game: dict[str, Any]) -> tuple[str, str]:
+    teams = game.get("teams", {})
+    return (
+        canonical_team_code(teams.get("away", {}).get("team", {}).get("abbreviation", "")),
+        canonical_team_code(teams.get("home", {}).get("team", {}).get("abbreviation", "")),
+    )
+
+
+def _last_game_ids_by_team(
+    games: list[dict[str, Any]], count: int = GAMES_COUNT
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Each team's last `count` game ids, oldest first, and who came up short.
+
+    NPB asks the source for this per team; the MLB schedule answers for all
+    thirty at once, so the whole window is one request.
+    """
+    ordered = sorted(games, key=lambda g: (g["officialDate"], int(g["gamePk"])))
+    by_team: dict[str, list[str]] = defaultdict(list)
+    for game in ordered:
+        for team in _schedule_team_codes(game):
+            if team:
+                by_team[team].append(str(game["gamePk"]))
+    short = sorted(team for team, ids in by_team.items() if len(ids) < count)
+    return {team: ids[-count:] for team, ids in by_team.items()}, short
+
+
+def _feeds_for_games(
+    session: requests.Session, games: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Fetch each game's live feed exactly once, a few at a time."""
+    game_ids = sorted({str(game["gamePk"]) for game in games}, key=int)
+    feeds: dict[str, dict[str, Any]] = {}
+    started = time.time()
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as pool:
+        futures = {
+            pool.submit(_game_feed, session, game_id): game_id
+            for game_id in game_ids
+        }
+        for index, future in enumerate(as_completed(futures), start=1):
+            game_id = futures[future]
+            feeds[game_id] = future.result()
+            if index == 1 or index % 25 == 0 or index == len(game_ids):
+                print(
+                    f"Fetched feed {index}/{len(game_ids)} "
+                    f"({time.time() - started:.1f}s)",
+                    flush=True,
+                )
+    return feeds
+
+
+def _fetch_team_games(
+    session: requests.Session | None = None,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    """The last ten games per team, from the schedule -- 紀錄 is never read."""
+    session = session or requests.Session()
+    window = SCHEDULE_LOOKBACK_DAYS
+    while True:
+        end = date.today()
+        start = end - timedelta(days=window)
+        schedule = _final_regular_games(session, start.isoformat(), end.isoformat())
+        ids_by_team, short = _last_game_ids_by_team(schedule)
+        print(
+            f"{len(schedule)} final game(s) over {window} day(s) "
+            f"for {len(ids_by_team)} team(s)",
+            flush=True,
+        )
+        if not short or window >= SCHEDULE_LOOKBACK_MAX_DAYS:
+            if short:
+                print(
+                    f"Short of {GAMES_COUNT} games: {', '.join(short)}",
+                    flush=True,
+                )
+            break
+        window = min(window * 2, SCHEDULE_LOOKBACK_MAX_DAYS)
+        print(f"Widening the schedule window to {window} days.", flush=True)
+
+    wanted = {game_id for ids in ids_by_team.values() for game_id in ids}
+    games = [game for game in schedule if str(game["gamePk"]) in wanted]
+    feeds = _feeds_for_games(session, games)
+    rows = [row_from_feed(feeds[str(game["gamePk"])], game) for game in games]
+    return _games_by_team(rows), feeds
 
 
 def _home_run_events_by_team(
@@ -420,10 +527,7 @@ def _extra_base_hits(batting: dict[str, Any]) -> int:
                for key in ("doubles", "triples", "homeRuns"))
 
 
-def _team_stats_from_feed(
-    session: requests.Session, game_id: str
-) -> dict[str, Any]:
-    feed = _get_json(session, f"{MLB_API}/v1.1/game/{game_id}/feed/live")
+def _team_stats_from_feed(feed: dict[str, Any]) -> dict[str, Any]:
     game_data = feed["gameData"]
     boxscore = feed["liveData"]["boxscore"]
     team_stats: dict[str, dict[str, int]] = {}
@@ -450,17 +554,14 @@ def _team_stats_from_feed(
     }
 
 
-def _enrich_batting_stats(games_by_team: dict[str, list[dict[str, Any]]]) -> None:
-    session = requests.Session()
-    game_ids = sorted(
-        {g["賽事編號"] for games in games_by_team.values() for g in games}
-    )
-    game_cache: dict[str, dict[str, Any]] = {}
-    for index, game_id in enumerate(game_ids, start=1):
-        game_cache[game_id] = _team_stats_from_feed(session, game_id)
-        if index % 25 == 0 or index == len(game_ids):
-            print(f"Fetched batting stats {index}/{len(game_ids)}", flush=True)
-        time.sleep(0.03)
+def _enrich_batting_stats(
+    games_by_team: dict[str, list[dict[str, Any]]],
+    feeds: dict[str, dict[str, Any]],
+) -> None:
+    """Add batting detail from the feeds already fetched for these games."""
+    game_cache = {
+        game_id: _team_stats_from_feed(feed) for game_id, feed in feeds.items()
+    }
     for games in games_by_team.values():
         for game in games:
             cached = game_cache.get(game["賽事編號"], {})
@@ -1524,8 +1625,8 @@ def _update_sheet(
 
 
 def update_mlb_last10() -> None:
-    games_by_team = _read_team_games()
-    _enrich_batting_stats(games_by_team)
+    games_by_team, feeds = _fetch_team_games()
+    _enrich_batting_stats(games_by_team, feeds)
     matchups = _next_matchups() or _fallback_matchups()
 
     seen: set[str] = set()
