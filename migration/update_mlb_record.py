@@ -34,7 +34,7 @@ from gspread.utils import rowcol_to_a1
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from baseball.mlb_names import rename_map
+from baseball.mlb_names import name_corrections, rename_map, shared_names
 from baseball.mlb_teams import TEAM_CODE_ALIASES, canonical_team_code  # noqa: F401
 from cpbl import _sheets_client
 
@@ -52,7 +52,9 @@ FORMULA_FIRST_COLUMN = "AP"
 MAX_CONCURRENT = 8
 AWAY_STARTER_0IDX = 3
 HOME_STARTER_0IDX = 30
-STARTER_END_COLUMN = "AE"
+STARTER_END_COLUMN = "BF"
+AWAY_STARTER_ID_0IDX = 56
+HOME_STARTER_ID_0IDX = 57
 # 設定 and the 對戰 sheets look two years back, so those are the seasons whose
 # spellings still have to agree with what MLB publishes today.
 NAME_SEASONS = 3
@@ -387,12 +389,14 @@ def _pending_name_fixes(
     and can cover the whole window the formulas read.
     """
     seasons = [date.today().year - offset for offset in range(NAME_SEASONS)]
-    current: set[str] = set()
-    for season in seasons:
+    current: dict[int, dict[str, Any]] = {}
+    for season in sorted(seasons):
         people = _get_json(
             session, f"{MLB_API}/v1/sports/1/players", season=season
         ).get("people", [])
-        current |= {person["fullName"] for person in people}
+        # Newest season last, so a player who has been renamed is carried under
+        # the name MLB publishes today rather than the one it published in 2024.
+        current.update({person["id"]: person for person in people})
 
     first_row = _first_row_of_season(date_values, min(seasons))
     if first_row > last_row:
@@ -405,29 +409,78 @@ def _pending_name_fixes(
             value_render_option="UNFORMATTED_VALUE",
         ),
     )
-    seen = {
-        str(row[column]).strip()
-        for row in rows
-        for column in (AWAY_STARTER_0IDX, HOME_STARTER_0IDX)
-        if len(row) > column and str(row[column]).strip()
+    published = {
+        player_id: person["fullName"] for player_id, person in current.items()
     }
-    renames, ambiguous = rename_map(seen, current)
+
+    # Where 紀錄 carries the starter's id, the name is not a guess: ask MLB
+    # what it calls that player today. This reaches what spelling cannot --
+    # 'Louie Varland' is no prefix of 'Louis', and 'Luis L. Ortiz' keeps a
+    # middle initial on purpose.
+    def _cell(row: list[Any], column: int) -> str:
+        return str(row[column]).strip() if len(row) > column else ""
+
+    def _player_id(row: list[Any], column: int) -> int | None:
+        text = _cell(row, column)
+        return int(float(text)) if text else None
+
+    entries: list[tuple[int, int, str, int | None]] = []
+    starter_ids: list[int] = []
+    for offset, row in enumerate(rows):
+        for column, id_column in (
+            (AWAY_STARTER_0IDX, AWAY_STARTER_ID_0IDX),
+            (HOME_STARTER_0IDX, HOME_STARTER_ID_0IDX),
+        ):
+            player_id = _player_id(row, id_column)
+            entries.append((first_row + offset, column, _cell(row, column), player_id))
+            if player_id is not None:
+                starter_ids.append(player_id)
+
+    clashes = shared_names(starter_ids, published)
+    if clashes:
+        print(
+            "Two starters share a published name, which no spelling rule can "
+            "fix -- key on the id if their totals start to matter: "
+            + "; ".join(
+                f"{name} = {', '.join(str(i) for i in ids)}"
+                for name, ids in sorted(clashes.items())
+            ),
+            flush=True,
+        )
+
+    by_id = name_corrections(entries, published)
+
+    # Rows with no id yet -- anything before the backfill -- still need the
+    # spelling rules.
+    seen = {
+        stored
+        for row_number, _column, stored, player_id in entries
+        if player_id is None and stored
+    }
+    renames, ambiguous = rename_map(seen, current.values())
     if ambiguous:
         print(
             f"Two current players share a spelling, so these are left alone: "
             f"{', '.join(ambiguous)}",
             flush=True,
         )
-    if not renames:
+    if not renames and not by_id:
         return {}
 
     fixes = starter_name_fixes(rows, first_row, renames)
-    print(
-        f"MLB has respelt {len(renames)} name(s); "
-        f"{sum(len(columns) for columns in fixes.values())} cell(s) to follow: "
-        + ", ".join(f"{old} -> {new}" for old, new in sorted(renames.items())[:6]),
-        flush=True,
-    )
+    for row, columns in by_id.items():
+        fixes.setdefault(row, {}).update(columns)
+
+    cells = sum(len(columns) for columns in fixes.values())
+    if cells:
+        by_id_cells = sum(len(columns) for columns in by_id.values())
+        print(
+            f"{cells} starter name(s) to follow MLB on "
+            f"({by_id_cells} settled by player id, {cells - by_id_cells} by spelling)",
+            flush=True,
+        )
+        for old_name, new_name in sorted(renames.items())[:6]:
+            print(f"   {old_name} -> {new_name}", flush=True)
     return fixes
 
 
