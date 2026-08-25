@@ -54,6 +54,65 @@ def _raw(pregame=True, live=False):
     return raw
 
 
+class _Feed:
+    """Returns an empty board for the first ``blank`` calls, then the slate."""
+
+    def __init__(self, blank):
+        self.blank = blank
+        self.calls = 0
+
+    def __call__(self, **kwargs):
+        self.calls += 1
+        return _raw() if self.calls > self.blank else {"n": None, "l": None}
+
+
+def _capture_writes(monkeypatch):
+    written = []
+    monkeypatch.setattr(po, "write_snapshots",
+                        lambda rows, league=po.NPB: written.append(rows) or len(rows))
+    return written
+
+
+def test_polling_waits_for_the_board_to_open_then_writes_once(monkeypatch):
+    """PS3838 opens NPB only hours before first pitch, and GitHub Actions drops
+    scheduled runs, so a single job has to sit and wait for the open itself."""
+    feed = _Feed(blank=3)
+    monkeypatch.setattr(po, "fetch_baseball_events", feed)
+    written = _capture_writes(monkeypatch)
+    slept = []
+
+    snapshots = po.run_once("open", poll_interval=300, poll_timeout=3600,
+                            _sleep=slept.append, _clock=lambda: len(slept) * 300)
+
+    assert feed.calls == 4          # three empty boards, then the slate
+    assert slept == [300, 300, 300]
+    assert len(snapshots) == 2      # full game + 1st five
+    assert len(written) == 1
+
+
+def test_polling_gives_up_at_the_deadline_without_writing(monkeypatch):
+    monkeypatch.setattr(po, "fetch_baseball_events", _Feed(blank=99))
+    written = _capture_writes(monkeypatch)
+    slept = []
+
+    snapshots = po.run_once("open", poll_interval=300, poll_timeout=900,
+                            _sleep=slept.append, _clock=lambda: len(slept) * 300)
+
+    assert snapshots == []
+    assert written == []            # nothing found means nothing recorded
+    assert len(slept) <= 3
+
+
+def test_polling_disabled_fetches_exactly_once(monkeypatch):
+    feed = _Feed(blank=99)
+    monkeypatch.setattr(po, "fetch_baseball_events", feed)
+    _capture_writes(monkeypatch)
+
+    po.run_once("interim")
+
+    assert feed.calls == 1
+
+
 def test_normalize_team_maps_known_names():
     assert po.normalize_team("讀賣巨人") == "巨人"
     assert po.normalize_team("橫濱海灣之星") == "DeNA"
@@ -74,14 +133,36 @@ def test_parse_events_returns_one_row_per_period():
 
 def test_final_period_odds_parsed():
     final = next(r for r in po.parse_events(_raw()) if r["period"] == "final")
-    assert final["ml_home"] == 1.529
-    assert final["ml_away"] == 2.65
+    assert final["ml_home"] == 2.65
+    assert final["ml_away"] == 1.529
     # main total is the most balanced line (7.0), not 7.5 / 6.5
     assert final["total_line"] == 7.0
     assert final["total_over"] == 1.847
     # main run line prefers ±1.5 and the balanced side
-    assert final["spread_hdp"] == -1.5
+    assert final["spread_hdp"] == 1.5
     assert final["spread_home"] == 1.925
+
+
+def test_odds_blocks_are_ordered_away_first():
+    """``ev[1]`` is the home team but the odds arrays are not in that order.
+
+    PS3838 is an Asian skin over a US-convention feed: the event names read
+    home-first, while every odds block reads away-first. Reading the moneyline
+    positionally makes the home slot the favourite in only 35% of games and
+    gives it a mean de-vigged win probability of .476 across 162 NPB games —
+    baseball's home field is worth the opposite of that.
+
+    The handicaps and the prices are then mirrored against each other, so a row
+    reads ``[away_hdp, home_hdp, line, home_price, away_price]``.
+    """
+    final = next(r for r in po.parse_events(_raw()) if r["period"] == "final")
+    ladder = {row["hdp"]: row for row in final["all_spreads"]}
+    # Away is the moneyline favourite at 1.529, so it is the side laying runs
+    # and the home team is the one receiving them.
+    assert ladder[-1.5]["home"] == 4.58     # home lays 1.5 while a 2.65 dog
+    assert ladder[-1.5]["away"] == 1.201
+    # Receiving more runs has to shorten the home price monotonically.
+    assert ladder[2.0]["home"] < ladder[1.5]["home"]
 
 
 def test_half_period_has_no_moneyline_but_keeps_totals():
@@ -89,7 +170,7 @@ def test_half_period_has_no_moneyline_but_keeps_totals():
     assert half["ml_home"] is None
     assert half["ml_away"] is None
     assert half["total_line"] == 4.0
-    assert half["spread_hdp"] == -0.5
+    assert half["spread_hdp"] == 0.5   # away lays the half run, home receives
 
 
 def test_live_games_skipped_by_default():

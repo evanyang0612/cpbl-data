@@ -1,0 +1,54 @@
+name: NPB Odds Closing Broadcast
+
+# Separate from the opening broadcast because the two are different jobs. The
+# open is one post for the whole day, fired the evening before as soon as the
+# 早盤 board carries the slate. The close is per first pitch — on a staggered
+# card the 13:00 games have closed long before the 18:00 games stop moving —
+# so this runs through the playing day and posts each start time 30 minutes
+# before it begins, with games sharing a start time going out together.
+#
+# Triggered from cron-job.org on a tight interval; the broadcast ledger keeps
+# every run that is not yet due, or already sent, quiet.
+#
+#   curl -X POST -H "Accept: application/vnd.github+json" \
+#     -H "Authorization: Bearer $GITHUB_PAT" \
+#     https://api.github.com/repos/evanyang0612/cpbl-data/actions/workflows/npb_odds_closing_broadcast.yml/dispatches \
+#     -d '{"ref":"main"}'
+on:
+  workflow_dispatch:
+
+# Two overlapping runs could both read "not sent yet" and post the same start
+# time twice. Runs are short and idempotent, so serialising costs nothing.
+concurrency:
+  group: npb-odds-closing-broadcast
+  cancel-in-progress: false
+
+jobs:
+  broadcast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Broadcast the closing line for any start time now due
+        env:
+          # Writes the 推播紀錄 ledger that keeps a re-trigger quiet.
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          # A bot of its own: subscribers must never receive the scraper
+          # failure alerts the other bot sends.
+          TELEGRAM_BROADCAST_BOT_TOKEN: ${{ secrets.TELEGRAM_BROADCAST_BOT_TOKEN }}
+          TELEGRAM_BROADCAST_CHAT_ID: ${{ secrets.TELEGRAM_BROADCAST_CHAT_ID }}
+          # PS3838 geo-blocks datacenter IPs; tunnel through the same
+          # residential proxy the odds scraper uses.
+          DECODO_PROXY_URL: ${{ secrets.DECODO_PROXY_URL }}
+        run: uv run python -m baseball.odds_notify --league npb --phase close

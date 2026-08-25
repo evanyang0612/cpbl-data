@@ -1,0 +1,53 @@
+name: NPB Odds Broadcast
+
+# Triggered from cron-job.org, not from GitHub's own scheduler: a day's slate
+# reaches PS3838's 早盤 board once the previous evening's games finish, and not
+# at a fixed hour, so the broadcast is fired every few minutes through the
+# evening and posts on whichever run first sees the games. GitHub's scheduler
+# is too unreliable for that — a */30 cron fired 9 times out of 20 on
+# 2026-08-23 — and its interval is not worth tuning when cron-job.org sets it.
+#
+#   curl -X POST -H "Accept: application/vnd.github+json" \
+#     -H "Authorization: Bearer $GITHUB_PAT" \
+#     https://api.github.com/repos/evanyang0612/cpbl-data/actions/workflows/npb_odds_broadcast.yml/dispatches \
+#     -d '{"ref":"main"}'
+on:
+  workflow_dispatch:
+
+# Each run decides whether to post by reading the broadcast ledger, so two
+# overlapping runs could both read "not sent yet" and post the slate twice.
+# Serialising the workflow removes the race; runs are short and idempotent, so
+# queueing costs nothing.
+concurrency:
+  group: npb-odds-broadcast
+  cancel-in-progress: false
+
+jobs:
+  broadcast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Broadcast tomorrow's NPB lines
+        env:
+          # Writes the 推播紀錄 ledger that keeps a re-trigger quiet.
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          # A bot of its own: subscribers must never receive the scraper
+          # failure alerts the other bot sends.
+          TELEGRAM_BROADCAST_BOT_TOKEN: ${{ secrets.TELEGRAM_BROADCAST_BOT_TOKEN }}
+          TELEGRAM_BROADCAST_CHAT_ID: ${{ secrets.TELEGRAM_BROADCAST_CHAT_ID }}
+          # PS3838 geo-blocks datacenter IPs; tunnel through the same
+          # residential proxy the odds scraper uses.
+          DECODO_PROXY_URL: ${{ secrets.DECODO_PROXY_URL }}
+        run: uv run python -m baseball.odds_notify --league npb --tomorrow

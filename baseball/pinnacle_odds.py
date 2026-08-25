@@ -35,6 +35,7 @@ override the target sheet with ``ODDS_SPREADSHEET_KEY`` /
 import argparse
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Callable
@@ -45,8 +46,10 @@ import requests
 BASE_URL = os.getenv("PS3838_WEB_BASE", "https://www.ps3838.com").rstrip("/")
 EVENTS_PATH = "/sports-service/sv/compact/events"
 BASEBALL_SPORT_ID = 3
-NPB_LEAGUE_ID = 187703  # 日本職業棒球賽
-MLB_LEAGUE_ID = 246     # MLB
+NPB_LEAGUE_ID = 187703   # 日本職業棒球賽
+MLB_LEAGUE_ID = 246      # MLB
+CPBL_LEAGUE_ID = 208753  # 台北 - 職業聯賽
+KBO_LEAGUE_ID = 6227     # 韓國職業棒球賽
 
 JST = timezone(timedelta(hours=9))
 # MLB game dates follow the ballpark's local day, so US Eastern (with DST) is
@@ -56,12 +59,28 @@ ET = ZoneInfo("America/New_York")
 
 # The exact query the SPA sends for baseball. `sp=3` selects baseball,
 # `pimo=0,1` requests full-game (period 0) and 1st-5-innings (period 1),
-# `o=1` = decimal odds, `mk=1` = full snapshot (mk=2 is a delta update).
+# `o=1` = decimal odds.
+#
+# `mk` picks which board to read, and it is the difference between seeing the
+# opening line and never seeing it. The SPA's own containers are LIVE /
+# HIGHLIGHT / EARLY / TODAY, and `mk` selects between them:
+#
+#     0 = 早盤 (EARLY)  — tomorrow's slate, priced hours ahead
+#     1 = 今日 (TODAY)  — games starting today only
+#     2 = 走地 (LIVE)
+#     3 = all of the above in one response
+#
+# We ran `mk=1` until 2026-08-25, which is why the ledger never held an opening
+# price: a game only entered the feed once its own day began, and any game
+# starting before the first successful poll was missed entirely. `mk=3` is a
+# single request for the whole board, so the first capture of the day is the
+# real open. It also reveals leagues the TODAY board hides — CPBL (208753) and
+# KBO (6227) are both booked.
 EVENTS_PARAMS = {
     "btg": 1, "c": "", "cl": 3, "d": "", "ec": "", "ev": "", "g": "",
     "hle": "false", "ic": "false", "ice": "false", "inl": "false",
     "l": 3, "lang": "", "lg": "", "lv": 0, "me": 0, "me01": "",
-    "mk": 1, "more": "false", "o": 1, "ot": 1, "pa": 0, "pimo": "0,1",
+    "mk": 3, "more": "false", "o": 1, "ot": 1, "pa": 0, "pimo": "0,1",
     "pn": -1, "pv": 1, "ru": "", "sp": BASEBALL_SPORT_ID, "tm": 0, "v": 0,
     "locale": "zh_TW", "withCredentials": "true",
 }
@@ -274,10 +293,17 @@ def fetch_baseball_events(*, session: requests.Session | None = None,
 
 
 def parse_moneyline(block) -> dict:
+    """Read the moneyline, which — like every odds block — is away-first.
+
+    ``ev[1]`` names the home team, but the prices behind it follow the US
+    convention. Reading them in event order made the home slot the favourite in
+    just 57 of 162 NPB games, at a mean de-vigged .476; home field runs the
+    other way.
+    """
     ml = block[2] if len(block) > 2 and isinstance(block[2], list) else []
     return {
-        "ml_home": _price(ml[0]) if len(ml) > 0 else None,
-        "ml_away": _price(ml[1]) if len(ml) > 1 else None,
+        "ml_away": _price(ml[0]) if len(ml) > 0 else None,
+        "ml_home": _price(ml[1]) if len(ml) > 1 else None,
         "ml_draw": _price(ml[2]) if len(ml) > 2 else None,
     }
 
@@ -304,12 +330,22 @@ def _main_total(totals: list) -> dict:
 
 
 def _main_spread(spreads: list) -> dict:
-    """Pick the primary run line: prefer ±1.5, else most balanced juice."""
+    """Pick the primary run line: prefer ±1.5, else most balanced juice.
+
+    A spread row is ``[away_hdp, home_hdp, line, home_price, away_price]``. The
+    handicaps lead away-first like the rest of the odds block, while the prices
+    behind them run the other way, so ``hdp`` has to come from index 1 to sit
+    with the price at index 3. Getting either half wrong prices a team shorter
+    after giving runs away than it is on the moneyline, which no ladder does.
+
+    ``spread_hdp`` is stored from the home team's side: negative means home is
+    laying runs.
+    """
     parsed = []
     for s in spreads:
         if len(s) < 5:
             continue
-        home_hdp = s[0]
+        home_hdp = s[1]
         home_price, away_price = _price(s[3]), _price(s[4])
         if home_price is None or away_price is None or s[2] in (None, ""):
             continue
@@ -500,10 +536,38 @@ def _now_local(league: LeagueSpec) -> str:
     return datetime.now(tz=league.tz).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _poll_for_board(league: LeagueSpec, include_live: bool, interval: int,
+                    timeout: int, sleep, clock) -> list[dict]:
+    """Fetch until the league's board is open, or the deadline passes.
+
+    PS3838 posts NPB only a few hours before first pitch, and GitHub Actions
+    silently drops more than half of a ``*/30`` schedule — on 2026-08-23 nine
+    of twenty runs fired, and the first one to see a line landed at 13:45 JST,
+    by which point the 13:00 and 13:30 games had already started and moved to
+    the live bucket. Waiting inside a single run is what makes catching the
+    open independent of how many scheduled runs actually happen.
+    """
+    deadline = clock() + timeout
+    while True:
+        snapshots = parse_events(fetch_baseball_events(),
+                                 include_live=include_live, league=league)
+        if snapshots or clock() + interval > deadline:
+            return snapshots
+        print(f"[odds] {_now_local(league)} {league.key.upper()}: board not open "
+              f"yet, retrying in {interval}s")
+        sleep(interval)
+
+
 def run_once(snapshot_type: str = "interim", *, write: bool = True,
-             include_live: bool = False, league: LeagueSpec = NPB) -> list[dict]:
-    raw = fetch_baseball_events()
-    snapshots = parse_events(raw, include_live=include_live, league=league)
+             include_live: bool = False, league: LeagueSpec = NPB,
+             poll_interval: int = 0, poll_timeout: int = 0,
+             _sleep=time.sleep, _clock=time.monotonic) -> list[dict]:
+    if poll_interval > 0:
+        snapshots = _poll_for_board(league, include_live, poll_interval,
+                                    poll_timeout, _sleep, _clock)
+    else:
+        snapshots = parse_events(fetch_baseball_events(),
+                                 include_live=include_live, league=league)
     if league.enrich and snapshots:
         league.enrich(snapshots)
     captured_at = _now_local(league)
@@ -518,7 +582,7 @@ def run_once(snapshot_type: str = "interim", *, write: bool = True,
             f"O/U {s.get('total_line')} {s.get('total_over')}/{s.get('total_under')} "
             f"RL {s.get('spread_hdp')} {s.get('spread_home')}/{s.get('spread_away')}"
         )
-    if write:
+    if write and snapshots:
         rows = snapshots_to_rows(snapshots, snapshot_type, captured_at, league)
         n = write_snapshots(rows, league)
         print(f"[odds] wrote {n} rows to '{SHEET_NAME}'")
@@ -545,9 +609,18 @@ def main() -> None:
         "--include-live", action="store_true",
         help="also show in-play (走地) games — for inspection, not for the ledger",
     )
+    parser.add_argument(
+        "--poll-interval", type=int, default=0, metavar="SECONDS",
+        help="wait for the board to open, re-fetching this often (0 = one shot)",
+    )
+    parser.add_argument(
+        "--poll-timeout", type=int, default=7200, metavar="SECONDS",
+        help="give up waiting for the board after this long (default: 2h)",
+    )
     args = parser.parse_args()
     run_once(args.snapshot_type, write=not args.dry_run,
-             include_live=args.include_live, league=LEAGUES[args.league])
+             include_live=args.include_live, league=LEAGUES[args.league],
+             poll_interval=args.poll_interval, poll_timeout=args.poll_timeout)
 
 
 if __name__ == "__main__":
