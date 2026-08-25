@@ -444,3 +444,29 @@ def test_pitcher_names_share_a_column_across_the_whole_slate():
 def test_a_half_width_space_in_a_name_is_widened_to_match():
     """Mixing half- and full-width spaces makes the padding arithmetic lie."""
     assert on._display_name("吉川 悠斗") == "吉川　悠斗"
+
+
+def test_tomorrow_is_the_next_slate_not_the_next_calendar_day(monkeypatch):
+    """The board can open after midnight, and the polling window runs into the
+    small hours. Counting from the calendar date would make a run at 01:00 aim
+    two slates ahead, at a board that does not exist yet — and the slate that
+    had just opened would never go out.
+    """
+    class _Clock:
+        def __init__(self, when):
+            self.when = when
+
+        def now(self, tz=None):
+            return self.when.astimezone(tz) if tz else self.when
+
+    evening = datetime(2026, 8, 26, 22, 0, tzinfo=JST)
+    monkeypatch.setattr(on, "datetime", _Clock(evening))
+    assert on._next_day(on.NPB) == "2026-08-27"
+
+    after_midnight = datetime(2026, 8, 27, 1, 0, tzinfo=JST)
+    monkeypatch.setattr(on, "datetime", _Clock(after_midnight))
+    assert on._next_day(on.NPB) == "2026-08-27"   # still the same slate
+
+    next_evening = datetime(2026, 8, 27, 21, 0, tzinfo=JST)
+    monkeypatch.setattr(on, "datetime", _Clock(next_evening))
+    assert on._next_day(on.NPB) == "2026-08-28"

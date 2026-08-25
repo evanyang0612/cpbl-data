@@ -234,8 +234,19 @@ def build_message(snapshots: list[dict], *, now: datetime,
     return "\n".join(lines).rstrip()
 
 
+# A baseball day is treated as rolling over in the early morning, not at
+# midnight. The opening broadcast is polled from the evening into the small
+# hours because the board can open late, and counting from the calendar date
+# would make a 01:00 run aim a slate too far — at a board not yet open, while
+# the one that had just appeared went unsent. Nothing starts near this hour, so
+# it can sit anywhere in the small-hours gap.
+DAY_ROLLS_AT = 6
+
+
 def _next_day(league: LeagueSpec) -> str:
-    return (datetime.now(tz=league.tz) + timedelta(days=1)).strftime("%Y-%m-%d")
+    """The slate the evening broadcast is about."""
+    now = datetime.now(tz=league.tz) - timedelta(hours=DAY_ROLLS_AT)
+    return (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 class NullLedger:
