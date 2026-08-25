@@ -11,6 +11,11 @@ on:
     - cron: "*/30 17-23,0-3 * * *"
   workflow_dispatch:
 
+# Two overlapping runs would append the same snapshot twice.
+concurrency:
+  group: mlb-odds-scraper
+  cancel-in-progress: false
+
 jobs:
   scrape-odds:
     runs-on: ubuntu-latest
