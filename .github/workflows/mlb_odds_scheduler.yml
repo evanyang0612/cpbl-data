@@ -1,14 +1,13 @@
 name: MLB Odds Scraper
 
+# Driven from cron-job.org via workflow_dispatch; GitHub's own scheduler drops
+# too many runs to rely on (9 of 20 on 2026-08-23).
+#
+#   curl -X POST -H "Accept: application/vnd.github+json" \
+#     -H "Authorization: Bearer $GITHUB_PAT" \
+#     https://api.github.com/repos/evanyang0612/cpbl-data/actions/workflows/mlb_odds_scheduler.yml/dispatches \
+#     -d '{"ref":"main"}'
 on:
-  schedule:
-    # MLB first pitches land between ~17:00 UTC (weekend day games) and ~02:40
-    # UTC (west-coast night games), and PS3838 only posts baseball lines a few
-    # hours out. So: hourly while the early lines open, then every 30 min
-    # through the start windows so each game gets a snapshot within 30 min of
-    # its close. ~26 runs/day — thin the second cron if Actions minutes matter.
-    - cron: "0 13-16 * * *"
-    - cron: "*/30 17-23,0-3 * * *"
   workflow_dispatch:
 
 # Two overlapping runs would append the same snapshot twice.

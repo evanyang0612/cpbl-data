@@ -1,19 +1,21 @@
 name: NPB Odds Scraper
 
-# Driven from cron-job.org via workflow_dispatch. GitHub's own scheduler drops
-# a large share of runs — a */30 cron fired 9 times out of 20 on 2026-08-23,
-# and its first run of the day landed 90 minutes late, which is how the early
-# games came to be missing from the ledger. The schedules below are kept only
-# as a fallback so nothing stops entirely if the external trigger is not set up.
+# Driven from cron-job.org via workflow_dispatch, on the half hour around the
+# clock. GitHub's own scheduler is not used: it drops a large share of runs — a
+# */30 cron fired 9 times out of 20 on 2026-08-23, and its first run of the day
+# landed 90 minutes late, which is how the early games came to be missing from
+# the ledger.
+#
+# The useful window is now most of the day. Reading the whole board, the next
+# day's slate reaches 早盤 once tonight's games finish, and a game leaves the
+# pre-game bucket at its own first pitch — so captures run from one evening
+# through to the last first pitch of the following afternoon.
+#
+#   curl -X POST -H "Accept: application/vnd.github+json" \
+#     -H "Authorization: Bearer $GITHUB_PAT" \
+#     https://api.github.com/repos/evanyang0612/cpbl-data/actions/workflows/npb_odds_scheduler.yml/dispatches \
+#     -d '{"ref":"main"}'
 on:
-  schedule:
-    # 01:00–10:30 UTC (10:00–19:30 JST): the run-up to first pitch.
-    - cron: "*/30 1-10 * * *"
-    # 12:00–16:30 UTC (21:00–01:30 JST): the next day's slate reaches the 早盤
-    # board once tonight's games finish, and that is the opening price. The old
-    # window stopped before it, back when the scraper read only the 今日 board
-    # and a game could not be seen until its own day began.
-    - cron: "*/30 12-16 * * *"
   workflow_dispatch:
 
 # Two overlapping runs would append the same snapshot twice.
