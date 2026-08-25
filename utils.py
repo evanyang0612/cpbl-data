@@ -12,8 +12,14 @@ def _get_telegram_config():
     return bot_token, chat_id
 
 
-def send_telegram(msg):
-    bot_token, chat_id = _get_telegram_config()
+def send_telegram(msg, *, bot_token=None, chat_id=None, parse_mode=None):
+    """Send a Telegram message, defaulting to the alerting bot's credentials.
+
+    Callers that must not share the alerting bot — the odds broadcast, whose
+    subscribers should never see a scraper failure — pass their own.
+    """
+    if not (bot_token and chat_id):
+        bot_token, chat_id = _get_telegram_config()
     if not bot_token or not chat_id:
         print("Telegram credentials are not configured. Skipping notification.")
         return False
@@ -22,7 +28,8 @@ def send_telegram(msg):
     try:
         response = requests.post(
             url,
-            data={"chat_id": chat_id, "text": msg},
+            data={"chat_id": chat_id, "text": msg,
+                  **({"parse_mode": parse_mode} if parse_mode else {})},
             timeout=15,
         )
         response.raise_for_status()
