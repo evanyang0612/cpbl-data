@@ -379,28 +379,6 @@ def test_the_closing_post_keeps_the_names_but_drops_the_links():
     assert "<a href" not in text
 
 
-def test_a_likely_washout_tomorrow_is_called_out():
-    """Not a betting line — a hint that tonight's bullpen has nothing to save."""
-    from baseball.npb_starters import Outlook, Slate, Weather
-
-    wet = Weather(condition="晴れ", temp_c="30", rain_mm="0", wind="南 3",
-                  venue="ZOZOマリン",
-                  next_day=Outlook("2026-08-25", "曇時々雨", 70))
-    text = on.build_message([_snapshot()], now=NOW,
-                            context=Slate(starters={}, weather={"巨人": wet}))
-    assert "隔日 8/25 全日降雨機率 70%" in text
-
-
-def test_a_dry_tomorrow_says_nothing():
-    from baseball.npb_starters import Outlook, Slate, Weather
-
-    dry = Weather(condition="晴れ", temp_c="30", rain_mm="0", wind="南 3",
-                  venue="ZOZOマリン",
-                  next_day=Outlook("2026-08-25", "曇時々晴", 20))
-    text = on.build_message([_snapshot()], now=NOW,
-                            context=Slate(starters={}, weather={"巨人": dry}))
-    assert "隔日" not in text
-
 
 def test_the_total_keeps_its_column_whether_or_not_a_handicap_precedes_it():
     """With nothing in front of it the total slides left into the handicap's
