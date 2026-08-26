@@ -152,7 +152,7 @@ def _parse_weather(html: str) -> Weather | None:
 # Venues sealed off from the weather. A forecast tells the reader nothing about
 # a game played in one, so it is left out entirely rather than printed and
 # ignored.
-ROOFED = ("ドーム", "京セラD", "エスコンF", "PayPayD")
+ROOFED = ("ドーム", "京セラD", "エスコンF", "PayPay")
 
 # ベルーナドーム is the awkward middle: a roof over the field but no walls under
 # it. Rain never reaches the play, so the sky and the rainfall say nothing — but
@@ -190,7 +190,25 @@ PARK_BEARINGS: dict[str, float] = {
     "横浜": 337.5,        # 北北西
     "ZOZOマリン": 225,    # 南西
     "マツダ": 67.5,       # 東北東 — the only ground built to the current rule
+    # Regional grounds the same column covers. Anywhere not listed shows the
+    # raw wind and claims nothing — ほっと神戸, Orix's second home, is the
+    # notable gap: NPB's table skips it and no other source states it.
+    "松山": 180,          # 南 (松山坊っちゃんスタジアム)
+    "倉敷": 180,          # 南 (倉敷マスカットスタジアム)
 }
+
+
+def _canonical(venue: str) -> str:
+    """Fold full-width letters, so one ground has one spelling to match.
+
+    Yahoo writes the same ground both ways — 京セラＤ大阪 in 514 of the games on
+    record and 京セラD大阪 in 137 — and plain substring matching lets whichever
+    spelling was not anticipated straight through.
+    """
+    return "".join(
+        chr(ord(char) - 0xFEE0) if 0xFF01 <= ord(char) <= 0xFF5E else char
+        for char in (venue or "")
+    )
 
 # The venue sits at the end of the game's description line, after the date and
 # the start time: "8月25日（火） <time>18:00</time> バンテリンドーム".
@@ -203,8 +221,9 @@ _ROW_KEYS = {"天気": "condition", "気温": "temp_c",
 
 def park_bearing(venue: str) -> float | None:
     """The recorded orientation for a ground, matched on its short name."""
+    folded = _canonical(venue)
     for name, bearing in PARK_BEARINGS.items():
-        if name in (venue or ""):
+        if name in folded:
             return bearing
     return None
 
@@ -268,12 +287,12 @@ def is_roofed(venue: str) -> bool:
     # grounds are excluded here rather than left to whichever check runs first.
     if is_sheltered(venue):
         return False
-    return any(marker in (venue or "") for marker in ROOFED)
+    return any(marker in _canonical(venue) for marker in ROOFED)
 
 
 def is_sheltered(venue: str) -> bool:
     """Roofed over the field but open at the sides — heat still gets in."""
-    return any(marker in (venue or "") for marker in SHELTERED)
+    return any(marker in _canonical(venue) for marker in SHELTERED)
 
 
 def parse_forecast(html: str, game_date: str, hour: int) -> Weather | None:

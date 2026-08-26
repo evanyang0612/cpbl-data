@@ -398,3 +398,24 @@ def test_the_forecast_survives_a_page_with_no_readable_starters():
     slate = ns.fetch_slate("2026-08-25", fetch=fetch)
     assert slate.starters == {}
     assert slate.weather["ロッテ"].condition == "曇り"
+
+
+def test_venues_are_matched_through_their_full_width_spelling():
+    """Yahoo writes the same ground both ways — 京セラＤ大阪 in 514 of the games
+    on record and 京セラD大阪 in 137 — so plain substring matching silently
+    lets one spelling through.
+    """
+    assert ns.is_roofed("京セラＤ大阪") and ns.is_roofed("京セラD大阪")
+    assert ns.is_roofed("エスコンＦ") and ns.is_roofed("エスコンF")
+    assert ns.park_bearing("ＺＯＺＯマリン") == ns.park_bearing("ZOZOマリン") == 225
+
+
+def test_the_softbank_dome_is_recognised_by_the_name_yahoo_prints():
+    """It appears as みずほPayPay — no ドーム, no D — in 580 recorded games."""
+    assert ns.is_roofed("みずほPayPay")
+
+
+def test_the_regional_grounds_npb_publishes_are_known():
+    assert ns.park_bearing("松山") == 180      # 松山坊っちゃんスタジアム
+    assert ns.park_bearing("倉敷") == 180      # 倉敷マスカットスタジアム
+    assert ns.park_bearing("ほっと神戸") is None   # not published anywhere found
