@@ -69,7 +69,6 @@ class Weather:
     wind: str | None = None
     url: str = ""
     venue: str = ""
-    next_day: "Outlook | None" = None
 
     def is_wet(self) -> bool:
         """Enough rain at first pitch to be worth a reader's attention."""
@@ -97,26 +96,6 @@ class Weather:
             # recorded there is no arrow, and the raw direction is all there is.
             parts.append(f"{arrow} {speed}m/s" if arrow else f"{self.wind}m/s")
         return " ".join(parts)
-
-
-@dataclass(frozen=True)
-class Outlook:
-    """The following day's rain, coarse by nature and only used as a warning."""
-
-    date: str          # YYYY-MM-DD
-    condition: str
-    rain_chance: int
-
-    def is_washout_risk(self) -> bool:
-        return self.rain_chance >= WASHOUT_CHANCE
-
-    def label(self) -> str:
-        # Said to be for the whole day, because that is what it is: beyond
-        # tomorrow Yahoo publishes one figure per day, not per time slot. The
-        # game it warns about may start at a different hour from tonight's, so
-        # pretending it is a first-pitch number would be a lie.
-        month, day = self.date.split("-")[1:]
-        return f"隔日 {int(month)}/{int(day)} 全日降雨機率 {self.rain_chance}%"
 
 
 @dataclass(frozen=True)
@@ -185,11 +164,6 @@ SHELTERED = ("ベルーナ",)
 # is worth flagging. Most rows read `降水 0mm`, which trains the eye to skip
 # them — so the one that could stop play has to break the pattern.
 RAIN_FLAG_MM = 1.0
-
-# Chance of rain on the day *after* a game, past which it is worth saying so.
-# Nobody bets that day, but a manager who expects it washed out has no arms to
-# save and will use the bullpen harder tonight.
-WASHOUT_CHANCE = 50
 
 # Clockwise from straight out to centre field, in 45-degree steps.
 _ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
@@ -278,39 +252,6 @@ def wind_effect(compass_point: str, park_bearing: float | None) -> str:
     return _ARROWS[int(round(step)) % 8]
 
 
-def parse_outlook(html: str, date: str) -> Outlook | None:
-    """One day's entry from the weekly table, which is all it is quoted at.
-
-    Beyond tomorrow Yahoo drops from three-hourly millimetres to a daily chance
-    of rain. That is coarse, but the question it answers — will this be played
-    at all — does not need any better.
-    """
-    from bs4 import BeautifulSoup
-
-    year, month, day = (int(part) for part in date.split("-"))
-    wanted = f"{month}月{day}日"
-    soup = BeautifulSoup(html, "html.parser")
-    for table in soup.select("table.yjw_table"):
-        rows = {}
-        for tr in table.find_all("tr"):
-            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
-            if cells:
-                rows[cells[0].replace(" ", "")] = cells[1:]
-        dates = rows.get("日付", [])
-        index = next((i for i, text in enumerate(dates) if wanted in text), None)
-        if index is None:
-            continue
-        chances = rows.get("降水確率（％）", [])
-        if index >= len(chances) or not chances[index].isdigit():
-            continue
-        conditions = rows.get("天気", [])
-        return Outlook(
-            date=date,
-            condition=conditions[index] if index < len(conditions) else "",
-            rain_chance=int(chances[index]),
-        )
-    return None
-
 
 def parse_venue(html: str) -> str:
     """The ballpark, which Yahoo prints at the end of the game's round line."""
@@ -323,6 +264,10 @@ def parse_venue(html: str) -> str:
 
 
 def is_roofed(venue: str) -> bool:
+    # ベルーナドーム is named for a roof it only half has, so the sheltered
+    # grounds are excluded here rather than left to whichever check runs first.
+    if is_sheltered(venue):
+        return False
     return any(marker in (venue or "") for marker in ROOFED)
 
 
@@ -428,12 +373,6 @@ def fetch_starters(game_date: str, *, fetch=_get) -> dict[str, Starter]:
     return fetch_slate(game_date, fetch=fetch).starters
 
 
-def _day_after(date: str) -> str:
-    from datetime import date as _date, timedelta
-
-    year, month, day = (int(part) for part in date.split("-"))
-    return (_date(year, month, day) + timedelta(days=1)).isoformat()
-
 
 def _first_pitch_hour(html: str) -> int:
     """The hour Yahoo prints against the game, defaulting to an evening start."""
@@ -483,21 +422,15 @@ def fetch_slate(game_date: str, *, fetch=_get) -> Slate:
         if forecast is not None and forecast.url:
             # The icon on the game page gives the condition; the page it links
             # to has the temperature and rainfall for the hour of first pitch.
-            outlook = None
             try:
-                weather_page = fetch(forecast.url)
-                detail = parse_forecast(weather_page, game_date,
+                detail = parse_forecast(fetch(forecast.url), game_date,
                                         _first_pitch_hour(page))
-                # Only an open ground can be washed out, and only then does the
-                # next day change how a bullpen is spent tonight.
-                if not is_sheltered(venue):
-                    outlook = parse_outlook(weather_page, _day_after(game_date))
             except Exception as exc:
                 print(f"[starters] forecast for {game_id} failed ({exc})")
                 detail = None
             if detail is not None:
                 forecast = replace(detail, url=forecast.url)
-            forecast = replace(forecast, venue=venue, next_day=outlook)
+            forecast = replace(forecast, venue=venue)
         if forecast is not None:
             weather.update({team: forecast for team in sides if team})
     return Slate(starters=starters, weather=weather)

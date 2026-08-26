@@ -225,11 +225,6 @@ def build_message(snapshots: list[dict], *, now: datetime,
         sky = context.weather.get(home) or context.weather.get(away)
         if sky is not None:
             lines.append(f"　　{_escape(sky.summary())}")
-            # A washout tomorrow frees a manager to spend the bullpen tonight,
-            # so it is worth saying — but only when it is likely enough to
-            # change anything.
-            if sky.next_day is not None and sky.next_day.is_washout_risk():
-                lines.append(f"　　{_escape(sky.next_day.label())}")
         lines.append("")
     return "\n".join(lines).rstrip()
 

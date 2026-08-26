@@ -57,7 +57,9 @@
 - [x] 5.4 Link each starter to their Yahoo page on the opening post, and leave
       the closing post as plain names
 - [x] 5.5 Add the forecast for first pitch — condition, temperature, rainfall
-      and wind — read from the pinpoint page the game page links to
+      and wind — read from the pinpoint page the game page links to. The
+      following day's rain chance was tried and dropped: a whole-day figure
+      could not be made to say anything useful about a game it did not cover.
 - [x] 5.6 Keep one labelled row per fact, so a row that is not an odds line
       has somewhere to go
 - [x] 5.7 Leave the forecast off games played under a roof

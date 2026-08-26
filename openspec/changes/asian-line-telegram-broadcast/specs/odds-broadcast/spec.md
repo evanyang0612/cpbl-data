@@ -124,31 +124,12 @@ at all, whereas `8平` is a real line whose push happens to settle even.
 - **WHEN** a total of 8 carries no water
 - **THEN** it is written `８平`, and a game with no handicap is written `ＰＫ`
 
+
 ### Requirement: Report the forecast at first pitch
 
-The opening broadcast SHALL carry the forecast for the hour each game starts —
-condition, temperature, rainfall and wind — taken for that day rather than for
-the day the post is written. A game whose forecast cannot be read SHALL still
-be broadcast without it.
-
-#### Scenario: The evening post is about tomorrow
-
-- **WHEN** the forecast page tabulates today and tomorrow separately
-- **THEN** the row read is the one for the day the games are played
-
-#### Scenario: First pitch falls between forecast steps
-
-- **WHEN** the table steps in three-hour intervals and a game starts at 14:00
-- **THEN** the nearest step is used
-
-#### Scenario: The forecast is unavailable
-
-- **WHEN** the forecast lookup fails
-- **THEN** the lines are broadcast without a weather row
-
-### Requirement: Only forecast what the weather can reach
-
-A forecast SHALL be reported to the extent the ground is exposed to it. A game
+The opening broadcast SHALL carry the forecast for the hour each game starts,
+read for that day rather than for the day the post is written, and SHALL be
+reported to the extent the ground is exposed to it. A game
 in a sealed park SHALL carry no weather row at all, rather than one the reader
 has to know to disregard. A park roofed over the field but open at its sides
 SHALL report the temperature alone: rain never reaches the play, but neither
