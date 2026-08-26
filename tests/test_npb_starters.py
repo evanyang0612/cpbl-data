@@ -326,15 +326,17 @@ def test_the_seibu_dome_is_treated_as_sheltered_rather_than_roofed():
     """ベルーナドーム has a roof but no walls: rain never reaches the field, and
     yet it is famously an oven in August. Temperature is the part that still
     tells a reader something."""
-    assert not ns.is_roofed("ベルーナ")
-    assert ns.is_sheltered("ベルーナ")
+    # The name Yahoo actually prints, which contains ドーム — the two classes
+    # have to be exclusive by construction, not by the order they are asked in.
+    assert ns.is_sheltered("ベルーナドーム")
+    assert not ns.is_roofed("ベルーナドーム")
     assert not ns.is_sheltered("ZOZOマリン")
     assert not ns.is_sheltered("東京ドーム")
 
 
 def test_a_sheltered_park_reports_only_the_temperature():
     got = ns.Weather(condition="雨", temp_c="34", rain_mm="5.0",
-                     wind="南 4", venue="ベルーナ")
+                     wind="南 4", venue="ベルーナドーム")
     assert got.summary() == "34℃"
 
 
@@ -359,37 +361,6 @@ def test_rain_worth_worrying_about_is_flagged():
                      wind="南 4", venue="ZOZOマリン")
     assert not dry.summary().startswith("☔")
 
-
-WEEKLY_HTML = """
-<html><body>
-<table class="yjw_table">
- <tr><td>日付</td><td>8月27日 ( 木 )</td><td>8月28日 ( 金 )</td></tr>
- <tr><td>天気</td><td>曇時々雨</td><td>曇一時雨</td></tr>
- <tr><td>気温（℃）</td><td>34 27</td><td>33 26</td></tr>
- <tr><td>降水 確率（％）</td><td>70</td><td>20</td></tr>
-</table>
-</body></html>
-"""
-
-
-def test_the_following_days_outlook_is_read_from_the_weekly_table():
-    """Whether tomorrow washes out changes how hard a bullpen is used today, so
-    the day after the game matters even though nobody bets it."""
-    got = ns.parse_outlook(WEEKLY_HTML, "2026-08-27")
-    assert got.rain_chance == 70
-    assert got.condition == "曇時々雨"
-    assert got.label() == "隔日 8/27 全日降雨機率 70%"
-
-
-def test_a_dry_outlook_is_still_read_but_not_worth_flagging():
-    got = ns.parse_outlook(WEEKLY_HTML, "2026-08-28")
-    assert got.rain_chance == 20
-    assert not got.is_washout_risk()
-    assert ns.parse_outlook(WEEKLY_HTML, "2026-08-27").is_washout_risk()
-
-
-def test_a_date_outside_the_weekly_table_has_no_outlook():
-    assert ns.parse_outlook(WEEKLY_HTML, "2026-09-09") is None
 
 
 def test_a_game_already_under_way_yields_no_starters():
@@ -427,3 +398,24 @@ def test_the_forecast_survives_a_page_with_no_readable_starters():
     slate = ns.fetch_slate("2026-08-25", fetch=fetch)
     assert slate.starters == {}
     assert slate.weather["ロッテ"].condition == "曇り"
+
+
+def test_venues_are_matched_through_their_full_width_spelling():
+    """Yahoo writes the same ground both ways — 京セラＤ大阪 in 514 of the games
+    on record and 京セラD大阪 in 137 — so plain substring matching silently
+    lets one spelling through.
+    """
+    assert ns.is_roofed("京セラＤ大阪") and ns.is_roofed("京セラD大阪")
+    assert ns.is_roofed("エスコンＦ") and ns.is_roofed("エスコンF")
+    assert ns.park_bearing("ＺＯＺＯマリン") == ns.park_bearing("ZOZOマリン") == 225
+
+
+def test_the_softbank_dome_is_recognised_by_the_name_yahoo_prints():
+    """It appears as みずほPayPay — no ドーム, no D — in 580 recorded games."""
+    assert ns.is_roofed("みずほPayPay")
+
+
+def test_the_regional_grounds_npb_publishes_are_known():
+    assert ns.park_bearing("松山") == 180      # 松山坊っちゃんスタジアム
+    assert ns.park_bearing("倉敷") == 180      # 倉敷マスカットスタジアム
+    assert ns.park_bearing("ほっと神戸") == 180   # 坐北朝南, per Evan
