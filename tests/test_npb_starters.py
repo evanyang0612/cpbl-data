@@ -418,4 +418,4 @@ def test_the_softbank_dome_is_recognised_by_the_name_yahoo_prints():
 def test_the_regional_grounds_npb_publishes_are_known():
     assert ns.park_bearing("松山") == 180      # 松山坊っちゃんスタジアム
     assert ns.park_bearing("倉敷") == 180      # 倉敷マスカットスタジアム
-    assert ns.park_bearing("ほっと神戸") is None   # not published anywhere found
+    assert ns.park_bearing("ほっと神戸") == 180   # 坐北朝南, per Evan

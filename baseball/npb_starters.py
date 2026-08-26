@@ -190,11 +190,13 @@ PARK_BEARINGS: dict[str, float] = {
     "横浜": 337.5,        # 北北西
     "ZOZOマリン": 225,    # 南西
     "マツダ": 67.5,       # 東北東 — the only ground built to the current rule
-    # Regional grounds the same column covers. Anywhere not listed shows the
-    # raw wind and claims nothing — ほっと神戸, Orix's second home, is the
-    # notable gap: NPB's table skips it and no other source states it.
+    # Regional grounds the same table covers.
     "松山": 180,          # 南 (松山坊っちゃんスタジアム)
     "倉敷": 180,          # 南 (倉敷マスカットスタジアム)
+    # Orix's second home, and 63 games on record — the most-used ground NPB's
+    # table skips. Home plate sits at the north end and the field opens south,
+    # per Evan; no published source states it either way.
+    "神戸": 180,
 }
 
 
