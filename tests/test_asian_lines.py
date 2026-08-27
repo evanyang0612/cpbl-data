@@ -219,3 +219,70 @@ def test_a_handicap_can_be_posted_as_a_half_run():
     assert quote.side == "home"
     assert quote.line == 1.5
     assert quote.text() == "1.5"
+
+
+def test_a_ladder_that_stops_above_the_fair_number_still_prices_it():
+    """PS3838 posts a window of three lines, and it can sit above the game.
+
+    The 2026-08-27 楽天 @ オリックス open was quoted 8.5 / 8.0 / 7.5, which
+    pins H(8) = 0.470 and H(9) = 0.395 and nothing below. Eight is the only
+    whole number the ladder can price and it needs +180 to be fair — the sheet
+    wrote that game 7. Carrying the outermost push mass one step out reaches
+    the number the ladder was already pointing at.
+    """
+    curve = al.total_curve([
+        {"line": 8.5, "over": 2.42, "under": 1.581},
+        {"line": 8.0, "over": 2.25, "under": 1.68},
+        {"line": 7.5, "over": 2.04, "under": 1.806},
+    ])
+    assert curve.at(7) is None
+    quote = al.total_quote(curve)
+    assert quote.line == 7
+    assert quote.water == pytest.approx(-0.18, abs=0.02)
+
+
+def test_a_ladder_that_stops_below_the_fair_number_still_prices_it():
+    """The same truncation the other way up: 6.5 / 6.0 / 5.5 on a high game."""
+    curve = al.total_curve([
+        {"line": 6.5, "over": 1.671, "under": 2.25},
+        {"line": 6.0, "over": 1.55, "under": 2.51},
+        {"line": 5.5, "over": 1.444, "under": 2.83},
+    ])
+    quote = al.total_quote(curve)
+    assert quote.line == 7
+
+
+def test_the_ladder_is_only_reached_past_when_it_cannot_carry_the_game():
+    """A half line the ladder does price is not overruled by an invented one.
+
+    6.5 sits dead even here, so the game already has a postable line; stepping
+    outside the quoted window would be guessing at a number nobody asked for.
+    """
+    curve = al.total_curve([
+        {"line": 7.0, "over": 2.16, "under": 1.719},
+        {"line": 6.5, "over": 1.925, "under": 1.925},
+        {"line": 6.0, "over": 1.751, "under": 2.12},
+    ])
+    assert al.total_quote(curve).line == 6.5
+
+
+def test_a_line_no_book_would_post_is_not_posted():
+    """One lone half line pins a single point: nothing can be priced from it,
+    and an extrapolation from one point is not a line."""
+    curve = al.total_curve([{"line": 7.5, "over": 2.42, "under": 1.581}])
+    assert al.total_quote(curve) is None
+
+
+def test_a_number_reached_from_outside_the_ladder_says_so():
+    """An estimated line reads the same on the page as a quoted one, so the
+    quote itself has to carry the difference — it is what lets the broadcast
+    wait for the board instead of announcing a guess."""
+    truncated = al.total_curve([
+        {"line": 8.5, "over": 2.42, "under": 1.581},
+        {"line": 8.0, "over": 2.25, "under": 1.68},
+        {"line": 7.5, "over": 2.04, "under": 1.806},
+    ])
+    assert al.total_quote(truncated).estimated is True
+    assert al.total_quote(al.total_curve(FAIR_TOTALS)).estimated is False
+    assert al.handicap_quote(
+        al.margin_curve(FAIR_SPREADS, FAIR_ML_HOME, FAIR_ML_AWAY)).estimated is False
