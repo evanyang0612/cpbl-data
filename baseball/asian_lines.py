@@ -29,7 +29,7 @@ Every input probability is de-vigged first, so what comes out is the fair line;
 the book's own commission is charged separately and is not modelled here.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # Half-run lines pin a point on the curve outright; whole-run lines only pin a
 # ratio, and are solved against a neighbour that is already known.
@@ -228,11 +228,17 @@ class Quote:
 
     A half line carries no water at all — nothing can land exactly on it, so
     there is no push to settle and the number is written bare.
+
+    ``estimated`` marks a line the quoted ladder could not reach, priced from
+    an assumption about the step outside it (see ``_extended``). It reads the
+    same on the page, so a caller that would rather wait for the board than
+    announce a guess has no other way to tell the two apart.
     """
 
     side: str            # "home" / "away" for handicaps, "over" for totals
     line: float
     water: float | None
+    estimated: bool = False
 
     def text(self) -> str:
         if self.line == 0:
@@ -307,13 +313,50 @@ def handicap_quote(curve: Curve, *, pk_above: float = PK_ABOVE,
     return best
 
 
-def total_quote(curve: Curve) -> Quote | None:
-    """Post the whole-number total whose water sits closest to even.
+def _postable(quote: "Quote | None") -> bool:
+    """Whether a quote is one a book would actually show.
 
-    The ladder usually supports two candidates; the book picks the one that
-    needs the least compensation, which is what keeps the posted number near
-    the middle of the run distribution.
+    A half line carries no water and is only reached for when it is near even,
+    so it is postable by construction; a whole number is postable while the
+    push settlement stays inside what a book pays out.
     """
+    return quote is not None and (quote.water is None
+                                  or abs(quote.water) <= MAX_WATER)
+
+
+def _extended(curve: Curve) -> Curve:
+    """The curve carried one integer past each end of the quoted ladder.
+
+    PS3838 posts a window of three lines and moves it as the game does, so the
+    window can sit entirely to one side of the fair number: the 2026-08-27
+    楽天 @ オリックス open was quoted 8.5 / 8.0 / 7.5, which pins H(8) and H(9)
+    and says nothing at all about H(7) — leaving 8, at +180, as the only whole
+    number on offer and no half line near enough to even to post instead.
+
+    The step just outside the window is priced by carrying the outermost push
+    mass the ladder does pin down outward: P(total == k) changes slowly from
+    one integer to the next around the middle of the distribution, which is
+    where a truncated window leaves off. It is an estimate, and it is only
+    reached for when the ladder itself cannot carry the game.
+    """
+    points = dict(curve.points)
+    keys = sorted(points)
+    if len(keys) < 2:
+        return curve
+    low, high = keys[0], keys[-1]
+    if low + 1 in points:
+        push = points[low] - points[low + 1]
+        if 0.0 < push < 1.0 - points[low]:
+            points[low - 1] = points[low] + push
+    if high - 1 in points:
+        push = points[high - 1] - points[high]
+        if 0.0 < push < points[high]:
+            points[high + 1] = points[high] - push
+    return Curve(points)
+
+
+def _pick_total(curve: Curve) -> Quote | None:
+    """The best line the given curve supports, postable or not."""
     whole, half = None, None
     for line in sorted(curve.points):
         value = _water_from(curve.at(line), curve.at(line + 1))
@@ -325,3 +368,24 @@ def total_quote(curve: Curve) -> Quote | None:
         if score is not None and (half is None or score < half[1]):
             half = (Quote(side="over", line=line - 0.5, water=None), score)
     return _prefer_whole(whole, half)
+
+
+def total_quote(curve: Curve) -> Quote | None:
+    """Post the whole-number total whose water sits closest to even.
+
+    The ladder usually supports two candidates; the book picks the one that
+    needs the least compensation, which is what keeps the posted number near
+    the middle of the run distribution.
+
+    When it supports none — every whole number in the window needing more water
+    than a book pays out, and no half line near enough to even to stand in for
+    one — the fair number is outside the window rather than absent, and the
+    curve is carried one step out to reach it. Nothing postable even then is
+    reported as no line at all: an unpostable number read as a real one is
+    worse than a blank.
+    """
+    best = _pick_total(curve)
+    if _postable(best):
+        return best
+    reached = _pick_total(_extended(curve))
+    return replace(reached, estimated=True) if _postable(reached) else None

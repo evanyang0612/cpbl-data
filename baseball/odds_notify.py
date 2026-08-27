@@ -19,7 +19,10 @@ pitch gets its own post. Games sharing a start time go out together.
 
 Neither knows when it will be due, so both are built to be triggered
 repeatedly — cron-job.org fires them every few minutes and the broadcast ledger
-keeps every run after the first quiet, so subscribers get each post once.
+keeps every run after the first quiet, so subscribers get each post once. Being
+re-triggered is also what lets a run decline to post: a board that has not
+settled every game on the slate is held for the next run rather than announced
+with a number the ladder could not carry.
 
     uv run python -m baseball.odds_notify --league npb --tomorrow
     uv run python -m baseball.odds_notify --league npb --phase close
@@ -28,6 +31,7 @@ keeps every run after the first quiet, so subscribers get each post once.
 
 import argparse
 from datetime import datetime, timedelta
+from functools import cache
 
 from baseball import asian_lines as al
 from baseball.pinnacle_odds import LEAGUES, NPB, LeagueSpec, fetch_baseball_events, parse_events
@@ -53,6 +57,12 @@ HANDICAP_SLOT = 4
 # within this many minutes of starting.
 CLOSE_WITHIN_MINUTES = 30
 
+# A board that has just opened is often still filling in, and a game it cannot
+# price yet is worth waiting for: the job is re-triggered every few minutes and
+# the ladder usually settles within the hour. Waiting stops this close to first
+# pitch, where a gap in the post beats no post at all.
+SETTLE_WITHIN_MINUTES = 10
+
 
 def _quotes(snapshot: dict) -> tuple[al.Quote | None, al.Quote | None]:
     """Price one game's handicap and total from its full odds ladder."""
@@ -63,6 +73,25 @@ def _quotes(snapshot: dict) -> tuple[al.Quote | None, al.Quote | None]:
     )
     total = al.total_curve(snapshot.get("all_totals") or [])
     return al.handicap_quote(margin), al.total_quote(total)
+
+
+def _unsettled(snapshots: list[dict]) -> list[str]:
+    """Games the board has not settled a postable line for yet.
+
+    Two things count as unsettled, and neither is a line worth announcing: a
+    ladder too thin to price at all, and one whose window sits off the game so
+    that the number can only be estimated from outside it. Both mean the board
+    is still moving — the 2026-08-27 楽天 @ オリックス open was quoted
+    8.5 / 8.0 / 7.5 at 22:00 and had dropped to 7.5 / 7.0 / 6.5 by 01:00, which
+    is when its real number appeared.
+    """
+    unsettled = []
+    for snap in _pick_full_game(snapshots).values():
+        if any(quote is None or quote.estimated for quote in _quotes(snap)):
+            away = snap.get("away_norm") or snap.get("away_team") or ""
+            home = snap.get("home_norm") or snap.get("home_team") or ""
+            unsettled.append(f"{away} @ {home}")
+    return unsettled
 
 
 def _total_text(quote: al.Quote | None) -> str:
@@ -162,7 +191,8 @@ def build_message(snapshots: list[dict], *, now: datetime,
                   game_date: str | None = None,
                   phase_label: str = "開盤",
                   context=None,
-                  link: bool = True) -> str | None:
+                  link: bool = True,
+                  weather: bool = True) -> str | None:
     """Render the slate, or ``None`` when there is nothing worth sending.
 
     ``game_date`` narrows the board to one day: the evening broadcast goes out
@@ -189,9 +219,11 @@ def build_message(snapshots: list[dict], *, now: datetime,
          for snap in rows for side in ("home", "away")),
         default=0)
 
+    # The header dates the slate and names the phase, and stops there. A clock
+    # on it says when the job ran rather than anything about the games, and
+    # invites the post to be read as a price still moving.
     title = LEAGUE_TITLES.get(league.key, league.key.upper())
-    lines = [f"⚾ {title} {_slate_label(rows, now)} {phase_label}"
-             f"（{now.strftime('%H:%M')} 更新）"]
+    lines = [f"⚾ {title} {_slate_label(rows, now)} {phase_label}"]
     for snap in rows:
         handicap, total = _quotes(snap)
         _, clock = _start_time(snap, league)
@@ -222,7 +254,7 @@ def build_message(snapshots: list[dict], *, now: datetime,
             if side == "away" and carries_total:
                 row.append(fullwidth(_total_text(total)))
             lines.append("　".join(row).rstrip("　"))
-        sky = context.weather.get(home) or context.weather.get(away)
+        sky = context.weather.get(home) or context.weather.get(away) if weather else None
         if sky is not None:
             lines.append(f"　　{_escape(sky.summary())}")
         lines.append("")
@@ -359,14 +391,29 @@ def _by_first_pitch(slate: list[dict], league: LeagueSpec) -> dict[str, list[dic
 
 def _broadcast(games: list[dict], *, league: LeagueSpec, game_date: str | None,
                phase: str, slot: str, label: str, send: bool, ledger,
-               context=None, link: bool = True) -> str | None:
-    """Post one message and remember it, unless that slot already went out."""
+               context=None, link: bool = True, weather: bool = True,
+               settle_within: int = SETTLE_WITHIN_MINUTES) -> str | None:
+    """Post one message and remember it, unless that slot already went out.
+
+    A slate the board has not settled is held rather than sent: nothing is
+    posted and nothing is recorded, so the next trigger tries the same slot
+    again against a board that has had a few more minutes to fill in.
+
+    ``context`` is a callable rather than a slate so that nothing is scraped
+    for a post that is not going out.
+    """
     if game_date and ledger.sent(game_date, slot):
         print(f"[notify] {game_date} {slot} already broadcast; nothing to do")
         return None
+    unsettled = _unsettled(games)
+    lead = _minutes_to_first_pitch(games)
+    if unsettled and lead is not None and lead > settle_within:
+        print(f"[notify] the board has not settled {', '.join(unsettled)}; "
+              f"holding {slot} for a later run")
+        return None
     message = build_message(games, now=datetime.now(tz=league.tz),
-                            league=league, phase_label=label, context=context,
-                            link=link)
+                            league=league, phase_label=label, context=context(),
+                            link=link, weather=weather)
     if message is None:
         return None
     print(message)
@@ -382,7 +429,8 @@ def _broadcast(games: list[dict], *, league: LeagueSpec, game_date: str | None,
 
 def run_once(league: LeagueSpec = NPB, *, send: bool = True,
              game_date: str | None = None, phase: str = "open",
-             ledger=None, close_within: int = CLOSE_WITHIN_MINUTES) -> list[str]:
+             ledger=None, close_within: int = CLOSE_WITHIN_MINUTES,
+             settle_within: int = SETTLE_WITHIN_MINUTES) -> list[str]:
     """Broadcast whatever is due, and return the messages actually sent."""
     # Load .env before anything reads credentials. On CI the environment is
     # already populated from the workflow, but locally the ledger opens Sheets
@@ -407,12 +455,15 @@ def run_once(league: LeagueSpec = NPB, *, send: bool = True,
         print(f"[notify] {game_date or 'any date'} is not on the board yet")
         return []
 
-    context = _starters_for(league, game_date)
+    # Asked for only once a post is actually going out, and only once per run:
+    # Yahoo answers a burst with 500s, and a held slate is re-polled every few
+    # minutes for a message that is not being sent.
+    context = cache(lambda: _starters_for(league, game_date))
 
     if phase != "close":
         sent = _broadcast(slate, league=league, game_date=game_date, phase=phase,
                           slot=phase, label=title, send=send, ledger=ledger,
-                          context=context)
+                          context=context, settle_within=settle_within)
         return [sent] if sent else []
 
     messages = []
@@ -421,9 +472,13 @@ def run_once(league: LeagueSpec = NPB, *, send: bool = True,
         if lead is None or lead > close_within:
             print(f"[notify] {clock} is still {lead}m away; holding its close")
             continue
+        # The close drops both the links and the forecast: it is a short note
+        # on where the line landed, read minutes before first pitch, not the
+        # post anyone plans a day around.
         sent = _broadcast(games, league=league, game_date=game_date, phase=phase,
                           slot=f"{phase} {clock}", label=f"{clock} {title}",
-                          send=send, ledger=ledger, context=context, link=False)
+                          send=send, ledger=ledger, context=context, link=False,
+                          weather=False, settle_within=settle_within)
         if sent:
             messages.append(sent)
     return messages

@@ -104,10 +104,12 @@ def test_games_are_listed_in_start_order():
     assert text.index("西武 @ 楽天") < text.index("阪神 @ DeNA")
 
 
-def test_header_carries_the_slate_date_and_capture_time():
+def test_header_carries_the_slate_date_and_not_the_hour_it_was_built():
+    """Readers act on the line, not on when the job happened to run: a clock
+    in the header only invites the post to be read as a live price."""
     text = on.build_message([_snapshot()], now=NOW)
     assert "8/24" in text
-    assert "11:30" in text
+    assert "11:30" not in text.splitlines()[0]
 
 
 def test_header_dates_the_games_not_the_broadcast():
@@ -118,7 +120,6 @@ def test_header_dates_the_games_not_the_broadcast():
     text = on.build_message([tomorrow], now=datetime(2026, 8, 25, 23, 0, tzinfo=JST))
     assert "8/26" in text
     assert "8/25" not in text
-    assert "23:00" in text
 
 
 def test_only_the_target_date_is_broadcast():
@@ -448,3 +449,117 @@ def test_tomorrow_is_the_next_slate_not_the_next_calendar_day(monkeypatch):
     next_evening = datetime(2026, 8, 27, 21, 0, tzinfo=JST)
     monkeypatch.setattr(on, "datetime", _Clock(next_evening))
     assert on._next_day(on.NPB) == "2026-08-28"
+
+
+def test_the_opening_post_carries_the_forecast():
+    from baseball.npb_starters import Slate, Weather
+
+    sky = Slate(starters={}, weather={"巨人": Weather("曇り", temp_c="28")})
+    text = on.build_message([_snapshot()], now=NOW, context=sky)
+    assert "28℃" in text
+
+
+def test_the_closing_post_drops_the_forecast():
+    """The forecast is what a reader plans around hours ahead. By first pitch
+    the sky is out of the window, and repeating it only pushes the line — the
+    one thing that has actually moved — further down the message."""
+    from baseball.npb_starters import Slate, Weather
+
+    sky = Slate(starters={}, weather={"巨人": Weather("曇り", temp_c="28")})
+    text = on.build_message([_snapshot()], now=NOW, context=sky, weather=False)
+    assert "28℃" not in text
+    assert "曇り" not in text
+
+
+# The 2026-08-27 楽天 @ オリックス open: PS3838's window sat above the game,
+# so no whole number in it could be posted and 7 had to be estimated.
+UNSETTLED_TOTALS = [
+    {"line": 8.5, "over": 2.42, "under": 1.581},
+    {"line": 8.0, "over": 2.25, "under": 1.68},
+    {"line": 7.5, "over": 2.04, "under": 1.806},
+]
+
+
+def test_a_slate_the_board_has_not_settled_waits_for_the_next_run(monkeypatch):
+    """An opening board is often still filling in, and the job is triggered
+    every few minutes — so a game the ladder cannot price yet is worth waiting
+    for rather than announcing as an estimate."""
+    slate = [_snapshot(game_date="2026-08-25", all_totals=UNSETTLED_TOTALS,
+                       start="2026-08-25T18:00:00+09:00", mins_to_start=300)]
+    sent = _stub_feed(monkeypatch, slate)
+    ledger = _Ledger()
+
+    assert on.run_once(game_date="2026-08-25", phase="open", ledger=ledger) == []
+    assert sent == []
+    assert ledger.recorded == []   # nothing sent, so a later run still may
+
+
+def test_the_settled_slate_goes_out_on_the_run_that_finds_it(monkeypatch):
+    slate = [_snapshot(game_date="2026-08-25", all_totals=UNSETTLED_TOTALS,
+                       start="2026-08-25T18:00:00+09:00", mins_to_start=300)]
+    sent = _stub_feed(monkeypatch, slate)
+    ledger = _Ledger()
+
+    on.run_once(game_date="2026-08-25", phase="open", ledger=ledger)
+    slate[0]["all_totals"] = TOTALS
+    on.run_once(game_date="2026-08-25", phase="open", ledger=ledger)
+
+    assert len(sent) == 1
+    assert ledger.recorded == [("2026-08-25", "open", 1)]
+
+
+def test_waiting_stops_once_first_pitch_is_close(monkeypatch):
+    """A gap in the post beats no post at all: past this point the board is
+    not going to settle in time, and the slate goes out as it stands."""
+    slate = [_snapshot(game_date="2026-08-25", all_totals=UNSETTLED_TOTALS,
+                       start="2026-08-25T18:00:00+09:00", mins_to_start=5)]
+    sent = _stub_feed(monkeypatch, slate)
+
+    on.run_once(game_date="2026-08-25", phase="open", ledger=_Ledger())
+
+    assert len(sent) == 1
+
+
+def test_a_game_with_no_line_at_all_holds_the_slate(monkeypatch):
+    """One lone half line prices nothing — the same unsettled board, further
+    from ready, and it must not go out as a row of dashes either."""
+    thin = [_snapshot(game_date="2026-08-25", all_spreads=[], all_totals=[],
+                      ml_home=None, ml_away=None,
+                      start="2026-08-25T18:00:00+09:00", mins_to_start=300)]
+    sent = _stub_feed(monkeypatch, thin)
+
+    assert on.run_once(game_date="2026-08-25", phase="open", ledger=_Ledger()) == []
+    assert sent == []
+
+
+def test_a_closing_line_waits_for_the_board_within_its_own_window(monkeypatch):
+    """The close already holds until first pitch is near; an unsettled board
+    holds it further, but only down to the same floor the open stops at."""
+    slate = [_snapshot(game_date="2026-08-25", all_totals=UNSETTLED_TOTALS,
+                       start="2026-08-25T18:00:00+09:00", mins_to_start=20)]
+    sent = _stub_feed(monkeypatch, slate)
+
+    assert on.run_once(game_date="2026-08-25", phase="close", ledger=_Ledger()) == []
+    assert sent == []
+
+
+def test_a_held_run_does_not_scrape_yahoo_for_the_starters(monkeypatch):
+    """Yahoo answers a burst of requests with 500s, and a board that has not
+    settled is re-polled every few minutes — so the starters are fetched only
+    once there is a post to build them into."""
+    from baseball.npb_starters import Slate
+
+    slate = [_snapshot(game_date="2026-08-25", all_totals=UNSETTLED_TOTALS,
+                       start="2026-08-25T18:00:00+09:00", mins_to_start=300)]
+    _stub_feed(monkeypatch, slate)
+    scrapes = []
+    monkeypatch.setattr(on, "_starters_for",
+                        lambda league, game_date: scrapes.append(game_date)
+                        or Slate(starters={}, weather={}))
+
+    on.run_once(game_date="2026-08-25", phase="open", ledger=_Ledger())
+    assert scrapes == []
+
+    slate[0]["all_totals"] = TOTALS
+    on.run_once(game_date="2026-08-25", phase="open", ledger=_Ledger())
+    assert scrapes == ["2026-08-25"]
