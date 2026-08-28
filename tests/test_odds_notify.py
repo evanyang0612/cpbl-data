@@ -112,6 +112,19 @@ def test_header_carries_the_slate_date_and_not_the_hour_it_was_built():
     assert "11:30" not in text.splitlines()[0]
 
 
+def test_header_is_set_off_from_the_slate_by_a_blank_line():
+    """The games already breathe between each other; the header should too.
+
+    Without it the title sits flush against the first fixture and the post
+    reads as one crowded block.
+    """
+    text = on.build_message([_snapshot()], now=NOW)
+    header, blank, first = text.splitlines()[:3]
+    assert header.startswith("\u26be")
+    assert blank == ""
+    assert "広島 @ 巨人" in first
+
+
 def test_header_dates_the_games_not_the_broadcast():
     """The board for tomorrow opens once tonight's games end, so the evening
     broadcast is about a slate that has not started yet."""

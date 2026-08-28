@@ -223,7 +223,10 @@ def build_message(snapshots: list[dict], *, now: datetime,
     # on it says when the job ran rather than anything about the games, and
     # invites the post to be read as a price still moving.
     title = LEAGUE_TITLES.get(league.key, league.key.upper())
-    lines = [f"⚾ {title} {_slate_label(rows, now)} {phase_label}"]
+    # Games are already separated by a blank line, so the header takes one too;
+    # flush against the first fixture it reads as part of the slate rather than
+    # as its title.
+    lines = [f"⚾ {title} {_slate_label(rows, now)} {phase_label}", ""]
     for snap in rows:
         handicap, total = _quotes(snap)
         _, clock = _start_time(snap, league)
