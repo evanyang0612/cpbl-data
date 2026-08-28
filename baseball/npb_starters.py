@@ -1,10 +1,9 @@
 """Look up the announced starting pitchers for a day's NPB games.
 
 Yahoo's schedule page carries no starters itself, only links to each game, so
-the names come from the game pages: a scheduled game's page holds exactly two
-player links, the two announced starters, home first. Each link also carries
-the player id, which is what lets the broadcast name a pitcher and point at
-their page.
+the names come from the game pages: a scheduled game's page compares the two
+announced starters in a 予告先発 table, home first. Each name links to the
+player, and the id in that link is what lets the broadcast point at their page.
 
 Starters are announced the day before, so they are usually in place by the time
 the opening line is broadcast — but not always, and a game whose starters are
@@ -42,6 +41,13 @@ _GAME_ID = re.compile(r"/npb/game/(\d+)/")
 _WEATHER = re.compile(
     r'class="bb-gameCard__weather"\s+href="([^"]+)".*?alt="([^"]*)"', re.S)
 _PLAYER_ID = re.compile(r"/npb/player/(\d+)")
+# The 予告先発 comparison table, which is the only place on the page the two
+# probable starters are named. Its name cell carries the bare class; the number
+# and the throwing hand sit in modified ones, so matching the bare class picks
+# out one link per pitcher, home first.
+_PROBABLE_STARTER = re.compile(
+    r'class="bb-splitsPitcherTable__data">\s*'
+    r'<a href="/npb/player/(\d+)/[^"]*"[^>]*>(.*?)</a>', re.S)
 _TITLE_TEAMS = re.compile(r"(\S+)vs\.(\S+?)(?:\s|-|$)")
 
 
@@ -347,20 +353,23 @@ def _parse_teams(html: str, wanted_date: str) -> tuple[str, str] | None:
 def _parse_game(html: str, wanted_date: str) -> dict[str, Starter]:
     """Pull the two announced starters out of one game page.
 
-    The page title reads ``<date> <home>vs.<away>`` and the two player links
-    follow the same order, so the first is the home starter.
+    The page title reads ``<date> <home>vs.<away>`` and the 予告先発 table
+    follows the same order, so the first pitcher in it is the home starter.
+
+    Read from that table rather than from the page's player links at large: a
+    fixture stops being the only two-link page on the site about an hour before
+    first pitch, when the lineups are published and twenty-odd batters join
+    them. The closing line goes out at thirty minutes, well inside that.
     """
     title = re.search(r"<title>(.*?)</title>", html, re.S)
     if not title or wanted_date not in title.group(1):
         return {}
     teams = _TITLE_TEAMS.search(title.group(1))
-    players = [(pid, re.sub(r"<[^>]+>", "", name).strip()) for pid, name in
-               re.findall(r'<a href="/npb/player/(\d+)/[^"]*"[^>]*>(.*?)</a>',
-                          html, re.S)]
-    # A page listing exactly two players is a fixture, and those two are the
-    # announced starters. Once the game begins the same page turns into a live
-    # scorecard carrying dozens of links headed by whoever is at bat, and
-    # nothing in it can be read as a probable starter any more.
+    players = [(pid, re.sub(r"<[^>]+>", "", name).strip())
+               for pid, name in _PROBABLE_STARTER.findall(html)]
+    # Once the game begins the table goes with the fixture: the page turns into
+    # a live scorecard whose links are headed by whoever is at bat, and nothing
+    # in it can be read as a probable starter any more.
     if not teams or len(players) != 2 or not all(name for _, name in players):
         return {}
     sides = [normalize_team(teams.group(1)), normalize_team(teams.group(2))]

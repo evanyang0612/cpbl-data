@@ -16,12 +16,26 @@ SCHEDULE_HTML = """
 """
 
 
-def _game_html(date, home, away, pitchers):
-    links = "".join(
-        f'<a href="/npb/player/{pid}/top">{name}</a>' for pid, name in pitchers
+# Yahoo prints the two probable starters in a 予告先発 comparison table of
+# their own, and nowhere else on the page. Every other player link — the
+# lineups an hour before first pitch, the batters on the live scorecard — sits
+# outside it.
+def _pitcher_cell(pid, name):
+    return ('<td class="bb-splitsPitcherTable__data">'
+            f'<a href="/npb/player/{pid}/top">{name}</a></td>')
+
+
+def _game_html(date, home, away, pitchers, *, lineup=()):
+    table = ""
+    if pitchers:
+        rows = "".join(f"<tr>{_pitcher_cell(pid, name)}</tr>"
+                       for pid, name in pitchers)
+        table = f'<table class="bb-splitsPitcherTable"><tbody>{rows}</tbody></table>'
+    loose = "".join(
+        f'<a href="/npb/player/{pid}/top">{name}</a>' for pid, name in lineup
     )
     return (f"<html><head><title>{date} {home}vs.{away} - プロ野球</title></head>"
-            f"<body>{links}</body></html>")
+            f"<body>{table}{loose}</body></html>")
 
 
 GAMES = {
@@ -365,13 +379,31 @@ def test_rain_worth_worrying_about_is_flagged():
 
 def test_a_game_already_under_way_yields_no_starters():
     """Once a game starts the page stops being a fixture and becomes a live
-    scorecard: 62 player links instead of 2, headed by whoever is batting. The
-    two-link shape is what makes a page readable as a fixture at all.
+    scorecard: 62 player links instead of 2, headed by whoever is batting, and
+    the 予告先発 table is gone. Nothing on it can be read as a probable
+    starter any more.
     """
-    live = _game_html("2026年8月25日", "中日ドラゴンズ", "阪神タイガース",
-                      [("1600001", "細川 成也"), ("1600002", ""),
-                       ("1600003", "神宮 僚介"), ("1600004", "福永 裕基")])
+    live = _game_html("2026年8月25日", "中日ドラゴンズ", "阪神タイガース", [],
+                      lineup=[("1600001", "細川 成也"), ("1600002", ""),
+                              ("1600003", "神宮 僚介"), ("1600004", "福永 裕基")])
     assert ns._parse_game(live, "2026年8月25日") == {}
+
+
+def test_the_starters_survive_the_lineups_being_announced():
+    """The closing line goes out 30 minutes before first pitch, by which time
+    Yahoo has published both lineups — twenty-odd player links added to a page
+    that is still a fixture. Counting the links on the whole page reads that as
+    a game already under way, and the 2026-08-28 18:00 close lost the starters
+    on five of six games because of it.
+    """
+    announced = _game_html("2026年8月25日", "中日ドラゴンズ", "阪神タイガース",
+                           [("1600010", "高橋 宏斗"), ("1600011", "西 勇輝")],
+                           lineup=[(f"17000{n:02d}", f"打者{n}")
+                                   for n in range(18)])
+    assert ns._parse_game(announced, "2026年8月25日") == {
+        "中日": ns.Starter(name="高橋 宏斗", player_id="1600010"),
+        "阪神": ns.Starter(name="西 勇輝", player_id="1600011"),
+    }
 
 
 def test_a_blank_name_is_not_taken_as_a_starter():
@@ -384,8 +416,8 @@ def test_the_forecast_survives_a_page_with_no_readable_starters():
     """Weather does not depend on the starters being announced, or on the game
     not having begun — it is printed on the page either way."""
     live = _game_html("2026年8月25日", "千葉ロッテマリーンズ",
-                      "福岡ソフトバンクホークス",
-                      [("1", "打者A"), ("2", ""), ("3", "打者B")])
+                      "福岡ソフトバンクホークス", [],
+                      lineup=[("1", "打者A"), ("2", ""), ("3", "打者B")])
     live = live.replace("<body>", "<body>" + WEATHER_HTML + _round_line("ZOZOマリン"))
 
     def fetch(url):
