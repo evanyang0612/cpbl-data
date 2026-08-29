@@ -14,14 +14,17 @@ name: NPB History Auditor
 #   curl -X POST -H "Accept: application/vnd.github+json" \
 #     -H "Authorization: Bearer $GITHUB_PAT" \
 #     https://api.github.com/repos/evanyang0612/cpbl-data/actions/workflows/npb_audit_scheduler.yml/dispatches \
-#     -d '{"ref":"main","inputs":{"days":"30"}}'
+#     -d '{"ref":"main","inputs":{"days":"10"}}'
 on:
   workflow_dispatch:
     inputs:
       days:
         description: "Window size in days"
         required: false
-        default: "30"
+        # Ten days is a week plus slack, which is all a weekly sweep needs, and
+        # few enough games that Yahoo serves the whole window: a 30-day sweep
+        # (142 games) was refused from the 51st game on and never recovered.
+        default: "10"
 
 jobs:
   audit-history:
@@ -50,7 +53,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: >
           uv run python migration/audit_npb_history.py
-          --days ${{ github.event.inputs.days || '30' }}
+          --days ${{ github.event.inputs.days || '10' }}
           --write-sheet
           --notify
 
@@ -60,6 +63,10 @@ jobs:
         with:
           name: npb-audit-report
           path: .cache/npb_audit_*.json
+          # .cache is a dotted directory, and the action skips hidden paths by
+          # default — the first real run uploaded nothing and said so only in
+          # a line nobody reads.
+          include-hidden-files: true
           if-no-files-found: ignore
 
       - name: Send failure Telegram message

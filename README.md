@@ -97,8 +97,8 @@ we recorded, rebuilds its rows, and reports every cell that disagrees with the
 sheets.
 
 ```bash
-uv run python migration/audit_npb_history.py --days 30
-uv run python migration/audit_npb_history.py --days 30 --write-sheet --notify
+uv run python migration/audit_npb_history.py --days 10
+uv run python migration/audit_npb_history.py --days 10 --write-sheet --notify
 uv run python migration/audit_npb_history.py --game-ids 2021039221
 ```
 
@@ -119,6 +119,16 @@ uv run python migration/audit_npb_history.py --game-ids 2021039221
   balance below it.
 - Reports are written to `.cache/npb_audit_<ts>.json` and uploaded as a workflow
   artifact.
+- The window defaults to **10 days** — a week plus slack, which is what a weekly
+  sweep needs. Yahoo refuses the game endpoints partway through a longer sweep:
+  a 30-day run (142 games) was served up to the 51st game and returned nothing
+  for the remaining 91, from a GitHub runner.
+- A sweep that reads less than 90% of its window writes nothing, announces
+  nothing as a finding, and exits non-zero. A verdict drawn from the part that
+  was read would arrive wearing the same green tick as a real one.
+- Diffs where every cell the sheet holds came back blank are filed as unread
+  rather than as differences. A correction changes a value; a refused request
+  loses all of them at once.
 - `--notify` sends the same summary to the alerting bot's Telegram chat — the
   games that disagree, how many cells each, and which of them touch the score.
   A window where everything matches sends nothing at all: a weekly note that
@@ -133,9 +143,9 @@ Writing corrections back in place (`--apply`) is deliberately not implemented
 yet — the first few weeks are report-only, to shake out format noise before
 anything overwrites recorded history.
 
-Note: Yahoo rate-limits `/npb/game/<id>/*` with HTTP 500 once a run gets long.
-A 30-day window is ~130 games and several requests each, which trips it from a
-residential IP; GitHub Actions runners have not hit it. Every session that
+Note: Yahoo rate-limits `/npb/game/<id>/*` once a run gets long, and a GitHub
+runner is no exception — the 2026-08-29 30-day sweep was cut off at the 51st of
+142 games and never recovered. Keep the window short. Every session that
 scrapes Yahoo must send `npb.BROWSER_HEADERS`.
 
 Fired from cron-job.org every Monday at **14:00 JST**, by which point the

@@ -131,10 +131,60 @@ def update_sheet_values(fresh_rows: list[list]) -> list[list]:
     return values
 
 
+# A window this far from fully read is not a clean audit, it is a failed one.
+# Yahoo starts refusing the game endpoints partway through a long sweep — the
+# 2026-08-29 run read 51 games at three seconds a batch, then returned nothing
+# for the remaining 91 — and a verdict drawn from the part that was read is
+# worse than no verdict, because it arrives wearing the same green tick.
+MIN_COVERAGE = 0.9
+
+# A re-scrape that lost this many cells at once, every one of them a value the
+# sheet holds and the fresh row does not, was blocked rather than corrected.
+# A correction changes a value; a refused request loses all of them together.
+BLANKED_CELL_THRESHOLD = 3
+
 # Telegram delivers one message; a longer list of games is truncated rather
 # than split, since a wall of fixtures is not read anyway and the count below
 # still says how many there were.
 SUMMARY_GAME_LIMIT = 15
+
+
+def coverage_shortfall(
+    scanned: int, requested: int, *, minimum: float = MIN_COVERAGE
+) -> str | None:
+    """How far short of the window the sweep fell, or ``None`` when it did not.
+
+    Reported rather than raised: the caller still wants the report on disk, it
+    just must not draw conclusions from it.
+    """
+    if requested <= 0 or scanned >= requested * minimum:
+        return None
+    return (
+        f"只讀到 {scanned}/{requested} 場（{scanned / requested * 100:.0f}%），"
+        f"低於 {minimum * 100:.0f}%，這次的比對結果不可信"
+    )
+
+
+def is_blanked_scrape(
+    diffs: list[dict], *, minimum: int = BLANKED_CELL_THRESHOLD
+) -> bool:
+    """True when a diff list has the shape of a scrape that came back empty."""
+    if len(diffs) < minimum:
+        return False
+    return all(not diff["fresh"] and diff["sheet"] for diff in diffs)
+
+
+def telegram_incomplete(*, scanned: int, requested: int, start: str, end: str) -> str:
+    """Told to the same chat as a finding, because silence would read as clean."""
+    window = f"{start} → {end}" if start and end else "指定場次"
+    return "\n".join(
+        [
+            f"⚠️ NPB 資料稽核 {window} 未完成",
+            f"{requested} 場只讀到 {scanned} 場，Yahoo 中途開始拒絕請求。",
+            "",
+            "這次不出結論、不寫試算表。請縮小窗口後重跑。",
+        ]
+    )
 
 
 def telegram_summary(

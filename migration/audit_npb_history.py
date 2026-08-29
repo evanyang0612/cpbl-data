@@ -32,9 +32,12 @@ from baseball.npb_audit import (  # noqa: E402
     ANALYSIS_WIDTH,
     SAILU_GAME_ID_INDEX,
     SAILU_LAST_RAW_INDEX,
+    coverage_shortfall,
     diff_row,
     has_score_diff,
+    is_blanked_scrape,
     sailu_game_ids_in_window,
+    telegram_incomplete,
     telegram_summary,
     update_sheet_values,
 )
@@ -152,7 +155,15 @@ def audit(game_ids: list[str], scraped: list[tuple[str, dict]]) -> list[dict]:
         else:
             row_num, sheet_row = analysis_index[identity]
             diffs = diff_row(sheet_row, fresh_analysis, last_index=ANALYSIS_WIDTH - 1)
-            if diffs:
+            if is_blanked_scrape(diffs):
+                # Every cell the sheet holds and this row does not: the page
+                # was refused, not corrected. Reported as unread rather than
+                # as a difference, so it can never be pasted over the record.
+                finding["notes"].append(
+                    f"分析表紀錄: the re-scrape came back blank in {len(diffs)} "
+                    "cell(s) the sheet has values for; not compared."
+                )
+            elif diffs:
                 finding["analysis"] = {"row": row_num, "diffs": diffs}
 
         for label, index in sailu_index.items():
@@ -163,7 +174,12 @@ def audit(game_ids: list[str], scraped: list[tuple[str, dict]]) -> list[dict]:
             diffs = diff_row(
                 sheet_row, fresh_sailu, last_index=SAILU_LAST_RAW_INDEX
             )
-            if diffs:
+            if is_blanked_scrape(diffs):
+                finding["notes"].append(
+                    f"賽錄 ({label}): the re-scrape came back blank in "
+                    f"{len(diffs)} cell(s) the sheet has values for; not compared."
+                )
+            elif diffs:
                 finding["sailu"][label] = {"row": row_num, "diffs": diffs}
 
         if finding["analysis"] or finding["sailu"] or finding["notes"]:
@@ -267,7 +283,12 @@ def main() -> int:
         description="Re-scrape recent NPB games and diff them against the sheets."
     )
     parser.add_argument(
-        "--days", type=int, default=30, help="Window size in days. Defaults to 30."
+        "--days",
+        type=int,
+        default=10,
+        help="Window size in days. Defaults to 10 — a week plus slack, which "
+             "is what a weekly sweep needs, and few enough games that Yahoo "
+             "serves the whole window.",
     )
     parser.add_argument("--start", help="Window start, YYYY-MM-DD.")
     parser.add_argument("--end", help="Window end, YYYY-MM-DD. Defaults to yesterday.")
@@ -310,6 +331,24 @@ def main() -> int:
     findings = audit(game_ids, scraped)
     _print_report(findings, start, end, len(scraped))
     print(f"[audit] Report saved to {_save_report(findings, start, end)}")
+
+    shortfall = coverage_shortfall(len(scraped), len(game_ids))
+    if shortfall:
+        # Yahoo refused the rest of the window. The report is still on disk,
+        # but nothing is written and nothing is announced as a finding: a
+        # verdict drawn from the part that was read arrives wearing the same
+        # green tick as a real one.
+        print(f"[audit] {shortfall}; not writing {UPDATE_SHEET_NAME}.")
+        if args.notify:
+            utils.send_telegram(
+                telegram_incomplete(
+                    scanned=len(scraped),
+                    requested=len(game_ids),
+                    start=start,
+                    end=end,
+                )
+            )
+        return 1
 
     pasted = None
     if args.write_sheet:
