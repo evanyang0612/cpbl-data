@@ -1,10 +1,21 @@
 name: NPB History Auditor
 
+# Triggered from cron-job.org, not from GitHub's own scheduler. Punctuality is
+# not the reason: a weekly sweep is just as useful an hour late. The reason is
+# that on a public repository GitHub disables a scheduled workflow outright
+# after 60 days with no repository activity — silently, which is a poor
+# property for the one job whose whole purpose is noticing silent drift. The
+# drift is real too: the daily MLB record job, on a "0 12 * * *" cron, landed
+# 40–70 minutes late most days and twice nearly ten hours late.
+#
+# Fire it weekly, Monday 14:00 JST: the weekend's games are all settled by
+# then, and NPB's 公式記録の訂正 for the prior week have had time to land.
+#
+#   curl -X POST -H "Accept: application/vnd.github+json" \
+#     -H "Authorization: Bearer $GITHUB_PAT" \
+#     https://api.github.com/repos/evanyang0612/cpbl-data/actions/workflows/npb_audit_scheduler.yml/dispatches \
+#     -d '{"ref":"main","inputs":{"days":"30"}}'
 on:
-  schedule:
-    # Monday 05:00 UTC / 14:00 JST. The weekend's games are all settled by
-    # then, and NPB's 公式記録の訂正 for the prior week have had time to land.
-    - cron: "0 5 * * 1"
   workflow_dispatch:
     inputs:
       days:

@@ -1,10 +1,19 @@
 name: MLB Record Updater
 
+# Triggered from cron-job.org, not from GitHub's own scheduler: on a
+# "0 12 * * *" cron this job landed 40–70 minutes late most days, and on
+# 2026-08-27 and 08-28 nearly ten hours late — by which point it is writing a
+# different day's games than the one it was aimed at.
+#
+# Fire it daily at 21:00 JST, which catches most finalized MLB day games. The
+# job retries recent dates by gamePk, so a late run — or a repeated one — skips
+# rows already written rather than doubling them.
+#
+#   curl -X POST -H "Accept: application/vnd.github+json" \
+#     -H "Authorization: Bearer $GITHUB_PAT" \
+#     https://api.github.com/repos/evanyang0612/cpbl-data/actions/workflows/mlb_record_scheduler.yml/dispatches \
+#     -d '{"ref":"main"}'
 on:
-  schedule:
-    # 21:00 JST / 12:00 UTC catches most finalized MLB day games and retries
-    # recent dates by gamePk, so duplicate rows are skipped.
-    - cron: "0 12 * * *"
   workflow_dispatch:
 
 jobs:

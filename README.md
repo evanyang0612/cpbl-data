@@ -21,9 +21,9 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   └── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
 └── .github/workflows/
     ├── cpbl_scheduler.yml           # Cron: every 30 min, 07:00–16:00 UTC (via Japan VPN)
-    ├── mlb_record_scheduler.yml     # Cron: daily, 12:00 UTC
+    ├── mlb_record_scheduler.yml     # cron-job.org: daily, 21:00 JST
     ├── npb_scheduler.yml            # Cron: every 30 min, 08:00–14:00 UTC
-    ├── npb_audit_scheduler.yml      # Cron: weekly, Monday 05:00 UTC
+    ├── npb_audit_scheduler.yml      # cron-job.org: weekly, Monday 14:00 JST
     ├── npb_odds_scheduler.yml       # Cron: every 30 min, 01:00–10:30 UTC
     └── mlb_odds_scheduler.yml       # Cron: hourly 13:00–16:00, then every 30 min 17:00–03:30 UTC
 ```
@@ -138,8 +138,12 @@ A 30-day window is ~130 games and several requests each, which trips it from a
 residential IP; GitHub Actions runners have not hit it. Every session that
 scrapes Yahoo must send `npb.BROWSER_HEADERS`.
 
-Runs Monday **05:00 UTC** (14:00 JST), by which point the weekend's games are
-settled and the prior week's 訂正 have had time to land.
+Fired from cron-job.org every Monday at **14:00 JST**, by which point the
+weekend's games are settled and the prior week's 訂正 have had time to land.
+GitHub's own scheduler is not used: on a public repository it disables a
+scheduled workflow after 60 days with no repository activity, and it does so
+silently — a poor property for the job whose purpose is noticing silent drift.
+The `days` input sets the window; the dispatch body carries it.
 
 ---
 
@@ -157,7 +161,7 @@ Scrapes MLB Stats API finalized regular-season games and appends missing rows to
 
 ### Scheduler
 
-Runs once daily at **12:00 UTC** (21:00 JST). The record command checks the last 3 calendar dates so delayed finalization and timezone edge cases are picked up without duplicating rows:
+Fired from cron-job.org once daily at **21:00 JST**. GitHub's own scheduler ran this 40–70 minutes late most days and twice nearly ten hours late, which is past the point where it is still writing the day it was aimed at. The record command checks the last 3 calendar dates so delayed finalization and timezone edge cases are picked up without duplicating rows:
 
 ```bash
 uv run python migration/update_mlb_record.py --recent-days 3
@@ -189,7 +193,7 @@ the quality-start rate, green above 65% and red below 41%. Zeros are hidden thro
 number format (`0.00;-0.00;;@`) rather than a conditional-format rule.
 
 `設定` fills itself daily (`migration/update_mlb_probables.py`, run from the MLB record
-workflow at 12:00 UTC / 08:00 ET):
+workflow at 21:00 JST / 08:00 ET):
 
 - Game 1 of every block gets both teams and both announced starters from MLB Stats API
   (`schedule?hydrate=probablePitcher,team`); game 2 gets starters only, and only where
