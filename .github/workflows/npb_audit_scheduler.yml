@@ -35,10 +35,13 @@ jobs:
       - name: Audit recent NPB games against the sheets
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: >
           uv run python migration/audit_npb_history.py
           --days ${{ github.event.inputs.days || '30' }}
           --write-sheet
+          --notify
 
       - name: Upload the audit report
         if: always()

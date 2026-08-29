@@ -129,3 +129,66 @@ def update_sheet_values(fresh_rows: list[list]) -> list[list]:
         padded = list(row) + [""] * (ANALYSIS_WIDTH - len(row))
         values.append(padded[FIRST_DATA_INDEX:ANALYSIS_WIDTH])
     return values
+
+
+# Telegram delivers one message; a longer list of games is truncated rather
+# than split, since a wall of fixtures is not read anyway and the count below
+# still says how many there were.
+SUMMARY_GAME_LIMIT = 15
+
+
+def telegram_summary(
+    findings: list[dict],
+    *,
+    start: str,
+    end: str,
+    scanned: int,
+    pasted: int | None = None,
+) -> str | None:
+    """A short note on what the audit found, or ``None`` when it found nothing.
+
+    A weekly alert that also fires on a clean week stops being read, so a
+    window with nothing to report sends nothing at all.
+    """
+    changed = [f for f in findings if f["analysis"] or f["sailu"]]
+    unreadable = [
+        f for f in findings if not (f["analysis"] or f["sailu"]) and f["notes"]
+    ]
+    if not changed and not unreadable:
+        return None
+
+    window = f"{start} → {end}" if start and end else "指定場次"
+    lines = [
+        f"⚾ NPB 資料稽核 {window}",
+        f"重掃 {scanned} 場，{len(changed)} 場與試算表不符",
+        "",
+    ]
+    for finding in changed[:SUMMARY_GAME_LIMIT]:
+        analysis = len(finding["analysis"]["diffs"]) if finding["analysis"] else 0
+        # 賽錄 is compared in two spreadsheets that hold the same row, so the
+        # wider of the two is the number of cells that actually differ.
+        sailu = max(
+            (len(block["diffs"]) for block in finding["sailu"].values()), default=0
+        )
+        counts = []
+        if analysis:
+            counts.append(f"分析表 {analysis} 格")
+        if sailu:
+            counts.append(f"賽錄 {sailu} 格")
+        identity = finding["identity"]
+        matchup = f"{identity[1]} @ {identity[2]}" if len(identity) >= 3 else finding["game_id"]
+        flag = ""
+        if finding["analysis"] and has_score_diff(finding["analysis"]["diffs"]):
+            flag = "　⚠️ 比分，勿整批套用"
+        lines.append(f"{finding['date']} {matchup} — {'、'.join(counts)}{flag}")
+    if len(changed) > SUMMARY_GAME_LIMIT:
+        lines.append(f"…還有 {len(changed) - SUMMARY_GAME_LIMIT} 場")
+    if unreadable:
+        lines.append(f"另有 {len(unreadable)} 場無法比對")
+
+    lines.append("")
+    if pasted is None:
+        lines.append("只出報告，未寫入試算表")
+    else:
+        lines.append(f"已貼 {pasted} 場到「資料更新」分頁，請人工核對後再改賽錄")
+    return "\n".join(lines)

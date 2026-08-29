@@ -7,6 +7,7 @@ Covers: cell normalization, row diffing against sheet values, game-id window
 from baseball.npb_audit import (
     SCORE_SENSITIVE_ANALYSIS_COLUMNS,
     cells_equal,
+    telegram_summary,
     diff_row,
     has_score_diff,
     sailu_game_ids_in_window,
@@ -145,3 +146,72 @@ def test_update_sheet_values_truncates_an_overlong_row():
     values = update_sheet_values([fresh_row])
 
     assert len(values[0]) == 82
+
+
+# --- Telegram summary ------------------------------------------------------
+
+
+def _finding(date, away, home, *, analysis_diffs=(), sailu_diffs=(), notes=()):
+    return {
+        "game_id": "2021039221",
+        "date": date,
+        "identity": [date.replace("-", "/"), away, home],
+        "analysis": {"row": 12, "diffs": list(analysis_diffs)} if analysis_diffs else None,
+        "sailu": {"target": {"row": 40, "diffs": list(sailu_diffs)}} if sailu_diffs else {},
+        "fresh_analysis_row": [],
+        "notes": list(notes),
+    }
+
+
+def _diff(index, column="C"):
+    return {"index": index, "column": column, "sheet": "夜", "fresh": "日"}
+
+
+def test_a_clean_window_sends_nothing():
+    """A quiet week has to stay quiet, or the alert stops being read."""
+    assert telegram_summary([], start="2026-08-01", end="2026-08-28", scanned=130) is None
+
+
+def test_the_summary_names_every_game_that_disagrees():
+    findings = [
+        _finding("2026-08-12", "ヤクルト", "巨人", analysis_diffs=[_diff(2)]),
+        _finding("2026-08-15", "中日", "阪神", sailu_diffs=[_diff(46, "AU"), _diff(47, "AV")]),
+    ]
+
+    message = telegram_summary(findings, start="2026-08-01", end="2026-08-28", scanned=130)
+
+    assert "2026-08-01 → 2026-08-28" in message
+    assert "130" in message and "2" in message
+    assert "ヤクルト @ 巨人" in message
+    assert "中日 @ 阪神" in message
+
+
+def test_a_score_difference_is_flagged_as_not_auto_applicable():
+    """預測紀錄 settles off those columns and its balance is cumulative, so the
+    reader has to see which games must not be corrected in bulk."""
+    score = next(iter(SCORE_SENSITIVE_ANALYSIS_COLUMNS))
+    findings = [_finding("2026-08-12", "ヤクルト", "巨人", analysis_diffs=[_diff(score, "J")])]
+
+    message = telegram_summary(findings, start="2026-08-01", end="2026-08-28", scanned=130)
+
+    assert "比分" in message
+
+
+def test_a_game_that_could_not_be_compared_is_still_reported():
+    """A game the re-scrape never returned is not a clean game."""
+    findings = [_finding("2026-08-12", "ヤクルト", "巨人", notes=["Re-scrape returned nothing."])]
+
+    message = telegram_summary(findings, start="2026-08-01", end="2026-08-28", scanned=129)
+
+    assert message is not None
+    assert "無法比對" in message
+
+
+def test_a_long_list_is_truncated_rather_than_split_by_telegram():
+    findings = [_finding(f"2026-08-{day:02d}", "中日", "阪神", analysis_diffs=[_diff(2)])
+                for day in range(1, 26)]
+
+    message = telegram_summary(findings, start="2026-08-01", end="2026-08-28", scanned=130)
+
+    assert len(message.splitlines()) < 25
+    assert "還有" in message

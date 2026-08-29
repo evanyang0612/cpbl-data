@@ -98,7 +98,7 @@ sheets.
 
 ```bash
 uv run python migration/audit_npb_history.py --days 30
-uv run python migration/audit_npb_history.py --days 30 --write-sheet
+uv run python migration/audit_npb_history.py --days 30 --write-sheet --notify
 uv run python migration/audit_npb_history.py --game-ids 2021039221
 ```
 
@@ -119,6 +119,10 @@ uv run python migration/audit_npb_history.py --game-ids 2021039221
   balance below it.
 - Reports are written to `.cache/npb_audit_<ts>.json` and uploaded as a workflow
   artifact.
+- `--notify` sends the same summary to the alerting bot's Telegram chat — the
+  games that disagree, how many cells each, and which of them touch the score.
+  A window where everything matches sends nothing at all: a weekly note that
+  also fires on a clean week is one nobody reads by the time it matters.
 
 `--write-sheet` pastes the games needing changes into the **資料更新** tab from
 `B3`, using the same 83-column layout as 彙資, so they can be eyeballed before

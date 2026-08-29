@@ -27,6 +27,7 @@ import aiohttp
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import npb  # noqa: E402
+import utils  # noqa: E402
 from baseball.npb_audit import (  # noqa: E402
     ANALYSIS_WIDTH,
     SAILU_GAME_ID_INDEX,
@@ -34,6 +35,7 @@ from baseball.npb_audit import (  # noqa: E402
     diff_row,
     has_score_diff,
     sailu_game_ids_in_window,
+    telegram_summary,
     update_sheet_values,
 )
 from baseball.npb_services import NpbRowsService  # noqa: E402
@@ -282,6 +284,12 @@ def main() -> int:
         action="store_true",
         help="With --write-sheet, print the payload instead of writing it.",
     )
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Telegram the games that disagree with the sheets. A clean window "
+             "sends nothing.",
+    )
     args = parser.parse_args()
 
     if args.game_ids:
@@ -303,8 +311,23 @@ def main() -> int:
     _print_report(findings, start, end, len(scraped))
     print(f"[audit] Report saved to {_save_report(findings, start, end)}")
 
+    pasted = None
     if args.write_sheet:
-        write_update_sheet(findings, dry_run=args.dry_run)
+        written = write_update_sheet(findings, dry_run=args.dry_run)
+        if not args.dry_run:
+            pasted = written
+
+    if args.notify:
+        # The audit corrects nothing on its own, so the report is only worth
+        # producing if someone hears about it — but a note on a clean window
+        # would train the reader to skip the one that matters.
+        message = telegram_summary(
+            findings, start=start, end=end, scanned=len(scraped), pasted=pasted
+        )
+        if message is None:
+            print("[audit] Nothing disagrees with the sheets; no notification sent.")
+        else:
+            utils.send_telegram(message)
     return 0
 
 
