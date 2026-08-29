@@ -7,6 +7,9 @@ Covers: cell normalization, row diffing against sheet values, game-id window
 from baseball.npb_audit import (
     SCORE_SENSITIVE_ANALYSIS_COLUMNS,
     cells_equal,
+    coverage_shortfall,
+    is_blanked_scrape,
+    telegram_incomplete,
     telegram_summary,
     diff_row,
     has_score_diff,
@@ -215,3 +218,60 @@ def test_a_long_list_is_truncated_rather_than_split_by_telegram():
 
     assert len(message.splitlines()) < 25
     assert "還有" in message
+
+
+# --- A sweep Yahoo cut short ----------------------------------------------
+
+
+def test_a_fully_read_window_has_no_shortfall():
+    assert coverage_shortfall(142, 142) is None
+    assert coverage_shortfall(0, 0) is None
+
+
+def test_a_window_read_only_in_part_is_not_a_clean_audit():
+    """The 2026-08-29 sweep read 57 of 142 games — Yahoo started refusing the
+    game endpoints around the 51st — and still reported "3 games disagree"."""
+    shortfall = coverage_shortfall(57, 142)
+
+    assert shortfall is not None
+    assert "57" in shortfall and "142" in shortfall
+
+
+def test_a_window_a_few_games_short_still_counts_as_read():
+    assert coverage_shortfall(138, 142) is None
+
+
+def test_cells_that_only_went_blank_are_a_throttled_scrape_not_a_correction():
+    """Every diff in that run pointed the same way — the sheet holds 18:00, the
+    re-scrape holds nothing. A correction changes a value; a blocked request
+    loses all of them at once."""
+    blanked = [
+        {"index": 6, "column": "G", "sheet": "18:00", "fresh": ""},
+        {"index": 8, "column": "I", "sheet": "名幸", "fresh": ""},
+        {"index": 43, "column": "AR", "sheet": "右", "fresh": ""},
+    ]
+
+    assert is_blanked_scrape(blanked)
+
+
+def test_a_real_correction_among_the_blanks_is_still_a_correction():
+    mixed = [
+        {"index": 6, "column": "G", "sheet": "18:00", "fresh": ""},
+        {"index": 8, "column": "I", "sheet": "名幸", "fresh": ""},
+        {"index": 21, "column": "V", "sheet": "3", "fresh": "4"},
+    ]
+
+    assert not is_blanked_scrape(mixed)
+
+
+def test_one_cell_going_blank_is_not_enough_to_dismiss():
+    """NPB does void a recorded value now and then; that is the audit's job."""
+    assert not is_blanked_scrape([{"index": 6, "column": "G", "sheet": "18:00", "fresh": ""}])
+
+
+def test_the_incomplete_message_says_what_was_missed_and_that_nothing_was_written():
+    message = telegram_incomplete(scanned=57, requested=142,
+                                  start="2026-07-30", end="2026-08-28")
+
+    assert "57" in message and "142" in message
+    assert "未完成" in message
