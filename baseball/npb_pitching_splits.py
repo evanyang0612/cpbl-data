@@ -57,22 +57,25 @@ ROW_DATA = "data"
 ROW_BLANK = "blank"
 ROW_RAW = "raw"
 
-# No 聯盟 column: each league sits under its own band, and a column repeating
-# what the band above it says is the repeated header all over again.
-#
-# The three splits repeat the same three columns, so they are named once above
-# in a band of their own rather than folded into every label. Two shallow rows
-# read as three blocks; one row of 主場局數 / 主場ERA / 名次 reads as nine
-# columns in a line.
-SUB_LABELS = ("局數", "ERA", "名次")
-COLUMN_GROUPS = (("球隊", 1), ("全場", 3), ("主場", 3), ("客場", 3), ("主-客", 1))
+# One split at a time. Showing 全場, 主場 and 客場 side by side put nine
+# columns in a row that mostly repeated each other; the dropdown picks which
+# one is on the page, and the table is sorted by that split's own ERA. There
+# is no direction to choose either — the lowest ERA is the best staff.
+SPLITS = (("全場", None), ("主場", "主"), ("客場", "客"))
+SPLIT_LABELS = tuple(label for label, _ in SPLITS)
+SORT_CELL = "B2"
+DEFAULT_SPLIT = SPLIT_LABELS[0]
 
+SUB_LABELS = ("局數", "ERA", "名次")
+
+# 球隊 spans both header rows; the split's name sits over its three columns and
+# is a formula, so it says which split is on the page as the dropdown changes.
+COLUMN_GROUPS = (("球隊", 1), (f"=${SORT_CELL}", len(SUB_LABELS)))
 GROUP_ROW = [label if offset == 0 else ""
              for label, width in COLUMN_GROUPS for offset in range(width)]
-HEADERS = [SUB_LABELS[offset] if width == 3 else ""
+HEADERS = [SUB_LABELS[offset] if width == len(SUB_LABELS) else ""
            for _, width in COLUMN_GROUPS for offset in range(width)]
 
-# Where each group starts, within one league's half of the tab.
 GROUP_STARTS = []
 _cursor = 0
 for _label, _width in COLUMN_GROUPS:
@@ -80,41 +83,28 @@ for _label, _width in COLUMN_GROUPS:
     _cursor += _width
 
 # The two leagues sit side by side rather than stacked: 央聯 on the left, 洋聯
-# on the right, with a narrow column between them. Six teams ranked against
-# each other fit on one screen that way, and the two tables can be read against
-# each other instead of scrolled between.
+# on the right, with a narrow column between them.
 LEAGUE_WIDTH = len(HEADERS)
 LEFT_START = 0
 RIGHT_START = LEAGUE_WIDTH + 1
 TOTAL_WIDTH = RIGHT_START + LEAGUE_WIDTH
 LEAGUE_STARTS = {"央聯": LEFT_START, "洋聯": RIGHT_START}
 
-# Title, source, note, the league bands, then the two header rows — all
-# pinned. Which league a column belongs to, which split it is, and what it
-# measures never scroll away, so each table below needs only its own 【…】 band.
+# Title, source, note, the league bands, then the two header rows — all pinned.
 FROZEN_ROWS = 6
 
-# What the reader can sort each table by, and the column inside a league's
-# block that it sorts on (1-based, as SORT() counts). Every one of them reads
-# best ascending: the lowest ERA is the best, and the most negative gap is the
-# staff most helped by its own park.
-SORT_OPTIONS = (("全場ERA", 3), ("主場ERA", 6), ("客場ERA", 9),
-                ("主客差", 11), ("球隊", 1))
-SORT_CELL = "B2"
-DEFAULT_SORT = SORT_OPTIONS[0][0]
-
-# The tables are SORT() over blocks kept below the fold, so the reader can
-# re-sort them from the dropdown without the sheet being rebuilt. The rows are
-# hidden rather than moved to a tab of their own: one tab is one thing to
-# rename, delete or lose the reference to.
+# The hidden blocks carry every split; the formula above takes the three
+# columns the dropdown asks for. 球隊, then 局數 / ERA / 名次 per split.
+RAW_WIDTH = 1 + len(SPLITS) * len(SUB_LABELS)
 RAW_LABEL = "↓ 排序用原始資料（勿刪，此區已隱藏）"
+
+TEAMS_PER_LEAGUE = 6
 
 # Below this a split ERA is noise rather than a reading — a bullpen that has
 # thrown a handful of innings in one park says nothing about the park.
 MIN_INNINGS = 20.0
 
 BLANK = "—"
-
 
 def _number(value) -> float:
     try:
@@ -197,33 +187,34 @@ def _split(totals, team: str, segment: str, venue: str | None) -> tuple[float, f
 
 
 def _team_lines(totals, segment: str, league: str) -> list[list]:
-    """One league's six rows for one segment, best team first."""
+    """One league's six rows for one segment: the team, then every split.
+
+    Written best-first on the season, but the order on the page comes from the
+    SORT() above them — this is only the order the hidden block happens to sit
+    in.
+    """
     teams = [team for team, lg in LEAGUES.items() if lg == league]
-    overall = {team: era(*_split(totals, team, segment, None)) for team in teams}
     # Ranked on the season, and on each venue separately: a bullpen can be
     # mid-table overall and worst in the league away from home, which is
     # exactly the difference this sheet is for.
-    ranks = {venue: rank_within({
-        team: (era(*_split(totals, team, segment, venue))
-               if _split(totals, team, segment, venue)[0] >= MIN_INNINGS else None)
-        for team in teams})
-        for venue in VENUES}
-    ranks[None] = rank_within(overall)
+    ranks = {}
+    for _label, venue in SPLITS:
+        eras = {}
+        for team in teams:
+            innings, runs = _split(totals, team, segment, venue)
+            eras[team] = (era(innings, runs)
+                          if venue is None or innings >= MIN_INNINGS else None)
+        ranks[venue] = rank_within(eras)
 
     lines = []
     for team in sorted(teams, key=lambda t: (ranks[None].get(t, 99), t)):
         line = [team]
-        for venue in (None, "主", "客"):
+        for _label, venue in SPLITS:
             innings, runs = _split(totals, team, segment, venue)
             line += [round(innings, 1), _cell(era(innings, runs)),
                      ranks[venue].get(team, BLANK)]
-        home, away = (era(*_split(totals, team, segment, side)) for side in VENUES)
-        line.append(BLANK if home is None or away is None else round(home - away, 2))
         lines.append(line)
     return lines
-
-
-TEAMS_PER_LEAGUE = 6
 
 
 def _column_letter(index: int) -> str:
@@ -236,18 +227,23 @@ def _column_letter(index: int) -> str:
     return letters
 
 
-def _sort_formula(first_raw_row: int, start_column: int) -> str:
-    """SORT() over one hidden block, keyed on whatever the dropdown says.
+def _sort_formula(first_raw_row: int) -> str:
+    """The team column plus whichever split the dropdown asks for, sorted.
 
-    ``first_raw_row`` is a 0-based index into the payload; the formula itself
-    is written in A1 terms, so it is one greater.
+    Built as a nested IF so the three-column window moves without the block
+    being rewritten; sorted on the third column of the result, which is that
+    split's ERA whichever split it is.
     """
-    first = _column_letter(start_column)
-    last = _column_letter(start_column + LEAGUE_WIDTH - 1)
     top, bottom = first_raw_row + 1, first_raw_row + TEAMS_PER_LEAGUE
-    keys = ", ".join(f'${SORT_CELL}="{label}", {column}'
-                     for label, column in SORT_OPTIONS)
-    return f"=SORT(${first}${top}:${last}${bottom}, IFS({keys}), TRUE)"
+    windows = []
+    for index in range(len(SPLITS)):
+        first = _column_letter(1 + index * len(SUB_LABELS))
+        last = _column_letter(len(SUB_LABELS) + index * len(SUB_LABELS))
+        windows.append(f"${first}${top}:${last}${bottom}")
+    choice = windows[-1]
+    for (label, _venue), window in reversed(list(zip(SPLITS[:-1], windows))):
+        choice = f'IF(${SORT_CELL}="{label}", {window}, {choice})'
+    return f"=SORT({{$A${top}:$A${bottom}, {choice}}}, 3, TRUE)"
 
 
 def _league_band() -> list:
@@ -262,27 +258,26 @@ def build_sheet(rows: list[list], *, updated_at: str, season: str = "") -> list[
     """The whole tab, top to bottom, as a values payload.
 
     The visible tables are one SORT() each over a block kept in the hidden rows
-    at the bottom, so the reader can re-key them from the dropdown in B2
-    without the sheet being rebuilt.
+    at the bottom, so the reader can change which split is shown, and how the
+    tables are ordered, without the sheet being rebuilt.
     """
     totals = accumulate(rows)
     games = sum(1 for row in rows if game_sides(row) is not None)
     control = [""] * TOTAL_WIDTH
-    control[0], control[1] = "排序依據", DEFAULT_SORT
-    control[3] = f"資料來源：分析表紀錄 {games} 場　　更新：{updated_at}"
+    control[0], control[1] = "顯示", DEFAULT_SPLIT
+    control[3] = f"分析表紀錄 {games} 場　更新：{updated_at}"
     values = [
-        [f"NPB {season} 投手分項 — 先發 / 中繼 / 總計，主客場與名次".strip()],
+        [f"NPB {season} 投手分項 — 先發 / 中繼 / 總計".strip()],
         control,
-        [f"中繼 = 球隊全場 − 先發；名次固定為該聯盟內的 ERA 排序（低者為 1），"
-         f"不隨排序依據改變；「主-客」負值代表主場較佳；"
+        [f"中繼 = 球隊全場 − 先發；名次為該聯盟內同一項目的 ERA 排序（低者為 1）；"
          f"主客場未滿 {MIN_INNINGS:g} 局不列入名次"],
         _league_band(),
         GROUP_ROW + [""] + GROUP_ROW,
         HEADERS + [""] + HEADERS,
     ]
 
-    # Lay the visible tables out first, then the blocks they sort, so the
-    # formulas can point at rows that do not exist yet.
+    # The visible tables first, then the blocks they sort, so the formulas can
+    # point at rows that do not exist yet.
     anchors = []
     for index, segment in enumerate(SEGMENTS):
         if index:
@@ -293,15 +288,14 @@ def build_sheet(rows: list[list], *, updated_at: str, season: str = "") -> list[
 
     values.append([])
     values.append([RAW_LABEL])
+    # Stacked in column A rather than laid out beside each other: the visible
+    # tables are only four columns wide, and a block placed to the right of one
+    # would sit under the other league's table.
     for position, segment in enumerate(SEGMENTS):
-        first_raw = len(values)
-        left = _team_lines(totals, segment, "央聯")
-        right = _team_lines(totals, segment, "洋聯")
-        for central, pacific in zip(left, right):
-            values.append(central + [""] + pacific)
-        visible = anchors[position]
-        for start in LEAGUE_STARTS.values():
-            values[visible][start] = _sort_formula(first_raw, start)
+        for league, start in LEAGUE_STARTS.items():
+            first_raw = len(values)
+            values += _team_lines(totals, segment, league)
+            values[anchors[position]][start] = _sort_formula(first_raw)
     return values
 
 

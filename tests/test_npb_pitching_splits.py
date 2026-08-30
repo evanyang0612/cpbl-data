@@ -8,7 +8,7 @@ import pytest
 
 from baseball.npb_pitching_splits import (
     BULLPEN,
-    DEFAULT_SORT,
+    DEFAULT_SPLIT,
     FROZEN_ROWS,
     GROUP_ROW,
     HEADERS,
@@ -22,7 +22,7 @@ from baseball.npb_pitching_splits import (
     ROW_LEAGUE,
     ROW_SECTION,
     ROW_TITLE,
-    SORT_OPTIONS,
+    SPLIT_LABELS,
     STARTER,
     TEAM,
     accumulate,
@@ -155,14 +155,14 @@ def test_the_leagues_sit_side_by_side_not_stacked():
         assert str(values[first][start]).startswith("=SORT(")
 
 
-def test_the_three_splits_are_named_once_above_their_own_columns():
-    """全場 / 主場 / 客場 each own three columns; naming the split on every
-    label reads as nine columns in a line instead of three blocks."""
+def test_only_one_split_is_on_the_page_at_a_time():
+    """全場 / 主場 / 客場 side by side was nine columns that mostly repeated
+    each other. The dropdown puts one of them on the page."""
     assert GROUP_ROW[0] == "球隊"
-    assert [label for label in GROUP_ROW if label] == ["球隊", "全場", "主場",
-                                                       "客場", "主-客"]
-    assert HEADERS[1:4] == ["局數", "ERA", "名次"] == HEADERS[4:7]
-    assert "聯盟" not in GROUP_ROW
+    assert GROUP_ROW[1].startswith("=$")          # names whichever is shown
+    assert HEADERS[1:4] == ["局數", "ERA", "名次"]
+    assert len(HEADERS) == 4
+    assert SPLIT_LABELS == ("全場", "主場", "客場")
 
 
 def test_the_sheet_carries_three_sections_and_both_leagues():
@@ -189,13 +189,14 @@ def test_the_tables_are_sorted_by_a_dropdown_over_hidden_blocks():
     values = build_sheet([_row()], updated_at="")
     roles = row_roles(values)
 
-    assert values[1][0] == "排序依據" and values[1][1] == DEFAULT_SORT
-    assert roles.count(ROW_RAW) == 1 + 3 * 6     # the label, then three blocks
+    assert values[1][0] == "顯示" and values[1][1] == DEFAULT_SPLIT
+    # The label, then one block per league per segment.
+    assert roles.count(ROW_RAW) == 1 + 6 * 6
     for _, start, first, _ in league_blocks(values):
         formula = values[first][start]
-        # Points below the fold, and offers every column the dropdown does.
+        # Points below the fold, and offers every split the dropdown does.
         assert formula.startswith("=SORT(")
-        for label, _column in SORT_OPTIONS:
+        for label in SPLIT_LABELS[:-1]:
             assert f'"{label}"' in formula
 
 

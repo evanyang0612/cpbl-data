@@ -38,7 +38,8 @@ from baseball.npb_pitching_splits import (  # noqa: E402
     ROW_RAW,
     ROW_SECTION,
     ROW_TITLE,
-    SORT_OPTIONS,
+    RAW_WIDTH,
+    SPLIT_LABELS,
     TOTAL_WIDTH,
     build_sheet,
     league_blocks,
@@ -99,14 +100,13 @@ LEAGUE_TINT = {"央聯": {"red": 0.949, "green": 0.976, "blue": 0.969},
                "洋聯": {"red": 0.953, "green": 0.969, "blue": 0.988}}
 
 # One league's widths, repeated on both halves with the spacer between them.
-LEAGUE_COLUMN_WIDTHS = [92, 56, 58, 44, 56, 58, 44, 56, 58, 44, 62]
-SPACER_WIDTH = 22
+LEAGUE_COLUMN_WIDTHS = [116, 74, 76, 60]
+SPACER_WIDTH = 28
 
-# 局數 / ERA / 名次 repeat three times across a league's half, then the gap.
-INNINGS_COLUMNS = (1, 4, 7)
-ERA_COLUMNS = (2, 5, 8)
-RANK_COLUMNS = (3, 6, 9)
-GAP_COLUMN = 10
+# 球隊, then the one split the dropdown has on the page.
+INNINGS_COLUMN = 1
+ERA_COLUMN = 2
+RANK_COLUMN = 3
 
 # The line drawn between 全場, 主場 and 客場. Heavier than the grid, so the
 # three splits read as three blocks rather than as nine columns in a row.
@@ -199,7 +199,8 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
         {"updateSheetProperties": {
             "properties": {"sheetId": sheet_id,
                            "gridProperties": {"frozenRowCount": FROZEN_ROWS,
-                                              "columnCount": width}},
+                                              "columnCount": max(width,
+                                                                 RAW_WIDTH)}},
             "fields": "gridProperties(frozenRowCount,columnCount)"}},
     ]
     widths = list(LEAGUE_COLUMN_WIDTHS) + [SPACER_WIDTH] + list(LEAGUE_COLUMN_WIDTHS)
@@ -272,9 +273,17 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
                       "endColumnIndex": 2},
             "rule": {"condition": {"type": "ONE_OF_LIST",
                                    "values": [{"userEnteredValue": label}
-                                              for label, _ in SORT_OPTIONS]},
+                                              for label in SPLIT_LABELS]},
                      "showCustomUi": True, "strict": True}}},
     ]
+
+    # The hidden blocks are wider than the tables they feed, so the columns
+    # past the right-hand table hold nothing a reader should see.
+    if RAW_WIDTH > width:
+        requests.append({"updateDimensionProperties": {
+            "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                      "startIndex": width, "endIndex": RAW_WIDTH},
+            "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}})
 
     # Kept out of the way rather than out of the file: the tables are SORT()
     # over these rows, so deleting them would empty the tab.
@@ -324,9 +333,8 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
                             "fontSize": 11}),
             "fields": "userEnteredFormat(horizontalAlignment,textFormat)"}})
 
-    for columns, pattern in ((INNINGS_COLUMNS, "0.0"), (ERA_COLUMNS, "0.00"),
-                             (RANK_COLUMNS, "0"),
-                             ((GAP_COLUMN,), "+0.00;-0.00;0.00")):
+    for columns, pattern in (((INNINGS_COLUMN,), "0.0"), ((ERA_COLUMN,), "0.00"),
+                             ((RANK_COLUMN,), "0")):
         for offset in columns:
             for start in LEAGUE_STARTS.values():
                 column = start + offset
@@ -343,10 +351,7 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
     # means nothing against a rotation's, and a team is ranked against its own
     # league rather than against all twelve.
     for _, start, first, last in blocks:
-        for offset in ERA_COLUMNS:
-            requests.append(_gradient(sheet_id, first, last, start + offset))
-        requests.append(_gradient(sheet_id, first, last, start + GAP_COLUMN,
-                                  diverging=True))
+        requests.append(_gradient(sheet_id, first, last, start + ERA_COLUMN))
 
     # Fences last, so they sit over the light grid drawn across everything: one
     # down each league's outer edge, one before every split inside it.
