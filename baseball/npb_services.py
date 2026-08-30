@@ -2677,6 +2677,17 @@ class NpbUpdateService:
                 except Exception as e:
                     errors.append(f"update_huizi_sheet: {e}")
 
+                # 投手主客 is a view over 分析表紀錄, so it is rebuilt once that
+                # is written rather than kept in step row by row. Imported here
+                # rather than at the top: a run that never reaches this point
+                # should not pay for the import.
+                try:
+                    from baseball.npb_pitching_splits_sheet import refresh
+
+                    refresh()
+                except Exception as e:
+                    errors.append(f"update_pitching_splits_sheet: {e}")
+
         if errors:
             print(f"\n[ERROR] {len(errors)} failure(s):")
             for err in errors:
