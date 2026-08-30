@@ -13,6 +13,7 @@ from baseball.npb_pitching_splits import (
     LEAGUES,
     ROW_DATA,
     ROW_HEADER,
+    ROW_LEAGUE,
     ROW_SECTION,
     ROW_TITLE,
     STARTER,
@@ -21,6 +22,7 @@ from baseball.npb_pitching_splits import (
     build_sheet,
     era,
     game_sides,
+    league_blocks,
     rank_within,
     row_roles,
 )
@@ -131,6 +133,26 @@ def test_the_two_leagues_are_kept_apart():
     assert len([t for t, lg in LEAGUES.items() if lg == "洋聯"]) == 6
 
 
+def test_each_league_is_its_own_block_under_its_own_band():
+    """Six teams ranked against each other are a table; twelve rows of two
+    leagues stacked are not."""
+    values = build_sheet([_row()], updated_at="")
+    roles = row_roles(values)
+
+    assert roles.count(ROW_LEAGUE) == 6         # 2 leagues x 3 sections
+    blocks = league_blocks(values)
+    assert [league for league, _, _ in blocks] == ["央聯", "洋聯"] * 3
+    for _, first, last in blocks:
+        assert last - first + 1 == 6            # exactly its own six teams
+
+
+def test_the_league_column_goes_once_the_band_carries_it():
+    """A column repeating what the band above it says is the repeated header
+    all over again."""
+    assert HEADERS[0] == "球隊"
+    assert "聯盟" not in HEADERS
+
+
 def test_the_sheet_carries_three_sections_and_both_leagues():
     values = build_sheet([_row()], updated_at="2026-08-30 15:00")
     text = "\n".join("\t".join(str(cell) for cell in row) for row in values)
@@ -143,7 +165,7 @@ def test_the_sheet_carries_three_sections_and_both_leagues():
 def test_every_team_appears_in_every_section_even_with_no_games():
     """A missing team reads as a data problem; a blank ERA reads as no innings."""
     values = build_sheet([_row()], updated_at="")
-    teams = [row[1] for row in values if len(row) > 1 and row[1] in LEAGUES]
+    teams = [row[0] for row in values if row and row[0] in LEAGUES]
 
     assert len(teams) == 36                      # 12 teams x 3 sections
     assert teams.count("オリックス") == 3

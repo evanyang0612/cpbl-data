@@ -50,11 +50,14 @@ ROW_TITLE = "title"
 ROW_INFO = "info"
 ROW_NOTE = "note"
 ROW_SECTION = "section"
+ROW_LEAGUE = "league"
 ROW_HEADER = "header"
 ROW_DATA = "data"
 ROW_BLANK = "blank"
 
-HEADERS = ["聯盟", "球隊", "局數", "ERA", "名次",
+# No 聯盟 column: each league sits under its own band, and a column repeating
+# what the band above it says is the repeated header all over again.
+HEADERS = ["球隊", "局數", "ERA", "名次",
            "主場局數", "主場ERA", "名次",
            "客場局數", "客場ERA", "名次", "主-客"]
 
@@ -157,7 +160,10 @@ def _section(totals, segment: str) -> list[list]:
     pinned above all three tables, and the leagues are told apart by colour.
     """
     rows = [[SECTION_TITLES[segment]]]
-    for league in LEAGUE_ORDER:
+    for index, league in enumerate(LEAGUE_ORDER):
+        if index:
+            rows.append([])
+        rows.append([league])
         teams = [team for team, lg in LEAGUES.items() if lg == league]
         overall = {team: era(*_split(totals, team, segment, None)) for team in teams}
         # Ranked on the season, and on each venue separately: a bullpen can be
@@ -170,7 +176,7 @@ def _section(totals, segment: str) -> list[list]:
             for venue in VENUES}
         ranks[None] = rank_within(overall)
         for team in sorted(teams, key=lambda t: (ranks[None].get(t, 99), t)):
-            line = [league, team]
+            line = [team]
             for venue in (None, "主", "客"):
                 innings, runs = _split(totals, team, segment, venue)
                 line += [round(innings, 1), _cell(era(innings, runs)),
@@ -219,8 +225,28 @@ def row_roles(values: list[list]) -> list[str]:
             roles.append(ROW_BLANK)
         elif first.startswith("【"):
             roles.append(ROW_SECTION)
+        elif first in LEAGUE_ORDER:
+            roles.append(ROW_LEAGUE)
         elif row == HEADERS:
             roles.append(ROW_HEADER)
         else:
             roles.append(ROW_DATA)
     return roles
+
+
+def league_blocks(values: list[list]) -> list[tuple[str, int, int]]:
+    """(league, first data row, last data row) for every block in the tab.
+
+    Each league is ranked against itself, so it is also shaded and graded
+    against itself; the formatter needs the blocks to do either.
+    """
+    blocks: list[list] = []
+    for index, role in enumerate(row_roles(values)):
+        if role == ROW_LEAGUE:
+            blocks.append([str(values[index][0]), None, None])
+        elif role == ROW_DATA and blocks:
+            block = blocks[-1]
+            block[1] = index if block[1] is None else block[1]
+            block[2] = index
+    return [(league, first, last) for league, first, last in blocks
+            if first is not None]

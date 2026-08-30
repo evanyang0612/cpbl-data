@@ -28,10 +28,12 @@ from baseball.npb_pitching_splits import (  # noqa: E402
     ROW_DATA,
     ROW_HEADER,
     ROW_INFO,
+    ROW_LEAGUE,
     ROW_NOTE,
     ROW_SECTION,
     ROW_TITLE,
     build_sheet,
+    league_blocks,
     row_roles,
 )
 from baseball.sheets import GoogleSheetsClient  # noqa: E402
@@ -88,13 +90,13 @@ LEAGUE_CHIP = {"央聯": {"red": 0.180, "green": 0.490, "blue": 0.420},
 LEAGUE_TINT = {"央聯": {"red": 0.949, "green": 0.976, "blue": 0.969},
                "洋聯": {"red": 0.953, "green": 0.969, "blue": 0.988}}
 
-COLUMN_WIDTHS = [62, 104, 68, 68, 52, 78, 78, 52, 78, 78, 52, 74]
+COLUMN_WIDTHS = [104, 68, 68, 52, 78, 78, 52, 78, 78, 52, 74]
 
 # 局數 / ERA / 名次 repeat three times across a row, then the gap.
-INNINGS_COLUMNS = (2, 5, 8)
-ERA_COLUMNS = (3, 6, 9)
-RANK_COLUMNS = (4, 7, 10)
-GAP_COLUMN = 11
+INNINGS_COLUMNS = (1, 4, 7)
+ERA_COLUMNS = (2, 5, 8)
+RANK_COLUMNS = (3, 6, 9)
+GAP_COLUMN = 10
 
 
 def _border(color):
@@ -162,7 +164,9 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
     whole = {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": len(values),
              "startColumnIndex": 0, "endColumnIndex": width}
     requests += [
-        {"unmergeCells": {"range": whole}},
+        # The whole sheet, not just the new width: last run's banners may span
+        # a column this one no longer has, and a partial range is refused.
+        {"unmergeCells": {"range": {"sheetId": sheet_id}}},
         {"repeatCell": {
             "range": whole,
             "cell": _cell_format(
@@ -193,12 +197,16 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
                ROW_INFO: (BLUE_PALE, TEXT_HEAD, True, 10),
                ROW_NOTE: (BLUE_FAINT, TEXT_NOTE, False, 10),
                ROW_SECTION: (NAVY_MID, WHITE, True, 12),
+               ROW_LEAGUE: (NAVY_MID, WHITE, True, 11),
                ROW_HEADER: (BLUE_PALE, TEXT_HEAD, True, 11)}
     for row, role in enumerate(roles):
         if role not in banners:
             continue
         background, color, bold, size = banners[role]
-        align = "LEFT" if role in (ROW_TITLE, ROW_INFO, ROW_NOTE, ROW_SECTION) else "CENTER"
+        if role == ROW_LEAGUE:
+            background = LEAGUE_CHIP.get(str(values[row][0]), background)
+        align = ("LEFT" if role in (ROW_TITLE, ROW_INFO, ROW_NOTE, ROW_SECTION,
+                                    ROW_LEAGUE) else "CENTER")
         requests.append(_band(sheet_id, row, background=background, color=color,
                               bold=bold, size=size, align=align))
         if role != ROW_HEADER:
@@ -212,42 +220,27 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
 
     data_rows = [row for row, role in enumerate(roles) if role == ROW_DATA]
 
-    # Painted in runs rather than row by row: the six blocks are contiguous, so
-    # one request each keeps the batch small enough to stay one round trip.
-    runs: list[tuple[str, int, int]] = []
-    for row in data_rows:
-        league = str(values[row][0])
-        if runs and runs[-1][0] == league and runs[-1][2] == row - 1:
-            runs[-1] = (league, runs[-1][1], row)
-        else:
-            runs.append((league, row, row))
-    for league, first, last in runs:
-        if league not in LEAGUE_TINT:
-            continue
+    # Each block takes the palest wash of its league's colour — faint enough
+    # that the ERA gradient still reads over it, strong enough that the two
+    # tables never run together.
+    blocks = league_blocks(values)
+    for league, first, last in blocks:
         requests.append({"repeatCell": {
             "range": {"sheetId": sheet_id, "startRowIndex": first,
                       "endRowIndex": last + 1, "startColumnIndex": 0,
                       "endColumnIndex": width},
             "cell": _cell_format(backgroundColor=LEAGUE_TINT[league]),
             "fields": "userEnteredFormat.backgroundColor"}})
+        # The team is the row's name, so it carries the weight the rest does not.
         requests.append({"repeatCell": {
             "range": {"sheetId": sheet_id, "startRowIndex": first,
                       "endRowIndex": last + 1, "startColumnIndex": 0,
                       "endColumnIndex": 1},
             "cell": _cell_format(
-                backgroundColor=LEAGUE_CHIP[league],
-                textFormat={"foregroundColor": WHITE, "bold": True,
-                            "fontSize": 11}),
-            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
-        # The team is the row's name, so it carries the weight the rest does not.
-        requests.append({"repeatCell": {
-            "range": {"sheetId": sheet_id, "startRowIndex": first,
-                      "endRowIndex": last + 1, "startColumnIndex": 1,
-                      "endColumnIndex": 2},
-            "cell": _cell_format(
+                horizontalAlignment="LEFT",
                 textFormat={"foregroundColor": TEXT_HEAD, "bold": True,
                             "fontSize": 11}),
-            "fields": "userEnteredFormat.textFormat"}})
+            "fields": "userEnteredFormat(horizontalAlignment,textFormat)"}})
 
     for columns, pattern in ((INNINGS_COLUMNS, "0.0"), (ERA_COLUMNS, "0.00"),
                              (RANK_COLUMNS, "0"),
@@ -261,18 +254,13 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
                                                    "pattern": pattern}),
                 "fields": "userEnteredFormat.numberFormat"}})
 
-    # The gradient is read down one section at a time: a bullpen ERA means
-    # nothing against a rotation's, and the three tables sit in one column.
-    sections = []
-    for row, role in enumerate(roles):
-        if role == ROW_SECTION:
-            sections.append([])
-        elif role == ROW_DATA and sections:
-            sections[-1].append(row)
-    for rows in sections:
+    # The gradient is read down one league block at a time: a bullpen ERA
+    # means nothing against a rotation's, and a team is ranked against its own
+    # league rather than against all twelve.
+    for _, first, last in blocks:
         for column in ERA_COLUMNS:
-            requests.append(_gradient(sheet_id, min(rows), max(rows), column))
-        requests.append(_gradient(sheet_id, min(rows), max(rows), GAP_COLUMN,
+            requests.append(_gradient(sheet_id, first, last, column))
+        requests.append(_gradient(sheet_id, first, last, GAP_COLUMN,
                                   diverging=True))
 
     # Outer edge last, so it sits over the light grid drawn across everything.
