@@ -8,7 +8,12 @@ import pytest
 
 from baseball.npb_pitching_splits import (
     BULLPEN,
+    HEADERS,
     LEAGUES,
+    ROW_DATA,
+    ROW_HEADER,
+    ROW_SECTION,
+    ROW_TITLE,
     STARTER,
     TEAM,
     accumulate,
@@ -16,6 +21,7 @@ from baseball.npb_pitching_splits import (
     era,
     game_sides,
     rank_within,
+    row_roles,
 )
 
 
@@ -140,3 +146,27 @@ def test_every_team_appears_in_every_section_even_with_no_games():
 
     assert len(teams) == 36                      # 12 teams x 3 sections
     assert teams.count("オリックス") == 3
+
+
+# --- Row roles, which is what the formatter paints against ----------------
+
+
+def test_every_row_is_classified_for_the_formatter():
+    values = build_sheet([_row()], updated_at="")
+
+    roles = row_roles(values)
+
+    assert len(roles) == len(values)
+    assert roles[0] == ROW_TITLE
+    assert roles.count(ROW_SECTION) == 3
+    assert roles.count(ROW_HEADER) == 3
+    assert roles.count(ROW_DATA) == 36          # 12 teams x 3 sections
+
+
+def test_a_header_row_is_not_mistaken_for_data():
+    """Both start in column A with a short string; only one of them is 聯盟."""
+    values = build_sheet([_row()], updated_at="")
+    header = next(i for i, role in enumerate(row_roles(values)) if role == ROW_HEADER)
+
+    assert values[header] == HEADERS
+    assert row_roles(values)[header + 1] == ROW_DATA

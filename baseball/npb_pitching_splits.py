@@ -44,6 +44,16 @@ LEAGUES = {
 }
 LEAGUE_ORDER = ("央聯", "洋聯")
 
+# What each row of the payload is, so the formatter can paint the tab without
+# re-deriving the layout from the strings in it.
+ROW_TITLE = "title"
+ROW_INFO = "info"
+ROW_NOTE = "note"
+ROW_SECTION = "section"
+ROW_HEADER = "header"
+ROW_DATA = "data"
+ROW_BLANK = "blank"
+
 HEADERS = ["聯盟", "球隊", "局數", "ERA", "名次",
            "主場局數", "主場ERA", "名次",
            "客場局數", "客場ERA", "名次", "主-客"]
@@ -177,3 +187,30 @@ def build_sheet(rows: list[list], *, updated_at: str, season: str = "") -> list[
     for segment in SEGMENTS:
         values += _section(totals, segment)
     return values
+
+
+def row_roles(values: list[list]) -> list[str]:
+    """What each row of ``build_sheet``'s payload is.
+
+    The formatter needs to know which band a row belongs to, and reading that
+    back off the text is the kind of guess that breaks the first time a team
+    is renamed. Derived here, beside the code that lays the rows out.
+    """
+    roles = []
+    for index, row in enumerate(values):
+        first = str(row[0]) if row else ""
+        if index == 0:
+            roles.append(ROW_TITLE)
+        elif index == 1:
+            roles.append(ROW_INFO)
+        elif index == 2:
+            roles.append(ROW_NOTE)
+        elif not first:
+            roles.append(ROW_BLANK)
+        elif first.startswith("【"):
+            roles.append(ROW_SECTION)
+        elif row == HEADERS:
+            roles.append(ROW_HEADER)
+        else:
+            roles.append(ROW_DATA)
+    return roles
