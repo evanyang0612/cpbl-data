@@ -16,9 +16,12 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 ├── baseball/
 │   ├── pinnacle_odds.py             # PS3838 odds scraper (NPB + MLB) -> 盤口 sheets
 │   ├── npb_audit.py                 # Comparator for the weekly NPB history audit
+│   ├── npb_pitching_splits.py       # Starter / bullpen / total ERA by venue
+│   ├── npb_pitching_splits_sheet.py # Writes and paints the 投手主客 tab
 │   └── mlb_games.py                 # Resolves MLB gamePk for an odds event
 ├── migration/
-│   └── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
+│   ├── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
+│   └── add_npb_pitching_splits_sheet.py  # Rebuilds 投手主客 by hand
 └── .github/workflows/
     ├── cpbl_scheduler.yml           # Cron: every 30 min, 07:00–16:00 UTC (via Japan VPN)
     ├── mlb_record_scheduler.yml     # cron-job.org: daily, 21:00 JST
@@ -154,6 +157,30 @@ GitHub's own scheduler is not used: on a public repository it disables a
 scheduled workflow after 60 days with no repository activity, and it does so
 silently — a poor property for the job whose purpose is noticing silent drift.
 The `days` input sets the window; the dispatch body carries it.
+
+### 投手主客 (`baseball/npb_pitching_splits_sheet.py`)
+
+Each team's ERA as starters, as a bullpen and as a whole staff, at home and on
+the road, ranked inside its own league — written to the **投手主客** tab of the
+analysis workbook.
+
+NPB publishes no relief total. 分析表紀錄 carries, for both sides of every game,
+the starting pitcher's line **and** the team's whole-game line, so the bullpen
+is the second minus the first — one source, no second scrape.
+
+- Rebuilt whole at the end of every daily run, once 分析表紀錄 has been written.
+  `migration/add_npb_pitching_splits_sheet.py` is the same call by hand, with
+  `--dry-run` to print the table instead.
+- 央聯 on the left, 洋聯 on the right. One split on the page at a time — 全場 /
+  主場 / 客場, chosen from the dropdown in `B2` — and each table is sorted by
+  that split's own ERA, ascending.
+- The tables are `SORT()` over blocks kept in hidden rows at the bottom, so
+  changing the dropdown re-keys them without the sheet being rebuilt. **Those
+  rows must not be deleted**; the tab empties if they are.
+- A venue split under 20 innings is shown but not ranked, and a segment with no
+  innings has no ERA at all rather than a `0.00` that would rank first.
+- Interleague games count towards a team's own totals, so rows are filed by team
+  rather than by the 聯盟 label on the game.
 
 ---
 
