@@ -35,8 +35,10 @@ from baseball.npb_pitching_splits import (  # noqa: E402
     ROW_GROUP,
     ROW_LEAGUE,
     ROW_NOTE,
+    ROW_RAW,
     ROW_SECTION,
     ROW_TITLE,
+    SORT_OPTIONS,
     TOTAL_WIDTH,
     build_sheet,
     league_blocks,
@@ -207,6 +209,7 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
                       "startIndex": index, "endIndex": index + 1},
             "properties": {"pixelSize": pixels}, "fields": "pixelSize"}})
 
+    # The info row is painted with the others but merged separately below.
     banners = {ROW_TITLE: (NAVY_DARK, WHITE, True, 15),
                ROW_INFO: (BLUE_PALE, TEXT_HEAD, True, 10),
                ROW_NOTE: (BLUE_FAINT, TEXT_NOTE, False, 10),
@@ -216,6 +219,8 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
                ROW_HEADER: (BLUE_PALE, TEXT_HEAD, True, 10)}
     for row, role in enumerate(roles):
         if role not in banners:
+            continue
+        if role == ROW_RAW:
             continue
         background, color, bold, size = banners[role]
         align = ("LEFT" if role in (ROW_TITLE, ROW_INFO, ROW_NOTE, ROW_SECTION,
@@ -230,7 +235,11 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
             continue
         requests.append(_band(sheet_id, row, background=background, color=color,
                               bold=bold, size=size, align=align))
-        if role not in (ROW_HEADER, ROW_GROUP):
+        if role in (ROW_INFO, ROW_HEADER, ROW_GROUP):
+            # The control row carries a dropdown beside its caption, so only
+            # the caption is merged — below, with the dropdown itself.
+            continue
+        if True:
             # One banner across the tab; a merged strip reads as a heading and
             # an unmerged one reads as a row with eleven empty cells.
             requests.append({"mergeCells": {
@@ -238,6 +247,44 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
                           "endRowIndex": row + 1, "startColumnIndex": 0,
                           "endColumnIndex": width},
                 "mergeType": "MERGE_ROWS"}})
+
+    info_row = roles.index(ROW_INFO)
+    requests += [
+        {"mergeCells": {
+            "range": {"sheetId": sheet_id, "startRowIndex": info_row,
+                      "endRowIndex": info_row + 1, "startColumnIndex": 3,
+                      "endColumnIndex": width},
+            "mergeType": "MERGE_ROWS"}},
+        {"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": info_row,
+                      "endRowIndex": info_row + 1, "startColumnIndex": 1,
+                      "endColumnIndex": 2},
+            "cell": _cell_format(
+                backgroundColor=WHITE, horizontalAlignment="CENTER",
+                textFormat={"foregroundColor": TEXT_HEAD, "bold": True,
+                            "fontSize": 10}),
+            "fields": ("userEnteredFormat(backgroundColor,horizontalAlignment,"
+                       "textFormat)")}},
+        # The dropdown is the whole point of the hidden blocks below.
+        {"setDataValidation": {
+            "range": {"sheetId": sheet_id, "startRowIndex": info_row,
+                      "endRowIndex": info_row + 1, "startColumnIndex": 1,
+                      "endColumnIndex": 2},
+            "rule": {"condition": {"type": "ONE_OF_LIST",
+                                   "values": [{"userEnteredValue": label}
+                                              for label, _ in SORT_OPTIONS]},
+                     "showCustomUi": True, "strict": True}}},
+    ]
+
+    # Kept out of the way rather than out of the file: the tables are SORT()
+    # over these rows, so deleting them would empty the tab.
+    raw_rows = [row for row, role in enumerate(roles) if role == ROW_RAW]
+    if raw_rows:
+        requests.append({"updateDimensionProperties": {
+            "range": {"sheetId": sheet_id, "dimension": "ROWS",
+                      "startIndex": min(raw_rows) - 1,
+                      "endIndex": max(raw_rows) + 1},
+            "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}})
 
     # 全場 / 主場 / 客場 span their three columns; 球隊 and 主-客 have no
     # sub-columns, so they take both header rows instead of leaving a hole.

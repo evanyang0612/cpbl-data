@@ -8,6 +8,7 @@ import pytest
 
 from baseball.npb_pitching_splits import (
     BULLPEN,
+    DEFAULT_SORT,
     FROZEN_ROWS,
     GROUP_ROW,
     HEADERS,
@@ -17,9 +18,11 @@ from baseball.npb_pitching_splits import (
     ROW_HEADER,
     RIGHT_START,
     ROW_GROUP,
+    ROW_RAW,
     ROW_LEAGUE,
     ROW_SECTION,
     ROW_TITLE,
+    SORT_OPTIONS,
     STARTER,
     TEAM,
     accumulate,
@@ -147,8 +150,9 @@ def test_the_leagues_sit_side_by_side_not_stacked():
     assert len(blocks) == 6                     # 2 leagues x 3 sections
     for _, _, first, last in blocks:
         assert last - first + 1 == 6            # exactly its own six teams
-    for league, start, first, _ in blocks:
-        assert LEAGUES[values[first][start]] == league
+    # The visible rows hold the SORT() that fills them, not the teams.
+    for _, start, first, _ in blocks:
+        assert str(values[first][start]).startswith("=SORT(")
 
 
 def test_the_three_splits_are_named_once_above_their_own_columns():
@@ -178,6 +182,21 @@ def test_every_team_appears_in_every_section_even_with_no_games():
 
     assert len(teams) == 36                      # 12 teams x 3 sections
     assert teams.count("オリックス") == 3
+
+
+def test_the_tables_are_sorted_by_a_dropdown_over_hidden_blocks():
+    """Re-keying the tables should not mean rebuilding the sheet."""
+    values = build_sheet([_row()], updated_at="")
+    roles = row_roles(values)
+
+    assert values[1][0] == "排序依據" and values[1][1] == DEFAULT_SORT
+    assert roles.count(ROW_RAW) == 1 + 3 * 6     # the label, then three blocks
+    for _, start, first, _ in league_blocks(values):
+        formula = values[first][start]
+        # Points below the fold, and offers every column the dropdown does.
+        assert formula.startswith("=SORT(")
+        for label, _column in SORT_OPTIONS:
+            assert f'"{label}"' in formula
 
 
 # --- Row roles, which is what the formatter paints against ----------------

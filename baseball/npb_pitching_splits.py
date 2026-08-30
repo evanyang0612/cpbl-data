@@ -55,6 +55,7 @@ ROW_GROUP = "group"
 ROW_HEADER = "header"
 ROW_DATA = "data"
 ROW_BLANK = "blank"
+ROW_RAW = "raw"
 
 # No 聯盟 column: each league sits under its own band, and a column repeating
 # what the band above it says is the repeated header all over again.
@@ -92,6 +93,21 @@ LEAGUE_STARTS = {"央聯": LEFT_START, "洋聯": RIGHT_START}
 # pinned. Which league a column belongs to, which split it is, and what it
 # measures never scroll away, so each table below needs only its own 【…】 band.
 FROZEN_ROWS = 6
+
+# What the reader can sort each table by, and the column inside a league's
+# block that it sorts on (1-based, as SORT() counts). Every one of them reads
+# best ascending: the lowest ERA is the best, and the most negative gap is the
+# staff most helped by its own park.
+SORT_OPTIONS = (("全場ERA", 3), ("主場ERA", 6), ("客場ERA", 9),
+                ("主客差", 11), ("球隊", 1))
+SORT_CELL = "B2"
+DEFAULT_SORT = SORT_OPTIONS[0][0]
+
+# The tables are SORT() over blocks kept below the fold, so the reader can
+# re-sort them from the dropdown without the sheet being rebuilt. The rows are
+# hidden rather than moved to a tab of their own: one tab is one thing to
+# rename, delete or lose the reference to.
+RAW_LABEL = "↓ 排序用原始資料（勿刪，此區已隱藏）"
 
 # Below this a split ERA is noise rather than a reading — a bullpen that has
 # thrown a handful of innings in one park says nothing about the park.
@@ -207,14 +223,31 @@ def _team_lines(totals, segment: str, league: str) -> list[list]:
     return lines
 
 
-def _section(totals, segment: str) -> list[list]:
-    """One segment's table: the two leagues abreast, each ranked on its own."""
-    rows = [[SECTION_TITLES[segment]]]
-    left = _team_lines(totals, segment, "央聯")
-    right = _team_lines(totals, segment, "洋聯")
-    for central, pacific in zip(left, right):
-        rows.append(central + [""] + pacific)
-    return rows
+TEAMS_PER_LEAGUE = 6
+
+
+def _column_letter(index: int) -> str:
+    """A1 column letter for a 0-based column index."""
+    letters = ""
+    index += 1
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def _sort_formula(first_raw_row: int, start_column: int) -> str:
+    """SORT() over one hidden block, keyed on whatever the dropdown says.
+
+    ``first_raw_row`` is a 0-based index into the payload; the formula itself
+    is written in A1 terms, so it is one greater.
+    """
+    first = _column_letter(start_column)
+    last = _column_letter(start_column + LEAGUE_WIDTH - 1)
+    top, bottom = first_raw_row + 1, first_raw_row + TEAMS_PER_LEAGUE
+    keys = ", ".join(f'${SORT_CELL}="{label}", {column}'
+                     for label, column in SORT_OPTIONS)
+    return f"=SORT(${first}${top}:${last}${bottom}, IFS({keys}), TRUE)"
 
 
 def _league_band() -> list:
@@ -226,22 +259,49 @@ def _league_band() -> list:
 
 
 def build_sheet(rows: list[list], *, updated_at: str, season: str = "") -> list[list]:
-    """The whole tab, top to bottom, as a values payload."""
+    """The whole tab, top to bottom, as a values payload.
+
+    The visible tables are one SORT() each over a block kept in the hidden rows
+    at the bottom, so the reader can re-key them from the dropdown in B2
+    without the sheet being rebuilt.
+    """
     totals = accumulate(rows)
     games = sum(1 for row in rows if game_sides(row) is not None)
+    control = [""] * TOTAL_WIDTH
+    control[0], control[1] = "排序依據", DEFAULT_SORT
+    control[3] = f"資料來源：分析表紀錄 {games} 場　　更新：{updated_at}"
     values = [
         [f"NPB {season} 投手分項 — 先發 / 中繼 / 總計，主客場與名次".strip()],
-        [f"資料來源：分析表紀錄 {games} 場　　更新：{updated_at}"],
-        [f"中繼 = 球隊全場 − 先發；名次為該聯盟內排序（ERA 低者為 1）；"
-         f"「主-客」負值代表主場較佳；主客場未滿 {MIN_INNINGS:g} 局不列入名次"],
+        control,
+        [f"中繼 = 球隊全場 − 先發；名次固定為該聯盟內的 ERA 排序（低者為 1），"
+         f"不隨排序依據改變；「主-客」負值代表主場較佳；"
+         f"主客場未滿 {MIN_INNINGS:g} 局不列入名次"],
         _league_band(),
         GROUP_ROW + [""] + GROUP_ROW,
         HEADERS + [""] + HEADERS,
     ]
+
+    # Lay the visible tables out first, then the blocks they sort, so the
+    # formulas can point at rows that do not exist yet.
+    anchors = []
     for index, segment in enumerate(SEGMENTS):
         if index:
             values.append([])
-        values += _section(totals, segment)
+        values.append([SECTION_TITLES[segment]])
+        anchors.append(len(values))
+        values += [[""] * TOTAL_WIDTH for _ in range(TEAMS_PER_LEAGUE)]
+
+    values.append([])
+    values.append([RAW_LABEL])
+    for position, segment in enumerate(SEGMENTS):
+        first_raw = len(values)
+        left = _team_lines(totals, segment, "央聯")
+        right = _team_lines(totals, segment, "洋聯")
+        for central, pacific in zip(left, right):
+            values.append(central + [""] + pacific)
+        visible = anchors[position]
+        for start in LEAGUE_STARTS.values():
+            values[visible][start] = _sort_formula(first_raw, start)
     return values
 
 
@@ -249,30 +309,29 @@ def row_roles(values: list[list]) -> list[str]:
     """What each row of ``build_sheet``'s payload is.
 
     The formatter needs to know which band a row belongs to, and reading that
-    back off the text is the kind of guess that breaks the first time a team
-    is renamed. Derived here, beside the code that lays the rows out.
+    back off the text is the kind of guess that breaks the first time a team is
+    renamed — the visible table rows do not even hold a team name any more,
+    only the SORT() that fills them. Derived here, beside the code that lays
+    the rows out.
     """
-    roles = []
-    for index, row in enumerate(values):
-        first = str(row[0]) if row else ""
-        if index == 0:
-            roles.append(ROW_TITLE)
-        elif index == 1:
-            roles.append(ROW_INFO)
-        elif index == 2:
-            roles.append(ROW_NOTE)
-        elif index == 3:
-            roles.append(ROW_LEAGUE)
-        elif index == 4:
-            roles.append(ROW_GROUP)
-        elif index == 5:
-            roles.append(ROW_HEADER)
-        elif not first:
-            roles.append(ROW_BLANK)
+    fixed = [ROW_TITLE, ROW_INFO, ROW_NOTE, ROW_LEAGUE, ROW_GROUP, ROW_HEADER]
+    roles = list(fixed[:len(values)])
+    remaining, raw = 0, False
+    for index in range(len(fixed), len(values)):
+        first = str(values[index][0]) if values[index] else ""
+        if raw:
+            roles.append(ROW_RAW)
+        elif first == RAW_LABEL:
+            roles.append(ROW_RAW)
+            raw = True
+        elif remaining:
+            roles.append(ROW_DATA)
+            remaining -= 1
         elif first.startswith("【"):
             roles.append(ROW_SECTION)
+            remaining = TEAMS_PER_LEAGUE
         else:
-            roles.append(ROW_DATA)
+            roles.append(ROW_BLANK)
     return roles
 
 
