@@ -8,6 +8,7 @@ import pytest
 
 from baseball.npb_pitching_splits import (
     BULLPEN,
+    FROZEN_ROWS,
     HEADERS,
     LEAGUES,
     ROW_DATA,
@@ -159,14 +160,17 @@ def test_every_row_is_classified_for_the_formatter():
     assert len(roles) == len(values)
     assert roles[0] == ROW_TITLE
     assert roles.count(ROW_SECTION) == 3
-    assert roles.count(ROW_HEADER) == 3
     assert roles.count(ROW_DATA) == 36          # 12 teams x 3 sections
 
 
-def test_a_header_row_is_not_mistaken_for_data():
-    """Both start in column A with a short string; only one of them is 聯盟."""
+def test_the_header_is_written_once_and_frozen_rather_than_repeated():
+    """Three stacked tables repeating the same twelve labels is three chances
+    to misread which table you are in. The header is pinned instead."""
     values = build_sheet([_row()], updated_at="")
-    header = next(i for i, role in enumerate(row_roles(values)) if role == ROW_HEADER)
+    roles = row_roles(values)
 
+    assert roles.count(ROW_HEADER) == 1
+    header = roles.index(ROW_HEADER)
     assert values[header] == HEADERS
-    assert row_roles(values)[header + 1] == ROW_DATA
+    assert header < FROZEN_ROWS                 # inside the pinned block
+    assert roles[header + 1] == ROW_SECTION     # and the first table follows it

@@ -58,6 +58,11 @@ HEADERS = ["聯盟", "球隊", "局數", "ERA", "名次",
            "主場局數", "主場ERA", "名次",
            "客場局數", "客場ERA", "名次", "主-客"]
 
+# Title, source, note, then the header — written once and pinned. Three stacked
+# tables each repeating the same twelve labels is three chances to misread
+# which table you are looking at, and it costs a row every time.
+FROZEN_ROWS = 4
+
 # Below this a split ERA is noise rather than a reading — a bullpen that has
 # thrown a handful of innings in one park says nothing about the park.
 MIN_INNINGS = 20.0
@@ -146,8 +151,12 @@ def _split(totals, team: str, segment: str, venue: str | None) -> tuple[float, f
 
 
 def _section(totals, segment: str) -> list[list]:
-    """One segment's table: both leagues, each ranked on its own."""
-    rows = [[SECTION_TITLES[segment]], HEADERS]
+    """One segment's table: both leagues, each ranked on its own.
+
+    No header of its own, and no blank row between the leagues — the header is
+    pinned above all three tables, and the leagues are told apart by colour.
+    """
+    rows = [[SECTION_TITLES[segment]]]
     for league in LEAGUE_ORDER:
         teams = [team for team, lg in LEAGUES.items() if lg == league]
         overall = {team: era(*_split(totals, team, segment, None)) for team in teams}
@@ -169,7 +178,6 @@ def _section(totals, segment: str) -> list[list]:
             home, away = (era(*_split(totals, team, segment, side)) for side in VENUES)
             line.append(BLANK if home is None or away is None else round(home - away, 2))
             rows.append(line)
-        rows.append([])
     return rows
 
 
@@ -182,9 +190,11 @@ def build_sheet(rows: list[list], *, updated_at: str, season: str = "") -> list[
         [f"資料來源：分析表紀錄 {games} 場　　更新：{updated_at}"],
         [f"中繼 = 球隊全場 − 先發；名次為該聯盟內排序（ERA 低者為 1）；"
          f"「主-客」負值代表主場較佳；主客場未滿 {MIN_INNINGS:g} 局不列入名次"],
-        [],
+        HEADERS,
     ]
-    for segment in SEGMENTS:
+    for index, segment in enumerate(SEGMENTS):
+        if index:
+            values.append([])
         values += _section(totals, segment)
     return values
 

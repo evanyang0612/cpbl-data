@@ -23,6 +23,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 from baseball.npb_pitching_splits import (  # noqa: E402
+    FROZEN_ROWS,
     HEADERS,
     ROW_DATA,
     ROW_HEADER,
@@ -82,10 +83,10 @@ GRAD_BAD = {"red": 0.957, "green": 0.776, "blue": 0.757}
 # reads a single number. The chip in the first column carries the name; the
 # rest of the row takes the palest wash of the same hue, faint enough that the
 # ERA gradient still reads over it.
-LEAGUE_CHIP = {"央聯": {"red": 0.180, "green": 0.361, "blue": 0.541},
-               "洋聯": {"red": 0.180, "green": 0.490, "blue": 0.420}}
-LEAGUE_TINT = {"央聯": {"red": 0.953, "green": 0.969, "blue": 0.988},
-               "洋聯": {"red": 0.949, "green": 0.976, "blue": 0.969}}
+LEAGUE_CHIP = {"央聯": {"red": 0.180, "green": 0.490, "blue": 0.420},
+               "洋聯": {"red": 0.180, "green": 0.361, "blue": 0.541}}
+LEAGUE_TINT = {"央聯": {"red": 0.949, "green": 0.976, "blue": 0.969},
+               "洋聯": {"red": 0.953, "green": 0.969, "blue": 0.988}}
 
 COLUMN_WIDTHS = [62, 104, 68, 68, 52, 78, 78, 52, 78, 78, 52, 74]
 
@@ -178,7 +179,7 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
         }},
         {"updateSheetProperties": {
             "properties": {"sheetId": sheet_id,
-                           "gridProperties": {"frozenRowCount": 3,
+                           "gridProperties": {"frozenRowCount": FROZEN_ROWS,
                                               "columnCount": width}},
             "fields": "gridProperties(frozenRowCount,columnCount)"}},
     ]
