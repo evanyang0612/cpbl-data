@@ -9,10 +9,14 @@ import pytest
 from baseball.npb_pitching_splits import (
     BULLPEN,
     FROZEN_ROWS,
+    GROUP_ROW,
     HEADERS,
+    LEFT_START,
     LEAGUES,
     ROW_DATA,
     ROW_HEADER,
+    RIGHT_START,
+    ROW_GROUP,
     ROW_LEAGUE,
     ROW_SECTION,
     ROW_TITLE,
@@ -133,24 +137,28 @@ def test_the_two_leagues_are_kept_apart():
     assert len([t for t, lg in LEAGUES.items() if lg == "洋聯"]) == 6
 
 
-def test_each_league_is_its_own_block_under_its_own_band():
-    """Six teams ranked against each other are a table; twelve rows of two
-    leagues stacked are not."""
+def test_the_leagues_sit_side_by_side_not_stacked():
+    """央聯 left, 洋聯 right, so the two tables can be read against each other
+    instead of scrolled between."""
     values = build_sheet([_row()], updated_at="")
-    roles = row_roles(values)
 
-    assert roles.count(ROW_LEAGUE) == 6         # 2 leagues x 3 sections
+    assert values[3][LEFT_START] == "央聯" and values[3][RIGHT_START] == "洋聯"
     blocks = league_blocks(values)
-    assert [league for league, _, _ in blocks] == ["央聯", "洋聯"] * 3
-    for _, first, last in blocks:
+    assert len(blocks) == 6                     # 2 leagues x 3 sections
+    for _, _, first, last in blocks:
         assert last - first + 1 == 6            # exactly its own six teams
+    for league, start, first, _ in blocks:
+        assert LEAGUES[values[first][start]] == league
 
 
-def test_the_league_column_goes_once_the_band_carries_it():
-    """A column repeating what the band above it says is the repeated header
-    all over again."""
-    assert HEADERS[0] == "球隊"
-    assert "聯盟" not in HEADERS
+def test_the_three_splits_are_named_once_above_their_own_columns():
+    """全場 / 主場 / 客場 each own three columns; naming the split on every
+    label reads as nine columns in a line instead of three blocks."""
+    assert GROUP_ROW[0] == "球隊"
+    assert [label for label in GROUP_ROW if label] == ["球隊", "全場", "主場",
+                                                       "客場", "主-客"]
+    assert HEADERS[1:4] == ["局數", "ERA", "名次"] == HEADERS[4:7]
+    assert "聯盟" not in GROUP_ROW
 
 
 def test_the_sheet_carries_three_sections_and_both_leagues():
@@ -165,7 +173,8 @@ def test_the_sheet_carries_three_sections_and_both_leagues():
 def test_every_team_appears_in_every_section_even_with_no_games():
     """A missing team reads as a data problem; a blank ERA reads as no innings."""
     values = build_sheet([_row()], updated_at="")
-    teams = [row[0] for row in values if row and row[0] in LEAGUES]
+    teams = [row[start] for row in values for start in (LEFT_START, RIGHT_START)
+             if len(row) > start and row[start] in LEAGUES]
 
     assert len(teams) == 36                      # 12 teams x 3 sections
     assert teams.count("オリックス") == 3
@@ -182,17 +191,22 @@ def test_every_row_is_classified_for_the_formatter():
     assert len(roles) == len(values)
     assert roles[0] == ROW_TITLE
     assert roles.count(ROW_SECTION) == 3
-    assert roles.count(ROW_DATA) == 36          # 12 teams x 3 sections
+    # Both leagues share every data row, so a section is six rows, not twelve.
+    assert roles.count(ROW_DATA) == 18
 
 
 def test_the_header_is_written_once_and_frozen_rather_than_repeated():
-    """Three stacked tables repeating the same twelve labels is three chances
-    to misread which table you are in. The header is pinned instead."""
+    """Three stacked tables repeating the same labels is three chances to
+    misread which table you are in. The header is pinned instead — once per
+    league, since the two sit in different columns."""
     values = build_sheet([_row()], updated_at="")
     roles = row_roles(values)
 
     assert roles.count(ROW_HEADER) == 1
     header = roles.index(ROW_HEADER)
-    assert values[header] == HEADERS
+    assert values[header][LEFT_START:LEFT_START + len(HEADERS)] == HEADERS
+    assert values[header][RIGHT_START:RIGHT_START + len(HEADERS)] == HEADERS
+    group = roles.index(ROW_GROUP)
+    assert values[group][LEFT_START:LEFT_START + len(GROUP_ROW)] == GROUP_ROW
     assert header < FROZEN_ROWS                 # inside the pinned block
     assert roles[header + 1] == ROW_SECTION     # and the first table follows it

@@ -51,20 +51,47 @@ ROW_INFO = "info"
 ROW_NOTE = "note"
 ROW_SECTION = "section"
 ROW_LEAGUE = "league"
+ROW_GROUP = "group"
 ROW_HEADER = "header"
 ROW_DATA = "data"
 ROW_BLANK = "blank"
 
 # No 聯盟 column: each league sits under its own band, and a column repeating
 # what the band above it says is the repeated header all over again.
-HEADERS = ["球隊", "局數", "ERA", "名次",
-           "主場局數", "主場ERA", "名次",
-           "客場局數", "客場ERA", "名次", "主-客"]
+#
+# The three splits repeat the same three columns, so they are named once above
+# in a band of their own rather than folded into every label. Two shallow rows
+# read as three blocks; one row of 主場局數 / 主場ERA / 名次 reads as nine
+# columns in a line.
+SUB_LABELS = ("局數", "ERA", "名次")
+COLUMN_GROUPS = (("球隊", 1), ("全場", 3), ("主場", 3), ("客場", 3), ("主-客", 1))
 
-# Title, source, note, then the header — written once and pinned. Three stacked
-# tables each repeating the same twelve labels is three chances to misread
-# which table you are looking at, and it costs a row every time.
-FROZEN_ROWS = 4
+GROUP_ROW = [label if offset == 0 else ""
+             for label, width in COLUMN_GROUPS for offset in range(width)]
+HEADERS = [SUB_LABELS[offset] if width == 3 else ""
+           for _, width in COLUMN_GROUPS for offset in range(width)]
+
+# Where each group starts, within one league's half of the tab.
+GROUP_STARTS = []
+_cursor = 0
+for _label, _width in COLUMN_GROUPS:
+    GROUP_STARTS.append(_cursor)
+    _cursor += _width
+
+# The two leagues sit side by side rather than stacked: 央聯 on the left, 洋聯
+# on the right, with a narrow column between them. Six teams ranked against
+# each other fit on one screen that way, and the two tables can be read against
+# each other instead of scrolled between.
+LEAGUE_WIDTH = len(HEADERS)
+LEFT_START = 0
+RIGHT_START = LEAGUE_WIDTH + 1
+TOTAL_WIDTH = RIGHT_START + LEAGUE_WIDTH
+LEAGUE_STARTS = {"央聯": LEFT_START, "洋聯": RIGHT_START}
+
+# Title, source, note, the league bands, then the two header rows — all
+# pinned. Which league a column belongs to, which split it is, and what it
+# measures never scroll away, so each table below needs only its own 【…】 band.
+FROZEN_ROWS = 6
 
 # Below this a split ERA is noise rather than a reading — a bullpen that has
 # thrown a handful of innings in one park says nothing about the park.
@@ -153,38 +180,49 @@ def _split(totals, team: str, segment: str, venue: str | None) -> tuple[float, f
     return innings, runs
 
 
-def _section(totals, segment: str) -> list[list]:
-    """One segment's table: both leagues, each ranked on its own.
+def _team_lines(totals, segment: str, league: str) -> list[list]:
+    """One league's six rows for one segment, best team first."""
+    teams = [team for team, lg in LEAGUES.items() if lg == league]
+    overall = {team: era(*_split(totals, team, segment, None)) for team in teams}
+    # Ranked on the season, and on each venue separately: a bullpen can be
+    # mid-table overall and worst in the league away from home, which is
+    # exactly the difference this sheet is for.
+    ranks = {venue: rank_within({
+        team: (era(*_split(totals, team, segment, venue))
+               if _split(totals, team, segment, venue)[0] >= MIN_INNINGS else None)
+        for team in teams})
+        for venue in VENUES}
+    ranks[None] = rank_within(overall)
 
-    No header of its own, and no blank row between the leagues — the header is
-    pinned above all three tables, and the leagues are told apart by colour.
-    """
+    lines = []
+    for team in sorted(teams, key=lambda t: (ranks[None].get(t, 99), t)):
+        line = [team]
+        for venue in (None, "主", "客"):
+            innings, runs = _split(totals, team, segment, venue)
+            line += [round(innings, 1), _cell(era(innings, runs)),
+                     ranks[venue].get(team, BLANK)]
+        home, away = (era(*_split(totals, team, segment, side)) for side in VENUES)
+        line.append(BLANK if home is None or away is None else round(home - away, 2))
+        lines.append(line)
+    return lines
+
+
+def _section(totals, segment: str) -> list[list]:
+    """One segment's table: the two leagues abreast, each ranked on its own."""
     rows = [[SECTION_TITLES[segment]]]
-    for index, league in enumerate(LEAGUE_ORDER):
-        if index:
-            rows.append([])
-        rows.append([league])
-        teams = [team for team, lg in LEAGUES.items() if lg == league]
-        overall = {team: era(*_split(totals, team, segment, None)) for team in teams}
-        # Ranked on the season, and on each venue separately: a bullpen can be
-        # mid-table overall and worst in the league away from home, which is
-        # exactly the difference this sheet is for.
-        ranks = {venue: rank_within({
-            team: (era(*_split(totals, team, segment, venue))
-                   if _split(totals, team, segment, venue)[0] >= MIN_INNINGS else None)
-            for team in teams})
-            for venue in VENUES}
-        ranks[None] = rank_within(overall)
-        for team in sorted(teams, key=lambda t: (ranks[None].get(t, 99), t)):
-            line = [team]
-            for venue in (None, "主", "客"):
-                innings, runs = _split(totals, team, segment, venue)
-                line += [round(innings, 1), _cell(era(innings, runs)),
-                         ranks[venue].get(team, BLANK)]
-            home, away = (era(*_split(totals, team, segment, side)) for side in VENUES)
-            line.append(BLANK if home is None or away is None else round(home - away, 2))
-            rows.append(line)
+    left = _team_lines(totals, segment, "央聯")
+    right = _team_lines(totals, segment, "洋聯")
+    for central, pacific in zip(left, right):
+        rows.append(central + [""] + pacific)
     return rows
+
+
+def _league_band() -> list:
+    """The row naming which half of the tab is which league."""
+    row = [""] * TOTAL_WIDTH
+    for league, start in LEAGUE_STARTS.items():
+        row[start] = league
+    return row
 
 
 def build_sheet(rows: list[list], *, updated_at: str, season: str = "") -> list[list]:
@@ -196,7 +234,9 @@ def build_sheet(rows: list[list], *, updated_at: str, season: str = "") -> list[
         [f"資料來源：分析表紀錄 {games} 場　　更新：{updated_at}"],
         [f"中繼 = 球隊全場 − 先發；名次為該聯盟內排序（ERA 低者為 1）；"
          f"「主-客」負值代表主場較佳；主客場未滿 {MIN_INNINGS:g} 局不列入名次"],
-        HEADERS,
+        _league_band(),
+        GROUP_ROW + [""] + GROUP_ROW,
+        HEADERS + [""] + HEADERS,
     ]
     for index, segment in enumerate(SEGMENTS):
         if index:
@@ -221,32 +261,37 @@ def row_roles(values: list[list]) -> list[str]:
             roles.append(ROW_INFO)
         elif index == 2:
             roles.append(ROW_NOTE)
+        elif index == 3:
+            roles.append(ROW_LEAGUE)
+        elif index == 4:
+            roles.append(ROW_GROUP)
+        elif index == 5:
+            roles.append(ROW_HEADER)
         elif not first:
             roles.append(ROW_BLANK)
         elif first.startswith("【"):
             roles.append(ROW_SECTION)
-        elif first in LEAGUE_ORDER:
-            roles.append(ROW_LEAGUE)
-        elif row == HEADERS:
-            roles.append(ROW_HEADER)
         else:
             roles.append(ROW_DATA)
     return roles
 
 
-def league_blocks(values: list[list]) -> list[tuple[str, int, int]]:
-    """(league, first data row, last data row) for every block in the tab.
+def league_blocks(values: list[list]) -> list[tuple[str, int, int, int]]:
+    """(league, first column, first data row, last data row) for every block.
 
     Each league is ranked against itself, so it is also shaded and graded
-    against itself; the formatter needs the blocks to do either.
+    against itself; the formatter needs the blocks to do either. Both leagues
+    share every data row, which is why a block is a column range as well as a
+    row range.
     """
-    blocks: list[list] = []
+    spans: list[list] = []
     for index, role in enumerate(row_roles(values)):
-        if role == ROW_LEAGUE:
-            blocks.append([str(values[index][0]), None, None])
-        elif role == ROW_DATA and blocks:
-            block = blocks[-1]
-            block[1] = index if block[1] is None else block[1]
-            block[2] = index
-    return [(league, first, last) for league, first, last in blocks
-            if first is not None]
+        if role == ROW_SECTION:
+            spans.append([None, None])
+        elif role == ROW_DATA and spans:
+            span = spans[-1]
+            span[0] = index if span[0] is None else span[0]
+            span[1] = index
+    return [(league, start, first, last)
+            for first, last in (span for span in spans if span[0] is not None)
+            for league, start in LEAGUE_STARTS.items()]
