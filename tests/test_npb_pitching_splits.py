@@ -18,8 +18,8 @@ from baseball.npb_pitching_splits import (
     ROW_HEADER,
     RIGHT_START,
     ROW_GROUP,
-    ROW_RAW,
     ROW_LEAGUE,
+    ROW_RAW,
     ROW_SECTION,
     ROW_TITLE,
     SPLIT_LABELS,
@@ -145,7 +145,9 @@ def test_the_leagues_sit_side_by_side_not_stacked():
     instead of scrolled between."""
     values = build_sheet([_row()], updated_at="")
 
-    assert values[3][LEFT_START] == "央聯" and values[3][RIGHT_START] == "洋聯"
+    band = row_roles(values).index(ROW_LEAGUE)
+    assert values[band][LEFT_START] == "央聯"
+    assert values[band][RIGHT_START] == "洋聯"
     blocks = league_blocks(values)
     assert len(blocks) == 6                     # 2 leagues x 3 sections
     for _, _, first, last in blocks:

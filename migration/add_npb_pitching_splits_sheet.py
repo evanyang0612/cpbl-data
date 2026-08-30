@@ -34,7 +34,6 @@ from baseball.npb_pitching_splits import (  # noqa: E402
     ROW_INFO,
     ROW_GROUP,
     ROW_LEAGUE,
-    ROW_NOTE,
     ROW_RAW,
     ROW_SECTION,
     ROW_TITLE,
@@ -79,11 +78,9 @@ def _worksheet(spreadsheet, title: str, *, rows: int, cols: int):
 NAVY_DARK = {"red": 0.047, "green": 0.137, "blue": 0.220}
 NAVY_MID = {"red": 0.098, "green": 0.239, "blue": 0.357}
 BLUE_PALE = {"red": 0.910, "green": 0.937, "blue": 0.969}
-BLUE_FAINT = {"red": 0.976, "green": 0.988, "blue": 1.0}
 WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
 TEXT_HEAD = {"red": 0.098, "green": 0.169, "blue": 0.247}
 TEXT_BODY = {"red": 0.118, "green": 0.149, "blue": 0.176}
-TEXT_NOTE = {"red": 0.149, "green": 0.200, "blue": 0.278}
 BORDER_OUT = {"red": 0.800, "green": 0.839, "blue": 0.878}
 BORDER_IN = {"red": 0.898, "green": 0.918, "blue": 0.937}
 GRAD_GOOD = {"red": 0.800, "green": 0.929, "blue": 0.827}
@@ -213,7 +210,6 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
     # The info row is painted with the others but merged separately below.
     banners = {ROW_TITLE: (NAVY_DARK, WHITE, True, 15),
                ROW_INFO: (BLUE_PALE, TEXT_HEAD, True, 10),
-               ROW_NOTE: (BLUE_FAINT, TEXT_NOTE, False, 10),
                ROW_SECTION: (NAVY_MID, WHITE, True, 12),
                ROW_LEAGUE: (NAVY_MID, WHITE, True, 11),
                ROW_GROUP: (BLUE_PALE, TEXT_HEAD, True, 11),
@@ -224,7 +220,7 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
         if role == ROW_RAW:
             continue
         background, color, bold, size = banners[role]
-        align = ("LEFT" if role in (ROW_TITLE, ROW_INFO, ROW_NOTE, ROW_SECTION,
+        align = ("LEFT" if role in (ROW_TITLE, ROW_INFO, ROW_SECTION,
                                     ROW_LEAGUE) else "CENTER")
         if role == ROW_LEAGUE:
             # Two bands, one per half, each in its own league's colour.

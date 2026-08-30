@@ -48,7 +48,6 @@ LEAGUE_ORDER = ("央聯", "洋聯")
 # re-deriving the layout from the strings in it.
 ROW_TITLE = "title"
 ROW_INFO = "info"
-ROW_NOTE = "note"
 ROW_SECTION = "section"
 ROW_LEAGUE = "league"
 ROW_GROUP = "group"
@@ -90,8 +89,9 @@ RIGHT_START = LEAGUE_WIDTH + 1
 TOTAL_WIDTH = RIGHT_START + LEAGUE_WIDTH
 LEAGUE_STARTS = {"央聯": LEFT_START, "洋聯": RIGHT_START}
 
-# Title, source, note, the league bands, then the two header rows — all pinned.
-FROZEN_ROWS = 6
+# Title, the control row, the league bands and the two header rows — all
+# pinned, so what a column is and which league it belongs to never scroll away.
+FROZEN_ROWS = 5
 
 # The hidden blocks carry every split; the formula above takes the three
 # columns the dropdown asks for. 球隊, then 局數 / ERA / 名次 per split.
@@ -269,8 +269,6 @@ def build_sheet(rows: list[list], *, updated_at: str, season: str = "") -> list[
     values = [
         [f"NPB {season} 投手分項 — 先發 / 中繼 / 總計".strip()],
         control,
-        [f"中繼 = 球隊全場 − 先發；名次為該聯盟內同一項目的 ERA 排序（低者為 1）；"
-         f"主客場未滿 {MIN_INNINGS:g} 局不列入名次"],
         _league_band(),
         GROUP_ROW + [""] + GROUP_ROW,
         HEADERS + [""] + HEADERS,
@@ -308,7 +306,7 @@ def row_roles(values: list[list]) -> list[str]:
     only the SORT() that fills them. Derived here, beside the code that lays
     the rows out.
     """
-    fixed = [ROW_TITLE, ROW_INFO, ROW_NOTE, ROW_LEAGUE, ROW_GROUP, ROW_HEADER]
+    fixed = [ROW_TITLE, ROW_INFO, ROW_LEAGUE, ROW_GROUP, ROW_HEADER]
     roles = list(fixed[:len(values)])
     remaining, raw = 0, False
     for index in range(len(fixed), len(values)):
