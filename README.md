@@ -207,6 +207,7 @@ What the layout encodes, all of it reproduced from the 2023 sheet:
 | score colours | winner red, loser green, a draw blue, all bold; the separator rides with the winner |
 | 雨天中止 | `<相手コード> 戦 雨 天 中 止` in the home column, both teams' cells blue |
 | no game for that team | purple; a day with no games at all is grey |
+| 予告先発 | a game not yet played shows its two announced starters and no score |
 | 登録抹消 | the day's 公示, as a note on the black divider between the leagues |
 | season phases | 交流戦 pink, オールスター dark purple, on the Monday row before each starts |
 
@@ -225,6 +226,11 @@ uv run python baseball/npb_diary.py --full         # rebuild the whole tab
 - Scores and starters come from 賽錄, which the step above has just written.
   Yahoo is needed only for two things 賽錄 cannot know: which games were
   **中止**, and who is scheduled to play on days not yet reached.
+- 予告先発 comes from npb.jp in a single request, and only ever covers today —
+  that is all NPB announces. The names are put through the same season-wide
+  display map as the rest of the sheet, so a pitcher is spelled the same way
+  whether his game has been played or not. A game announced but then called off
+  still shows 中止: the status wins.
 - A walk-off home run is not visible in a box score — a walk-off single and a
   walk-off homer look identical — so those are read off NPB's own play-by-play,
   checking the game's last play. The score URLs come from npb.jp's monthly

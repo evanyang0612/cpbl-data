@@ -113,6 +113,10 @@ NPB_SCHEDULE_PAGES = ([f"/games/{{year}}/schedule_{m:02d}_detail.html" for m in 
 # NPB's daily 出場選手登録／登録抹消 公示. The date form builds this path in JS
 # (/common/js/announcement.js), which is why no query string reaches it.
 NPB_ROSTER = "https://npb.jp/announcement/roster/roster_{md}.html"
+# 予告先発. One request, today only — which is all NPB announces. A game whose
+# starters are out but which has not been played yet shows the two names with no
+# score, the way the 2023 sheet writes it (東克樹        横川凱).
+NPB_STARTERS = "https://npb.jp/announcement/starter/"
 
 # 公示 spells teams out in full; the note spells them the way Evan's own 2023
 # comments do, and keeps the two leagues in separate blocks.
@@ -124,6 +128,10 @@ OFFICIAL_SHORT = {
     "福岡ソフトバンクホークス": "ソフトB", "東北楽天ゴールデンイーグルス": "楽天",
 }
 CENTRAL = ("巨人", "阪神", "ＤｅＮＡ", "ヤクルト", "中日", "広島")
+
+# The note spells two clubs differently from the way the columns are keyed.
+OFFICIAL_TO_TEAM = {official: {"ＤｅＮＡ": "DeNA", "ソフトB": "ソフトバンク"}.get(short, short)
+                    for official, short in OFFICIAL_SHORT.items()}
 
 NPB_OFFICIAL_CODE = {
     "巨人": "g", "阪神": "t", "DeNA": "db", "ヤクルト": "s", "中日": "d", "広島": "c",
@@ -266,6 +274,39 @@ def fetch_schedule(start, end, cache=None):
             out[date] = games
     if cache:
         json.dump(out, open(cache, "w"), ensure_ascii=False)
+    return out
+
+
+def fetch_announced_starters():
+    """{(away team, home team): (away pitcher, home pitcher)} for today.
+
+    NPB lists the home side on the left of each 予告先発 unit and the visitor on
+    the right; the team is only identifiable from the crest's alt text.
+    """
+    try:
+        response = requests.get(NPB_STARTERS, headers=UA, timeout=30)
+        response.encoding = "utf-8"
+    except requests.RequestException:
+        return {}
+    if response.status_code != 200:
+        return {}
+
+    def side(block):
+        crest, name = block.find("img"), block.find("span")
+        if not crest or not name:
+            return None, None
+        team = OFFICIAL_TO_TEAM.get(re.sub(r"\s+", "", crest.get("alt", "")))
+        return team, re.sub(r"[\s\u3000]+", " ", name.get_text(strip=True))
+
+    out = {}
+    for unit in bs(response.text, "html.parser").select("div.unit"):
+        home_block, away_block = unit.select_one(".team_left"), unit.select_one(".team_right")
+        if not home_block or not away_block:
+            continue
+        home, home_pitcher = side(home_block)
+        away, away_pitcher = side(away_block)
+        if home and away:
+            out[(away, home)] = (away_pitcher, home_pitcher)
     return out
 
 
@@ -450,7 +491,11 @@ def mark_walkoff_home_runs(starters, schedule, cache=None, url_cache=None,
 
 
 def load_starters(client):
-    """賽錄 -> {(date, home team): {starters, walk-off flag}}, 2026 only."""
+    """賽錄 -> ({(date, home team): {starters, walk-off flag}}, display-name map).
+
+    The map is returned because 予告先発 names arrive from a different source and
+    have to be spelled the same way as the ones already on the sheet.
+    """
     import npb
     ws = client.open_by_key(npb.NPB_SPREADSHEET_KEY).worksheet("賽錄")
     rows = ws.get_all_values()
@@ -487,7 +532,7 @@ def load_starters(client):
     for info in out.values():
         for key in ("away_starter", "home_starter"):
             info[key] = display.get(info[key], surname(info[key]))
-    return out
+    return out, display
 
 
 def surname(name):
@@ -620,14 +665,29 @@ def solve_name_lengths(schedule, starters):
     return {name: length for name, length in limits.items() if length < len(name)}
 
 
-def game_text(game, starters, name_limits=None):
+def game_text(game, starters, name_limits=None, announced=None):
     """The cell that goes in the home team's column: (text, kind, textFormatRuns)."""
     if game["status"] in ("試合中止", "ノーゲーム"):
         # Half-width gaps: the 2023 sheet's ideographic ones ran ~145px wide.
         text = " ".join(f"{CODE_OF[game['away']]} 戦 雨 天 中 止".split())
         return text, "cancelled", None
     if game["status"] != "試合終了":
-        return CODE_OF[game["away"]], "scheduled", None
+        pair = (announced or {}).get((game["away"], game["home"]))
+        if not pair or not all(pair):
+            return CODE_OF[game["away"]], "scheduled", None
+        # Starters announced but no score yet: two names, no separator, exactly
+        # how the 2023 sheet writes a game it knows the pitchers for.
+        limits = name_limits or {}
+        away_p, home_p = (NAME_OVERRIDES.get(p, p) for p in pair)
+        away_p = away_p[:limits.get(away_p, len(away_p))]
+        home_p = home_p[:limits.get(home_p, len(home_p))]
+        pad = 5
+        while (text_px(away_p, name_size(away_p)) + text_px(home_p, name_size(home_p))
+               + text_px(" " * pad, 10) > FIT_TARGET_PX and pad > 1):
+            pad -= 1
+        text = f"{away_p}{' ' * pad}{home_p}"
+        return text, "announced", [run_at(0, size=name_size(away_p)),
+                                   run_at(len(away_p) + pad, size=name_size(home_p))]
 
     away_p, home_p, away_s, home_s, mark, venue = _game_parts(game, starters)
     limits = name_limits or {}
@@ -671,7 +731,8 @@ def game_text(game, starters, name_limits=None):
     return text, "played", runs
 
 
-def build_rows(schedule, starters, roster=None, name_limits=None, window=None):
+def build_rows(schedule, starters, roster=None, name_limits=None, window=None,
+               announced=None):
     """-> list of (date label, weekday, {col: (text, background, runs)}, note)."""
     rows = []
     first, last = window or (SEASON_START, SEASON_END)
@@ -712,7 +773,7 @@ def build_rows(schedule, starters, roster=None, name_limits=None, window=None):
             for col, *_ in TEAMS:
                 cells[col] = ("", idle, None)
             for game in games:
-                text, kind, runs = game_text(game, starters, name_limits)
+                text, kind, runs = game_text(game, starters, name_limits, announced)
                 bg = BLUE if kind == "cancelled" else WHITE
                 cells[COL_OF[game["home"]]] = (text, bg, runs)
                 cells[COL_OF[game["away"]]] = ("", bg, None)
@@ -860,7 +921,7 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
         print(f"增量更新窗口 {window[0]} ~ {window[1]}"
               f"（{(window[1] - window[0]).days + 1} 天）")
     schedule = fetch_schedule(window[0], window[1], cache=cache)
-    starters = load_starters(client)
+    starters, display = load_starters(client)
     homers = mark_walkoff_home_runs(starters, schedule, cache=hr_cache,
                                     url_cache=url_cache, window=window)
     walkoffs = sum(1 for (date, _), info in starters.items()
@@ -874,7 +935,14 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
     if name_limits:
         print("為了塞進欄寬而統一縮短的投手名: "
               + "、".join(f"{n}→{n[:k]}" for n, k in sorted(name_limits.items())))
-    rows = build_rows(schedule, starters, roster, name_limits, window=window)
+    announced = {
+        teams: tuple(display.get(p, surname(p)) for p in pair)
+        for teams, pair in fetch_announced_starters().items()
+    }
+    if announced:
+        print(f"予告先発 {len(announced)} 場")
+    rows = build_rows(schedule, starters, roster, name_limits, window=window,
+                      announced=announced)
 
     played = sum(1 for _, _, c, _ in rows for t, bg, _ in c.values() if bg is WHITE and t)
     cancelled = sum(1 for _, _, c, _ in rows for t, bg, _ in c.values() if bg is BLUE and t)
