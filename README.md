@@ -19,6 +19,7 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   ├── npb_pitching_splits.py       # Starter / bullpen / total ERA by venue
 │   ├── npb_pitching_splits_sheet.py # Writes and paints the 投手主客 tab
 │   ├── npb_record_sync.py           # Mirrors 分析表紀錄 -> 紀錄總表 (other workbook)
+│   ├── npb_diary.py                 # Keeps the 2026・野球日記 tab current
 │   └── mlb_games.py                 # Resolves MLB gamePk for an odds event
 ├── migration/
 │   ├── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
@@ -190,6 +191,57 @@ minutes behind, and it costs a handful of API calls and no Yahoo traffic.
 The step is `continue-on-error`: the target workbook belongs to someone else,
 and a permission change there must not turn the NPB updater red. It carries its
 own Telegram alert so a failure there is not reported as a failed sweep.
+### 野球日記 (`baseball/npb_diary.py`)
+
+Keeps the **2026・野球日記** tab of the analysis workbook current — a calendar of
+the season, one row per day and one column per team, ported from the
+hand-maintained 2023 tab. Each game is written once, in the **home** team's
+column, as `客先発  客点-主点  主先発`.
+
+What the layout encodes, all of it reproduced from the 2023 sheet:
+
+| | |
+| --- | --- |
+| neutral venue | spelled inside the score: `石田  3  (京セラ)  6  青柳` |
+| サヨナラ | `。` instead of `-`; `*` when it was a walk-off **home run** |
+| score colours | winner red, loser green, a draw blue, all bold; the separator rides with the winner |
+| 雨天中止 | `<相手コード> 戦 雨 天 中 止` in the home column, both teams' cells blue |
+| no game for that team | purple; a day with no games at all is grey |
+| 登録抹消 | the day's 公示, as a note on the black divider between the leagues |
+| season phases | 交流戦 pink, オールスター dark purple, on the Monday row before each starts |
+
+```bash
+uv run python baseball/npb_diary.py                # incremental, what the scheduler runs
+uv run python baseball/npb_diary.py --dry-run
+uv run python baseball/npb_diary.py --full         # rebuild the whole tab
+```
+
+- The default run rebuilds only a **window** around today (3 days back, 21
+  forward). Everything outside it is settled — a score does not change, and
+  neither does a rainout — so Yahoo is asked for about two dozen schedule pages
+  instead of the season's 226. That is what makes it cheap enough to run on
+  every sweep; a full sweep of Yahoo's schedule starts drawing 500s partway
+  through.
+- Scores and starters come from 賽錄, which the step above has just written.
+  Yahoo is needed only for two things 賽錄 cannot know: which games were
+  **中止**, and who is scheduled to play on days not yet reached.
+- A walk-off home run is not visible in a box score — a walk-off single and a
+  walk-off homer look identical — so those are read off NPB's own play-by-play,
+  checking the game's last play. The score URLs come from npb.jp's monthly
+  schedule pages rather than being guessed: the game-number suffix is not always
+  `-01`, and 交流戦 lives on its own page.
+- Pitchers are shown by family name, extended just far enough to be unambiguous
+  across the whole season (髙橋光 / 髙橋遥 / 髙橋宏), with hand-written
+  shorthands in `NAME_OVERRIDES` winning over the automatic form. A surname that
+  becomes ambiguous *inside* the window would leave older rows spelled the old
+  way; the run detects that and asks for a `--full` pass.
+- Cells are fitted to the 130px column by squeezing the padding, then the font,
+  then the venue, and only then clipping a name — the order the 2023 sheet was
+  worked by hand.
+
+`--full` also creates the tab, sets the column widths, paints the season-phase
+banners and lays out the オールスター block, none of which an incremental run
+touches.
 
 ### 投手主客 (`baseball/npb_pitching_splits_sheet.py`)
 

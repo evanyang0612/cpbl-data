@@ -48,6 +48,25 @@ jobs:
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=NPB 紀錄總表 mirror failed (the sweep itself was fine). Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+      # Same shape as the mirror above, and it rides along every 30 minutes for
+      # the same kind of reason: only the days around today are rebuilt, so
+      # Yahoo is asked for about two dozen schedule pages instead of the
+      # season's 226. A --full rebuild is a manual job, for when the layout
+      # itself changes.
+      - name: Update 2026・野球日記
+        id: diary
+        continue-on-error: true
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: uv run python baseball/npb_diary.py
+
+      - name: Send 野球日記 failure Telegram message
+        if: steps.diary.outcome == 'failure'
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=NPB 野球日記 update failed (the sweep itself was fine). Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
       - name: Send failure Telegram message
         if: failure()
         run: |
