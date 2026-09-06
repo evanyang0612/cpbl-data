@@ -414,12 +414,22 @@ def roster_note(_date_label, moves):
     return "\n\n".join(blocks)
 
 
-def npb_score_urls(year, cache=None):
-    """{(MMDD, home code, away code): score URL} from NPB's monthly schedule pages."""
+def npb_score_urls(year, cache=None, months=None):
+    """{(MMDD, home code, away code): score URL} from NPB's monthly schedule pages.
+
+    ``months`` narrows the fetch to the months actually being asked about: a
+    scheduled run has at most one or two unresolved walk-offs, and pulling all
+    nine pages for them costs more than the probe itself.
+    """
     if cache and os.path.exists(cache):
         return {tuple(k.split("|")): v for k, v in json.load(open(cache)).items()}
+    pages = NPB_SCHEDULE_PAGES
+    if months:
+        wanted = {f"schedule_{m:02d}_detail" for m in months}
+        pages = [p for p in pages
+                 if "interleague" in p or any(w in p for w in wanted)]
     urls = {}
-    for path in NPB_SCHEDULE_PAGES:
+    for path in pages:
         resp = requests.get(NPB_BASE + path.format(year=year), headers=UA, timeout=30)
         resp.encoding = "utf-8"
         if resp.status_code != 200:
@@ -455,7 +465,8 @@ def mark_walkoff_home_runs(starters, schedule, cache=None, url_cache=None,
                if info["walkoff"] and f"{key[0]}|{key[1]}" not in known
                and key in opponents]
     if pending:
-        urls = npb_score_urls(SEASON_START.year, cache=url_cache)
+        urls = npb_score_urls(SEASON_START.year, cache=url_cache,
+                              months={int(key[0].split("-")[1]) for key in pending})
 
         def probe(key):
             date, home = key
@@ -487,7 +498,9 @@ def mark_walkoff_home_runs(starters, schedule, cache=None, url_cache=None,
 
     for key, info in starters.items():
         info["walkoff_hr"] = bool(known.get(f"{key[0]}|{key[1]}"))
-    return sum(1 for key, info in starters.items() if info.get("walkoff_hr"))
+    # Count only what this run covers; the cache carries the whole season.
+    return sum(1 for key, info in starters.items()
+               if info.get("walkoff_hr") and key in opponents)
 
 
 def load_starters(client):
@@ -535,10 +548,17 @@ def load_starters(client):
     return out, display
 
 
+# NPB's 公示 prefixes a foreign player with an initial — Ｊ．ルケーシー — and 賽錄
+# occasionally does too (E.ラミレス). The diary drops it, so the same pitcher is
+# spelled one way whether his game has been played or only announced.
+_INITIAL = re.compile(r"^[Ａ-ＺA-Z][．.]\s*")
+
+
 def surname(name):
     """賽錄 stores full names ("村上 頌樹"); the diary shows only the family name,
     the way the 2023 sheet does. Katakana names carry no space and stay whole."""
-    return (name or "").split(" ")[0].split("\u3000")[0].strip()
+    bare = _INITIAL.sub("", (name or "").strip())
+    return bare.split(" ")[0].split("\u3000")[0].strip()
 
 
 def resolve_display_names(full_names):
@@ -935,10 +955,13 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
     if name_limits:
         print("為了塞進欄寬而統一縮短的投手名: "
               + "、".join(f"{n}→{n[:k]}" for n, k in sorted(name_limits.items())))
-    announced = {
-        teams: tuple(display.get(p, surname(p)) for p in pair)
-        for teams, pair in fetch_announced_starters().items()
-    }
+    def spell(name):
+        # The 公示 spelling is not a key in the map, so fall back to the bare
+        # family name — which is what the map would have produced anyway.
+        return display.get(name) or display.get(surname(name)) or surname(name)
+
+    announced = {teams: tuple(spell(p) for p in pair)
+                 for teams, pair in fetch_announced_starters().items()}
     if announced:
         print(f"予告先発 {len(announced)} 場")
     rows = build_rows(schedule, starters, roster, name_limits, window=window,
