@@ -25,6 +25,29 @@ jobs:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: uv run python npb.py
 
+      # 紀錄總表 lives in a separate workbook and is a mirror of 分析表紀錄, which
+      # the step above has just written — so it belongs here rather than on a
+      # schedule of its own, the way mlb_record_scheduler.yml chains its three
+      # scripts. Running it on every sweep keeps 紀錄總表 no more than 30 minutes
+      # behind, and a sweep with nothing new writes nothing.
+      #
+      # continue-on-error because the target workbook is owned by someone else:
+      # a permission change there must not turn the NPB updater red, and the
+      # alert below would name the wrong job if it did.
+      - name: Mirror 分析表紀錄 into 紀錄總表
+        id: record_sync
+        continue-on-error: true
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: uv run python baseball/npb_record_sync.py
+
+      - name: Send 紀錄總表 failure Telegram message
+        if: steps.record_sync.outcome == 'failure'
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=NPB 紀錄總表 mirror failed (the sweep itself was fine). Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
       - name: Send failure Telegram message
         if: failure()
         run: |

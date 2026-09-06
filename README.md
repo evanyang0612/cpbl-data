@@ -18,6 +18,7 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   ├── npb_audit.py                 # Comparator for the weekly NPB history audit
 │   ├── npb_pitching_splits.py       # Starter / bullpen / total ERA by venue
 │   ├── npb_pitching_splits_sheet.py # Writes and paints the 投手主客 tab
+│   ├── npb_record_sync.py           # Mirrors 分析表紀錄 -> 紀錄總表 (other workbook)
 │   └── mlb_games.py                 # Resolves MLB gamePk for an odds event
 ├── migration/
 │   ├── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
@@ -157,6 +158,38 @@ GitHub's own scheduler is not used: on a public repository it disables a
 scheduled workflow after 60 days with no repository activity, and it does so
 silently — a poor property for the job whose purpose is noticing silent drift.
 The `days` input sets the window; the dispatch body carries it.
+
+### 紀錄總表 sync (`baseball/npb_record_sync.py`)
+
+Mirrors **分析表紀錄** into the 紀錄總表 tab of the separate
+「プロ野球データ分析」 workbook. The two are the same 83-column game log — the
+headers were compared cell by cell and differ only in column A, which carries a
+pre-filled 編號 on the target and is blank on the source — so this is a
+sheet-to-sheet copy, not a second scrape. That matters for 被壘打 (total bases
+off the starter), which 分析表紀錄 has and no Yahoo box score exposes.
+
+```bash
+uv run python baseball/npb_record_sync.py --dry-run
+uv run python baseball/npb_record_sync.py
+```
+
+- Games are matched on **(日期, 客場球隊, 主場球隊)**, not on row position, so a
+  game NPB publishes late — or one the weekly audit corrects — updates its own
+  row instead of shifting everything below it.
+- Only **B–CE** is written. Column A's 編號 and the per-row formulas in CF–CK and
+  CZ/DA belong to 紀錄總表 and are already filled down past the end of the season.
+- The header rows are compared before anything is written; if they have drifted
+  apart the run aborts rather than writing into the wrong columns.
+- A run with nothing new writes nothing and says so.
+
+Runs as the last step of **npb_scheduler.yml**, straight after the sweep that
+writes 分析表紀錄 — no schedule of its own, the way `mlb_record_scheduler.yml`
+chains its three scripts. Every sweep therefore leaves 紀錄總表 at most 30
+minutes behind, and it costs a handful of API calls and no Yahoo traffic.
+
+The step is `continue-on-error`: the target workbook belongs to someone else,
+and a permission change there must not turn the NPB updater red. It carries its
+own Telegram alert so a failure there is not reported as a failed sweep.
 
 ### 投手主客 (`baseball/npb_pitching_splits_sheet.py`)
 
