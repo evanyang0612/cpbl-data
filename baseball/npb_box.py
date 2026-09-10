@@ -23,8 +23,31 @@ AWAY_TABLE_ID = "tablefix_t_p"
 HOME_TABLE_ID = "tablefix_b_p"
 LINE_SCORE_ID = "tablefix_ls"
 
+# Seasons before the site's redesign carry no table ids at all; both pitching
+# tables sit in a wrapper of this class instead, in the same away-then-home
+# order.
+PITCHER_WRAPPER_CLASS = "table_pitcher"
+
 # Neither of these names a pitcher: one heads the table, the other sums it.
 NON_PITCHER_NAMES = {"投手", "チーム計", ""}
+
+# The old line score names teams in full. Matched by distinctive substring so
+# that a name already in its short form passes through unchanged — 読売 and
+# 巨人 share no characters, so neither direction works without both keys.
+TEAM_SUBSTRING_MAP = {
+    "読売": "巨人", "巨人": "巨人",
+    "ヤクルト": "ヤクルト",
+    "DeNA": "DeNA", "ＤｅＮＡ": "DeNA", "横浜": "DeNA",
+    "中日": "中日",
+    "阪神": "阪神",
+    "広島": "広島", "カープ": "広島",
+    "西武": "西武",
+    "日本ハム": "日本ハム",
+    "ロッテ": "ロッテ",
+    "オリックス": "オリックス",
+    "ソフトバンク": "ソフトバンク",
+    "楽天": "楽天",
+}
 
 _CANCELLED_MARKERS = ("試合中止", "中止")
 
@@ -142,16 +165,52 @@ def _parse_pitcher_table(table) -> list[PitcherLine]:
     return lines
 
 
+def short_team_name(name: str) -> str:
+    """The spelling 賽錄 and 分析表紀錄 use, from whichever form was given."""
+    for needle, short in TEAM_SUBSTRING_MAP.items():
+        if needle in name:
+            return short
+    return name
+
+
 def _team_name(cell) -> str:
     """The short spelling, which is how 賽錄 and 分析表紀錄 write teams.
 
-    The cell carries both forms, one hidden per breakpoint: `hide_sp` holds
-    「中日ドラゴンズ」 and `hide_pc` holds 「中日」.
+    Since the redesign the cell carries both forms, one hidden per breakpoint:
+    `hide_sp` holds 「中日ドラゴンズ」 and `hide_pc` holds 「中日」. Older pages
+    carry only the full name, so it is shortened by hand.
     """
     short = cell.find("span", class_="hide_pc")
     if short:
         return short.get_text(strip=True)
-    return cell.get_text(strip=True)
+    return short_team_name(cell.get_text(strip=True))
+
+
+def _pitcher_tables(soup):
+    """Both pitching tables, away first, across either page layout."""
+    away = soup.find("table", id=AWAY_TABLE_ID)
+    home = soup.find("table", id=HOME_TABLE_ID)
+    if away is not None and home is not None:
+        return away, home
+    tables = [w.find("table")
+              for w in soup.find_all("div", class_=PITCHER_WRAPPER_CLASS)]
+    tables = [t for t in tables if t is not None]
+    if len(tables) >= 2:
+        return tables[0], tables[1]
+    return None, None
+
+
+def _line_score(soup):
+    """The runs-by-inning table, which is the only place teams are named."""
+    table = soup.find("table", id=LINE_SCORE_ID)
+    if table is not None:
+        return table
+    for candidate in soup.find_all("table"):
+        head = candidate.find("tr")
+        # 計 heads the runs column and appears in no other table on the page.
+        if head and "計" in head.get_text() and len(candidate.find_all("tr")) >= 3:
+            return candidate
+    return None
 
 
 def parse_box(html: str) -> dict | None:
@@ -161,10 +220,9 @@ def parse_box(html: str) -> dict | None:
     `is_cancelled` is what separates them.
     """
     soup = BeautifulSoup(html, "html.parser")
-    away_table = soup.find("table", id=AWAY_TABLE_ID)
-    home_table = soup.find("table", id=HOME_TABLE_ID)
     # Half a page is worse than none: cached, it would read as a game only one
     # side pitched in.
+    away_table, home_table = _pitcher_tables(soup)
     if away_table is None or home_table is None:
         return None
 
@@ -174,7 +232,7 @@ def parse_box(html: str) -> dict | None:
         return None
 
     away = home = ""
-    line_score = soup.find("table", id=LINE_SCORE_ID)
+    line_score = _line_score(soup)
     if line_score:
         rows = line_score.find_all("tr")
         if len(rows) >= 3:

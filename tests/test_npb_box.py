@@ -221,3 +221,71 @@ def test_read_box_returns_the_parsed_game():
     html = _box_html([_pitcher_row("先発")], [_pitcher_row("相手")])
 
     assert npb_box.read_box(html)["away"] == "中日"
+
+
+# --- the pre-2021 layout ---
+
+# Seasons before the redesign carry no table ids at all: the two pitching
+# tables are identified by the wrapper they sit in, and the line score names
+# teams only in full. Everything inside the rows is unchanged.
+def _old_box_html(away_rows, home_rows, *, away="横浜DeNAベイスターズ",
+                  home="広島東洋カープ"):
+    def table(rows):
+        return ('<div class="scroll_wrapper table_score table_pitcher">'
+                f"<table><tbody>{_HEADER_ROW}" + "".join(rows)
+                + "</tbody></table></div>")
+
+    return (
+        "<html><body>"
+        "<table><tbody>"
+        "<tr><th></th><th>1</th><th>計</th><th>H</th><th>E</th></tr>"
+        f"<tr><th>{away}</th><td>0</td><td>2</td><td>4</td><td>0</td></tr>"
+        f"<tr><th>{home}</th><td>0</td><td>1</td><td>7</td><td>1</td></tr>"
+        "</tbody></table>"
+        + table(away_rows) + table(home_rows)
+        + "</body></html>"
+    )
+
+
+def test_old_layout_is_read_through_the_wrapper():
+    html = _old_box_html([_pitcher_row("井納", pitches=91, batters=25,
+                                       whole=7, bb=1, hbp=0, so=4)],
+                         [_pitcher_row("ジョンソン", pitches=114, batters=29,
+                                       whole=8, bb=4, hbp=0, so=8)])
+
+    box = npb_box.parse_box(html)
+
+    assert [p.name for p in box["away_pitchers"]] == ["井納"]
+    assert [p.name for p in box["home_pitchers"]] == ["ジョンソン"]
+    assert box["away_pitchers"][0].pitches == 91
+    assert box["home_pitchers"][0].bb == 4
+
+
+# The old line score writes 読売ジャイアンツ where the sheets write 巨人, and
+# the two share no characters, so a substring match alone will not do.
+@pytest.mark.parametrize("full,short", [
+    ("読売ジャイアンツ", "巨人"),
+    ("東京ヤクルトスワローズ", "ヤクルト"),
+    ("横浜DeNAベイスターズ", "DeNA"),
+    ("中日ドラゴンズ", "中日"),
+    ("阪神タイガース", "阪神"),
+    ("広島東洋カープ", "広島"),
+    ("埼玉西武ライオンズ", "西武"),
+    ("北海道日本ハムファイターズ", "日本ハム"),
+    ("千葉ロッテマリーンズ", "ロッテ"),
+    ("オリックス・バファローズ", "オリックス"),
+    ("福岡ソフトバンクホークス", "ソフトバンク"),
+    ("東北楽天ゴールデンイーグルス", "楽天"),
+])
+def test_full_team_names_shorten_the_way_the_sheets_spell_them(full, short):
+    assert npb_box.short_team_name(full) == short
+
+
+def test_old_layout_shortens_its_team_names():
+    html = _old_box_html([_pitcher_row("先発")], [_pitcher_row("相手")],
+                         away="読売ジャイアンツ", home="東北楽天ゴールデンイーグルス")
+
+    box = npb_box.parse_box(html)
+
+    assert box["away"] == "巨人"
+    assert box["home"] == "楽天"
