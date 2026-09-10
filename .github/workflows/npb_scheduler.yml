@@ -67,6 +67,25 @@ jobs:
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=NPB 野球日記 update failed (the sweep itself was fine). Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+      # Yahoo's pinpoint forecast covers today and nothing else, and npb.jp's
+      # box scores carry no weather at all, so a reading missed on the day
+      # cannot be recovered afterwards. Riding along on every sweep is what
+      # makes the last reading before first pitch the one that gets kept.
+      - name: Record today's weather
+        id: weather
+        continue-on-error: true
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: uv run python -m baseball.npb_weather
+
+      - name: Send 天氣 failure Telegram message
+        if: steps.weather.outcome == 'failure'
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=NPB 天氣 log failed (the sweep itself was fine). Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+
       - name: Send failure Telegram message
         if: failure()
         run: |
