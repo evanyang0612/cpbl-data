@@ -20,9 +20,13 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   ├── npb_pitching_splits_sheet.py # Writes and paints the 投手主客 tab
 │   ├── npb_record_sync.py           # Mirrors 分析表紀錄 -> 紀錄總表 (other workbook)
 │   ├── npb_diary.py                 # Keeps the 2026・野球日記 tab current
+│   ├── npb_box.py                   # Reads a pitching line out of an npb.jp box score
+│   ├── npb_weather.py               # Records each game's weather, which cannot be backfilled
 │   └── mlb_games.py                 # Resolves MLB gamePk for an odds event
 ├── migration/
 │   ├── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
+│   ├── backfill_npb_box.py          # Caches every npb.jp box score from 2016 on
+│   ├── write_npb_starter_log.py     # Lays the cached box scores out as 先発明細
 │   └── add_npb_pitching_splits_sheet.py  # Rebuilds 投手主客 by hand
 └── .github/workflows/
     ├── cpbl_scheduler.yml           # Cron: every 30 min, 07:00–16:00 UTC (via Japan VPN)
@@ -272,6 +276,67 @@ is the second minus the first — one source, no second scrape.
   innings has no ERA at all rather than a `0.00` that would rank first.
 - Interleague games count towards a team's own totals, so rows are filed by team
   rather than by the 聯盟 label on the game.
+
+### 先発明細 / box-score backfill (`baseball/npb_box.py`)
+
+`賽錄` records a starter's innings and earned runs and nothing else, so any
+question about *how* he got there — his walks, his pitch count — had only the
+current season behind it. npb.jp still serves per-pitcher box scores back to
+2016, and this reads them.
+
+```bash
+python migration/backfill_npb_box.py --years 2026 --months 8   # a trial
+python migration/backfill_npb_box.py                           # 2016 onward
+python migration/write_npb_starter_log.py --dry-run
+python migration/write_npb_starter_log.py
+```
+
+- Yahoo serves only the current season — every earlier game comes back empty
+  rather than 404 — which is why this uses npb.jp. 2015 and earlier have no
+  schedule pages at all, so that is where the history ends.
+- Two page layouts. Since the redesign the pitching tables carry ids
+  (`tablefix_t_p` / `tablefix_b_p`); up to 2020 they sit in a `table_pitcher`
+  wrapper instead and the line score names teams only in full.
+- **A refused request is answered with a 200 and a page with no tables**,
+  which is indistinguishable from a rainout except that a rainout says so.
+  `read_box()` raises rather than returning None for the ambiguous case, so a
+  throttled fetch can never be cached as a game nobody pitched. A run of them
+  stops the backfill; every game already fetched is cached, so a re-run
+  resumes.
+- A monthly schedule page lists games past its own month, so games dated today
+  or later are skipped rather than fetched — their box pages are served empty
+  and would otherwise trip the same stop.
+- Verified against 分析表紀錄 over 84 starter-starts: 局數, 打者, 安打, HR and
+  責失 match exactly, and so does 四球 **once read as 四死**. That column holds
+  walks plus hit batsmen despite its name, as does 打数, which is really
+  batters faced. `先発明細` keeps 四球 and 死球 in separate columns; merging
+  them could not be undone.
+- Innings are written as a decimal. `.1`/`.2` notation cannot be summed, and
+  every rolling window this table feeds is a sum.
+- Relief appearances are parsed and cached but not written to the sheet —
+  bullpen fatigue is a different question with a different shape.
+
+### 天氣 (`baseball/npb_weather.py`)
+
+One row per game per day in the **天氣** tab: condition, temperature, rain,
+and the wind direction resolved against the park's bearing.
+
+```bash
+python -m baseball.npb_weather --dry-run
+python -m baseball.npb_weather
+```
+
+- `npb_starters` already reads this forecast for the Telegram broadcast and
+  then discards it. **The reading cannot be recovered later**: Yahoo's pinpoint
+  forecast covers today and nothing else, and npb.jp's box scores carry no
+  weather at all. A day not recorded on the day is gone, which is why this
+  rides along on the half-hourly sweep.
+- Keyed on (date, park) and overwritten by each sweep, so what survives is the
+  last reading before first pitch rather than a dozen near-identical rows.
+- A missing number stays blank rather than becoming zero — 0mm of rain is a dry
+  evening, a blank is a forecast never seen.
+- Covered parks are flagged; six of the twelve are roofed, and rain and wind
+  mean nothing there.
 
 ---
 
