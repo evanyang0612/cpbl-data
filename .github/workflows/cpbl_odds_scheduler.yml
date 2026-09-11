@@ -1,0 +1,60 @@
+name: CPBL Odds Scraper
+
+# Driven from cron-job.org via workflow_dispatch, like the other odds jobs:
+# GitHub's own scheduler drops a large share of runs, and a dropped run is a
+# missing snapshot rather than a late one.
+#
+# Trigger on the half hour around the clock. PS3838 posts a CPBL slate at no
+# fixed hour — on 2026-09-11 the 18:35 games were already priced by 10:06 TW,
+# eight hours out — and an opening line missed is gone, so guessing a window
+# only risks the one capture that matters. A run with no board costs a single
+# request and nothing else: with no games parsed, nothing is written and the
+# CPBL schedule is never asked for.
+#
+#   curl -X POST -H "Accept: application/vnd.github+json" \
+#     -H "Authorization: Bearer $GITHUB_PAT" \
+#     https://api.github.com/repos/evanyang0612/cpbl-data/actions/workflows/cpbl_odds_scheduler.yml/dispatches \
+#     -d '{"ref":"main"}'
+on:
+  workflow_dispatch:
+
+# Two overlapping runs would append the same snapshot twice.
+concurrency:
+  group: cpbl-odds-scraper
+  cancel-in-progress: false
+
+jobs:
+  scrape-odds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Scrape CPBL odds
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          # The 盤口 tab lives in the CPBL spreadsheet, beside 賽程.
+          SPREADSHEET_KEY: ${{ secrets.SPREADSHEET_KEY }}
+          # Both hosts refuse datacenter IPs — PS3838 geo-blocks them, and
+          # cpbl.com.tw (read for the GameSno join) blocks them outright — so
+          # the run tunnels through the same residential proxy the CPBL
+          # scraper uses.
+          DECODO_PROXY_URL: ${{ secrets.DECODO_PROXY_URL }}
+        run: uv run python -m baseball.pinnacle_odds --league cpbl
+
+      - name: Send failure Telegram message
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=CPBL odds scraper failed. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

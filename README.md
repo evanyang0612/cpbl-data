@@ -14,7 +14,7 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 ├── lastTenGames.gs                  # Google Apps Script for CPBL 近十場 sheet
 ├── lastTenGamesPreseason.gs         # Google Apps Script for CPBL 熱身賽 近十場 sheet
 ├── baseball/
-│   ├── pinnacle_odds.py             # PS3838 odds scraper (NPB + MLB) -> 盤口 sheets
+│   ├── pinnacle_odds.py             # PS3838 odds scraper (NPB + MLB + CPBL) -> 盤口 sheets
 │   ├── npb_audit.py                 # Comparator for the weekly NPB history audit
 │   ├── npb_pitching_splits.py       # Starter / bullpen / total ERA by venue
 │   ├── npb_pitching_splits_sheet.py # Writes and paints the 投手主客 tab
@@ -23,7 +23,8 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   ├── npb_box.py                   # Reads a pitching line out of an npb.jp box score
 │   ├── npb_tenki.py                 # tenki.jp hourly forecast, by ballpark
 │   ├── npb_weather.py               # Records each game's weather, which cannot be backfilled
-│   └── mlb_games.py                 # Resolves MLB gamePk for an odds event
+│   ├── mlb_games.py                 # Resolves MLB gamePk for an odds event
+│   └── cpbl_games.py                # Resolves CPBL GameSno for an odds event
 ├── migration/
 │   ├── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
 │   ├── backfill_npb_box.py          # Caches every npb.jp box score from 2016 on
@@ -35,7 +36,8 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
     ├── npb_scheduler.yml            # Cron: every 30 min, 08:00–14:00 UTC
     ├── npb_audit_scheduler.yml      # cron-job.org: weekly, Monday 14:00 JST
     ├── npb_odds_scheduler.yml       # Cron: every 30 min, 01:00–10:30 UTC
-    └── mlb_odds_scheduler.yml       # Cron: hourly 13:00–16:00, then every 30 min 17:00–03:30 UTC
+    ├── mlb_odds_scheduler.yml       # Cron: hourly 13:00–16:00, then every 30 min 17:00–03:30 UTC
+    └── cpbl_odds_scheduler.yml      # cron-job.org: every 30 min, around the clock
 ```
 
 ---
@@ -455,16 +457,18 @@ Snapshots pre-game betting lines from the PS3838 public compact feed
 appends them to a `盤口` worksheet, so opening and closing lines can be compared
 against recorded results to measure edge.
 
-One scraper serves both leagues; pick one with `--league`:
+One scraper serves all three leagues; pick one with `--league`:
 
-| League | `--league` | PS3838 league id | Target spreadsheet | Join key    |
-| ------ | ---------- | ---------------- | ------------------ | ----------- |
-| NPB    | `npb`      | 187703           | NPB (with 彙資)     | —           |
-| MLB    | `mlb`      | 246              | MLB (with 紀錄)     | `mlb_game_pk` |
+| League | `--league` | PS3838 league id | PS3838 league name | Target spreadsheet | Join key        |
+| ------ | ---------- | ---------------- | ------------------ | ------------------ | --------------- |
+| NPB    | `npb`      | 187703           | 日本職業棒球賽       | NPB (with 彙資)     | —               |
+| MLB    | `mlb`      | 246              | MLB                | MLB (with 紀錄)     | `mlb_game_pk`   |
+| CPBL   | `cpbl`     | 208753           | 台北 - 職業聯賽      | CPBL (with 賽程)    | `cpbl_game_sno` |
 
 ```bash
 uv run python -m baseball.pinnacle_odds --league mlb --dry-run   # print, write nothing
 uv run python -m baseball.pinnacle_odds --league mlb             # append snapshot rows
+uv run python -m baseball.pinnacle_odds --league cpbl            # CPBL, into its own 盤口 tab
 ```
 
 ### Notes
@@ -483,14 +487,33 @@ uv run python -m baseball.pinnacle_odds --league mlb             # append snapsh
   time, which also disambiguates doubleheaders.
 - PS3838 geo-blocks datacenter IPs, so CI tunnels through the Decodo residential
   proxy (`DECODO_PROXY_URL`). Locally, with no proxy set, requests go direct.
-- Override the target sheet with `ODDS_SPREADSHEET_KEY` (NPB) or
-  `MLB_ODDS_SPREADSHEET_KEY` (MLB).
+- Override the target sheet with `ODDS_SPREADSHEET_KEY` (NPB),
+  `MLB_ODDS_SPREADSHEET_KEY` (MLB) or `CPBL_ODDS_SPREADSHEET_KEY` (CPBL).
 
 ### CPBL
 
-PS3838 does not appear to book CPBL — only MLB, NPB and KBO have shown up in the
-feed. Since the feed lists only leagues with currently open markets, confirm on a
-CPBL game day, 2–4 hours before first pitch:
+PS3838 does book CPBL, as **台北 - 職業聯賽** (league id 208753) — a name with
+neither "CPBL" nor "中華職棒" in it, which is why it went unnoticed until the
+scraper started reading the whole board (`mk=3`) instead of only the TODAY one.
+
+- The board carries the full game only. CPBL rows are all `period = final`;
+  there is no 1st-5-innings market to record.
+- `cpbl_game_sno` and `kind_code` are resolved by `baseball/cpbl_games.py` from
+  CPBL's own schedule, so a row joins to `賽程` (column B) the way MLB rows join
+  to `紀錄` by gamePk. Teams are matched by the short names `賽程` stores
+  (`樂天`, `統一7-ELEVEn`, …) plus nearest start time, which also separates a
+  doubleheader.
+- `kind_code` tells `正式賽` (`A`) from `熱身賽` (`G`); the two number their
+  games separately, so a `GameSno` alone does not identify a game. The preseason
+  schedule is only fetched when a game finds no regular-season match.
+- A game that cannot be matched — or a run where cpbl.com.tw is unreachable —
+  still gets its snapshot, with a blank `cpbl_game_sno`; date and both team
+  names are on the row either way.
+- The job reads cpbl.com.tw as well as PS3838, and both refuse datacenter IPs,
+  so CI needs `DECODO_PROXY_URL` for the same reason the CPBL scraper does.
+
+To see what PS3838 is booking right now (on a game day, 2–4 hours before first
+pitch):
 
 ```bash
 uv run python migration/probe_cpbl_odds.py
@@ -503,9 +526,9 @@ uv run python migration/probe_cpbl_odds.py
 | Secret               | Used by        | Description                             |
 | -------------------- | -------------- | --------------------------------------- |
 | `GOOGLE_CREDENTIALS` | CPBL, NPB, MLB | Google service account JSON (full body) |
-| `SPREADSHEET_KEY`    | CPBL           | Google Sheets spreadsheet ID for CPBL   |
+| `SPREADSHEET_KEY`    | CPBL, Odds     | Google Sheets spreadsheet ID for CPBL   |
 | `NORDVPN_TOKEN`      | CPBL           | NordVPN token for WireGuard tunnel      |
-| `DECODO_PROXY_URL`   | Odds           | Decodo residential proxy for PS3838     |
+| `DECODO_PROXY_URL`   | CPBL, Odds     | Decodo residential proxy for PS3838 and cpbl.com.tw |
 | `TELEGRAM_BOT_TOKEN` | CPBL, NPB, MLB | Telegram bot token for failure alerts   |
 | `TELEGRAM_CHAT_ID`   | CPBL, NPB, MLB | Telegram chat ID for failure alerts     |
 

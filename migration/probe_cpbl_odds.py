@@ -1,20 +1,21 @@
-"""Check whether PS3838 books CPBL at all.
+"""Show which baseball leagues PS3838 is booking right now.
+
+Written to answer whether PS3838 books CPBL at all. It does — as
+**台北 - 職業聯賽** (league id 208753), a name with nothing in it to search
+for, which is why the question went unanswered for so long. CPBL odds are now
+scraped by ``baseball.pinnacle_odds --league cpbl``; this stays as the probe
+for the next league, and for checking what the board is carrying.
 
 The compact feed and the leagues endpoint only list leagues with *currently
-open* markets, so a league's absence proves nothing on an off day. Baseball
-lines also appear just a few hours before first pitch. Run this on a CPBL game
-day, roughly 2–4 hours before the 18:35 (TW) first pitch, e.g.:
+open* markets, and baseball lines appear just a few hours before first pitch,
+so a league's absence proves nothing on an off day. Run it on a game day,
+roughly 2-4 hours before the 18:35 (TW) first pitch:
 
     uv run python migration/probe_cpbl_odds.py
 
-It prints every baseball league PS3838 is offering right now, flags anything
-that looks like CPBL, and dumps a sample CPBL event if one exists. Writes
-nothing — safe to run repeatedly.
-
-If CPBL never shows up across a few game days, PS3838 does not book it, and a
-CPBL 盤口 sheet has to come from a retail source (台灣運彩 / 玩運彩) instead —
-different market, much wider margin, and both need the CPBL scraper's existing
-VPN/proxy to reach from CI.
+It prints every baseball league PS3838 is offering right now, flags the ones
+that look Taiwanese, and dumps their parsed snapshots. Writes nothing — safe
+to run repeatedly.
 """
 
 import json
@@ -35,8 +36,10 @@ from baseball.pinnacle_odds import (  # noqa: E402
 
 TW = timezone(timedelta(hours=8))
 
-# Any of these in a league name means we've found it.
-CPBL_HINTS = ("中華職", "中華職業棒球", "CPBL", "Taiwan", "台灣", "臺灣")
+# Any of these in a league name means we've found it. PS3838 books CPBL as
+# "台北 - 職業聯賽", so the league's own name is not among them.
+CPBL_HINTS = ("中華職", "中華職業棒球", "CPBL", "Taiwan", "台灣", "臺灣", "台北",
+              "臺北")
 
 LEAGUES_PATH = "/sports-service/sv/odds/leagues"
 
@@ -98,9 +101,8 @@ def main() -> None:
         print(f"  {league_id:>8}  {name}  events={count}{mark}")
 
     if not cpbl_ids:
-        print("\n[probe] No CPBL league in the feed right now.")
-        print("[probe] If it's a CPBL game day and first pitch is <4h away, "
-              "PS3838 almost certainly does not book CPBL.")
+        print("\n[probe] No CPBL league in the feed right now — the board is "
+              "closed, or PS3838 renamed it again.")
         return
 
     print(f"\n[probe] CPBL candidate league id(s): {cpbl_ids}")
