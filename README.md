@@ -37,7 +37,7 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
     ├── npb_audit_scheduler.yml      # cron-job.org: weekly, Monday 14:00 JST
     ├── npb_odds_scheduler.yml       # Cron: every 30 min, 01:00–10:30 UTC
     ├── mlb_odds_scheduler.yml       # Cron: hourly 13:00–16:00, then every 30 min 17:00–03:30 UTC
-    └── cpbl_odds_scheduler.yml      # cron-job.org: every 30 min, 06:00–11:00 UTC
+    └── cpbl_odds_scheduler.yml      # cron-job.org: every 30 min, around the clock
 ```
 
 ---

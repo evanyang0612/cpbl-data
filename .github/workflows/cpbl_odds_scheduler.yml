@@ -4,9 +4,12 @@ name: CPBL Odds Scraper
 # GitHub's own scheduler drops a large share of runs, and a dropped run is a
 # missing snapshot rather than a late one.
 #
-# CPBL cards are short and start together — three games at 18:35 TW on a
-# weekday, one at 17:05 at weekends — so the board opens and closes inside a
-# narrow window. Triggering from mid-afternoon through first pitch is enough.
+# Trigger on the half hour around the clock. PS3838 posts a CPBL slate at no
+# fixed hour — on 2026-09-11 the 18:35 games were already priced by 10:06 TW,
+# eight hours out — and an opening line missed is gone, so guessing a window
+# only risks the one capture that matters. A run with no board costs a single
+# request and nothing else: with no games parsed, nothing is written and the
+# CPBL schedule is never asked for.
 #
 #   curl -X POST -H "Accept: application/vnd.github+json" \
 #     -H "Authorization: Bearer $GITHUB_PAT" \
