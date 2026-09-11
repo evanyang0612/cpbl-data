@@ -21,6 +21,7 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   ├── npb_record_sync.py           # Mirrors 分析表紀錄 -> 紀錄總表 (other workbook)
 │   ├── npb_diary.py                 # Keeps the 2026・野球日記 tab current
 │   ├── npb_box.py                   # Reads a pitching line out of an npb.jp box score
+│   ├── npb_tenki.py                 # tenki.jp hourly forecast, by ballpark
 │   ├── npb_weather.py               # Records each game's weather, which cannot be backfilled
 │   └── mlb_games.py                 # Resolves MLB gamePk for an odds event
 ├── migration/
@@ -327,10 +328,25 @@ python -m baseball.npb_weather
 ```
 
 - `npb_starters` already reads this forecast for the Telegram broadcast and
-  then discards it. **The reading cannot be recovered later**: Yahoo's pinpoint
-  forecast covers today and nothing else, and npb.jp's box scores carry no
-  weather at all. A day not recorded on the day is gone, which is why this
-  rides along on the half-hourly sweep.
+  then discards it. **The reading cannot be recovered later**: the forecast
+  covers today and nothing else, and npb.jp's box scores carry no weather at
+  all. A day not recorded on the day is gone, which is why this rides along on
+  the half-hourly sweep.
+- The forecast comes from **tenki.jp** (`baseball/npb_tenki.py`), with Yahoo as
+  the fallback. tenki.jp steps an hour at a time where Yahoo steps three, so an
+  18:00 first pitch is read rather than approximated, and it keeps answering
+  after first pitch where Yahoo's game-card forecast disappears.
+- tenki.jp forecasts municipalities, not ballparks, so the grounds are mapped by
+  hand. The thirteen home grounds are keyed on their **ward** — Yokohama is
+  437km² and its ground is on the harbour, so a city-wide reading would average
+  the sea breeze away. The 地方球場 are keyed on the city: they see single
+  figures of games a decade, and ward names collide nationwide (中央区 alone
+  resolves to Tokyo's). Every open-air ground used since 2016 is covered.
+- `RAIN_FLAG_MM` changed with the source. Yahoo reported a three-hour total,
+  where 1.0 was the mark; tenki.jp reports the rate in the hour of first pitch,
+  a third of the number for the same weather. 0.5 is a judgement, not a
+  calibration — this log is what will eventually settle it, against the 中止
+  games already marked in the box-score cache.
 - Keyed on (date, park) and overwritten by each sweep, so what survives is the
   last reading before first pitch rather than a dozen near-identical rows.
 - A missing number stays blank rather than becoming zero — 0mm of rain is a dry

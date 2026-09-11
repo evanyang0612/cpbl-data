@@ -166,10 +166,26 @@ ROOFED = ("ドーム", "京セラD", "エスコンF", "PayPay")
 # The temperature is the one figure that still means something there.
 SHELTERED = ("ベルーナ",)
 
-# Rainfall at first pitch, in mm over the three-hour step, past which the game
-# is worth flagging. Most rows read `降水 0mm`, which trains the eye to skip
-# them — so the one that could stop play has to break the pattern.
-RAIN_FLAG_MM = 1.0
+# Rainfall at first pitch, in mm per hour, past which the game is worth
+# flagging. Most rows read `降水 0mm`, which trains the eye to skip them — so
+# the one that could stop play has to break the pattern.
+#
+# The unit changed with the source. Yahoo reported a three-hour total, where
+# 1.0 was the mark; tenki.jp reports the rate in the hour of first pitch, which
+# needs no smearing correction but is a third of the number for the same
+# weather. 0.5 sits between the arithmetic equivalent and the old value: a
+# reading that low is unambiguously rain falling at first pitch, and the flag
+# exists to catch what could stop play, not only what already has.
+#
+# It is a judgement, not a calibration — there is no historical weather to fit
+# against. The 天氣 log now accumulating is what will settle it: a season of
+# readings joined to the 中止 games already marked in .cache/npb_box/ answers
+# directly what rate actually precedes a call-off.
+#
+# A ground that falls back to Yahoo is still read in mm/3h and will over-flag
+# slightly against this threshold. That is the safe direction, and with every
+# open-air ground on record mapped to tenki.jp it should not arise.
+RAIN_FLAG_MM = 0.5
 
 # Clockwise from straight out to centre field, in 45-degree steps.
 _ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
@@ -411,6 +427,28 @@ def _first_pitch_hour(html: str) -> int:
     return int(match.group(1)) if match else 18
 
 
+def _tenki_forecast(venue: str, game_date: str, hour: int, *, fetch):
+    """The tenki.jp reading for a ground, or None to fall back to Yahoo.
+
+    None covers both halves of the fallback: a 地方球場 that is not on the map,
+    and a page that failed to load or parse. Neither is worth a broadcast
+    without a sky, so the caller tries Yahoo instead.
+    """
+    from baseball import npb_tenki
+
+    url = npb_tenki.forecast_url(venue)
+    if not url:
+        return None
+    try:
+        forecast = npb_tenki.parse_forecast(fetch(url), game_date, hour)
+    except Exception as exc:
+        print(f"[starters] tenki.jp for {venue} failed ({exc}); using Yahoo")
+        return None
+    if forecast is None:
+        return None
+    return replace(forecast, url=url, venue=venue)
+
+
 def fetch_slate(game_date: str, *, fetch=_get) -> Slate:
     """Starters and forecasts for ``game_date``, from the same game pages.
 
@@ -445,16 +483,25 @@ def fetch_slate(game_date: str, *, fetch=_get) -> Slate:
         sides = _parse_teams(page, wanted)
         if sides is None:
             continue
-        forecast = _parse_weather(page)
         venue = parse_venue(page)
-        if forecast is not None and is_roofed(venue):
-            forecast = None   # nothing outside reaches the field
+        if is_roofed(venue):
+            continue          # nothing outside reaches the field
+
+        # tenki.jp first: it steps an hour at a time where Yahoo steps three,
+        # so an 18:00 first pitch is read rather than approximated. It has no
+        # entry for a 地方球場, and Yahoo's own reading is the fallback there.
+        hour = _first_pitch_hour(page)
+        forecast = _tenki_forecast(venue, game_date, hour, fetch=fetch)
+        if forecast is not None:
+            weather.update({team: forecast for team in sides if team})
+            continue
+
+        forecast = _parse_weather(page)
         if forecast is not None and forecast.url:
             # The icon on the game page gives the condition; the page it links
             # to has the temperature and rainfall for the hour of first pitch.
             try:
-                detail = parse_forecast(fetch(forecast.url), game_date,
-                                        _first_pitch_hour(page))
+                detail = parse_forecast(fetch(forecast.url), game_date, hour)
             except Exception as exc:
                 print(f"[starters] forecast for {game_id} failed ({exc})")
                 detail = None
