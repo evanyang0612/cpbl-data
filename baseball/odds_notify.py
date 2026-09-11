@@ -36,7 +36,7 @@ from functools import cache
 from baseball import asian_lines as al
 from baseball.pinnacle_odds import LEAGUES, NPB, LeagueSpec, fetch_baseball_events, parse_events
 
-LEAGUE_TITLES = {"npb": "日職", "mlb": "美職"}
+LEAGUE_TITLES = {"npb": "日職", "mlb": "美職", "cpbl": "中職"}
 
 # Shown wherever the ladder was too thin to price a line.
 MISSING = "—"

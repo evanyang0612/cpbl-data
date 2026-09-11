@@ -1,6 +1,8 @@
-"""Unit tests for the PS3838 NPB/MLB odds parser (baseball/pinnacle_odds.py)."""
+"""Unit tests for the PS3838 NPB/MLB/CPBL odds parser (baseball/pinnacle_odds.py)."""
 
 from datetime import datetime, timedelta, timezone
+
+import requests
 
 from baseball import pinnacle_odds as po
 from baseball.mlb_games import MlbGameIndex
@@ -326,3 +328,103 @@ def test_enrich_mlb_fills_join_columns(monkeypatch):
     assert all(s["mlb_game_pk"] == 823520 for s in snapshots)
     assert all(s["game_date"] == "2026-08-03" for s in snapshots)
     assert all(s["home_abbr"] == "NYY" for s in snapshots)
+
+
+# --- CPBL -----------------------------------------------------------------
+
+CPBL = po.CPBL_LEAGUE_ID
+# PS3838 books CPBL as "台北 - 職業聯賽", and only the full game: the board
+# carries no 1st-5-innings period for it.
+CPBL_START_MS = 1789122900000  # 2026-09-11 18:35 TW
+
+
+def _cpbl_raw():
+    game = [1635713128, "樂天桃猿", "中信兄弟", 7, CPBL_START_MS, 0, 0, 8,
+            {"0": FULL_PERIOD}]
+    game.extend([0] * (24 - len(game)))
+    game.extend(["Rakuten Monkeys", "CTBC Brothers"])
+    return {"n": [[po.BASEBALL_SPORT_ID, "Baseball",
+                   [[CPBL, "台北 - 職業聯賽", [game]]]]],
+            "l": None}
+
+
+def _cpbl_index():
+    from baseball.cpbl_games import CpblGameIndex
+
+    return CpblGameIndex([{
+        "GameSno": 323, "KindCode": "A", "GameDate": "2026-09-11T00:00:00",
+        "GameDateTimeS": "2026-09-11T18:35:00",
+        "HomeTeamName": "樂天桃猿", "VisitingTeamName": "中信兄弟",
+    }])
+
+
+def test_cpbl_uses_the_賽程_short_names_and_its_own_columns():
+    rows = po.parse_events(_cpbl_raw(), league=po.CPBL)
+    assert len(rows) == 1  # full game only
+    row = rows[0]
+    assert row["period"] == "final"
+    assert (row["home_norm"], row["away_norm"]) == ("樂天", "中信兄弟")
+    assert (row["home_team"], row["away_team"]) == ("樂天桃猿", "中信兄弟")
+    assert "start_tpe" in row and "start_jst" not in row
+    assert row["game_date"] == "2026-09-11"
+
+
+def test_cpbl_rows_follow_cpbl_headers():
+    rows = po.parse_events(_cpbl_raw(), league=po.CPBL)
+    rows[0]["cpbl_game_sno"] = "323"
+    rows[0]["kind_code"] = "A"
+    values = po.snapshots_to_rows(rows, "open", "2026-09-11 15:00:00", po.CPBL)
+    headers = po.CPBL.sheet_headers()
+    row = dict(zip(headers, values[0]))
+    assert row["cpbl_game_sno"] == "323"
+    assert row["kind_code"] == "A"
+    assert row["snapshot_type"] == "open"
+    assert len(values[0]) == len(headers)
+
+
+def test_enrich_cpbl_fills_the_join_columns(monkeypatch):
+    monkeypatch.setattr("baseball.cpbl_games.build_index",
+                        lambda starts, **kw: _cpbl_index())
+    snapshots = po.parse_events(_cpbl_raw(), league=po.CPBL)
+    po.enrich_cpbl(snapshots)
+    assert snapshots[0]["cpbl_game_sno"] == "323"
+    assert snapshots[0]["kind_code"] == "A"
+    assert snapshots[0]["game_date"] == "2026-09-11"
+
+
+def test_enrich_cpbl_falls_back_to_the_preseason_board(monkeypatch):
+    """熱身賽 (kindCode G) shares the board in Feb/March, and costs a second
+    fetch — so it is only asked for once the regular season comes up empty."""
+    from baseball.cpbl_games import CpblGameIndex
+
+    asked = []
+
+    def fake_build(starts, *, kind_codes=("A",), **kw):
+        asked.append(tuple(kind_codes))
+        if kind_codes == ("A",):
+            return CpblGameIndex([])
+        return CpblGameIndex([{
+            "GameSno": 7, "KindCode": "G", "GameDate": "2026-09-11T00:00:00",
+            "GameDateTimeS": "2026-09-11T18:35:00",
+            "HomeTeamName": "樂天桃猿", "VisitingTeamName": "中信兄弟",
+        }])
+
+    monkeypatch.setattr("baseball.cpbl_games.build_index", fake_build)
+    snapshots = po.parse_events(_cpbl_raw(), league=po.CPBL)
+    po.enrich_cpbl(snapshots)
+    assert asked == [("A",), ("G",)]
+    assert snapshots[0]["cpbl_game_sno"] == "7"
+    assert snapshots[0]["kind_code"] == "G"
+
+
+def test_enrich_cpbl_leaves_the_snapshot_usable_when_the_schedule_is_down(
+        monkeypatch, capsys):
+    """A blank join key beats no snapshot: the row still carries date + teams."""
+    def boom(starts, **kw):
+        raise requests.RequestException("cpbl.com.tw unreachable")
+
+    monkeypatch.setattr("baseball.cpbl_games.build_index", boom)
+    snapshots = po.parse_events(_cpbl_raw(), league=po.CPBL)
+    po.enrich_cpbl(snapshots)
+    assert snapshots[0].get("cpbl_game_sno", "") == ""
+    assert "schedule lookup failed" in capsys.readouterr().out

@@ -1,4 +1,4 @@
-"""Scrape NPB and MLB betting lines from the PS3838 public compact odds feed.
+"""Scrape NPB, MLB and CPBL betting lines from the PS3838 public compact odds feed.
 
 PS3838's web app is a React SPA that reads odds from a public JSON endpoint
 (`/sports-service/sv/compact/events`) which needs **no login and no API
@@ -26,10 +26,11 @@ Prices are decimal odds as strings ("1.826"); "" means no price.
 This module fetches, parses, and (optionally) appends snapshot rows to a
 ``盤口`` worksheet, one per league: NPB lines go to the main NPB spreadsheet
 (``NPB_SPREADSHEET_KEY``, alongside 彙資/分析表紀錄), MLB lines to the MLB
-spreadsheet (alongside 紀錄). Both so open/close lines can be compared against
-the recorded games to measure edge. Pick the league with ``--league`` and
-override the target sheet with ``ODDS_SPREADSHEET_KEY`` /
-``MLB_ODDS_SPREADSHEET_KEY``.
+spreadsheet (alongside 紀錄), CPBL lines to the CPBL spreadsheet (alongside
+賽程/彙資). All so open/close lines can be compared against the recorded games
+to measure edge. Pick the league with ``--league`` and override the target
+sheet with ``ODDS_SPREADSHEET_KEY`` / ``MLB_ODDS_SPREADSHEET_KEY`` /
+``CPBL_ODDS_SPREADSHEET_KEY``.
 """
 
 import argparse
@@ -48,10 +49,11 @@ EVENTS_PATH = "/sports-service/sv/compact/events"
 BASEBALL_SPORT_ID = 3
 NPB_LEAGUE_ID = 187703   # 日本職業棒球賽
 MLB_LEAGUE_ID = 246      # MLB
-CPBL_LEAGUE_ID = 208753  # 台北 - 職業聯賽
+CPBL_LEAGUE_ID = 208753  # 台北 - 職業聯賽 (this is CPBL; the feed never says so)
 KBO_LEAGUE_ID = 6227     # 韓國職業棒球賽
 
 JST = timezone(timedelta(hours=9))
+TPE = timezone(timedelta(hours=8))
 # MLB game dates follow the ballpark's local day, so US Eastern (with DST) is
 # the closest single zone for labelling snapshots; the authoritative
 # ``officialDate`` still comes from the MLB schedule during enrichment.
@@ -127,11 +129,11 @@ SHEET_NAME = "盤口"
 
 
 def _sheet_headers(start_column: str, game_id_column: str,
-                   extra_team_columns: tuple[str, ...] = ()) -> list[str]:
+                   extra_columns: tuple[str, ...] = ()) -> list[str]:
     """Column layout shared by every league's 盤口 sheet.
 
-    Only the start-time column, the join-key column, and any extra team
-    identifiers differ between leagues.
+    Only the start-time column, the join-key column, and whatever else a
+    league needs to identify a game differ between leagues.
     """
     return [
         "captured_at",       # when this snapshot was taken (league-local time)
@@ -144,7 +146,7 @@ def _sheet_headers(start_column: str, game_id_column: str,
         "away_team",
         "home_norm",         # name matching how the league's sheets spell it
         "away_norm",
-        *extra_team_columns,
+        *extra_columns,
         game_id_column,      # join key into the league's record sheet
         "status",            # pregame / live
         "mins_to_start",     # minutes until first pitch (negative once live)
@@ -200,6 +202,16 @@ def _mlb_team_fields(ev: list) -> dict:
     }
 
 
+def _cpbl_team_fields(ev: list) -> dict:
+    """CPBL sheets key teams by the short name 賽程 columns D/F hold."""
+    from baseball.cpbl_games import normalize_team
+
+    return {
+        "home_norm": normalize_team(ev[1]),
+        "away_norm": normalize_team(ev[2]),
+    }
+
+
 @dataclass(frozen=True)
 class LeagueSpec:
     key: str                        # --league value
@@ -210,7 +222,7 @@ class LeagueSpec:
     team_fields: Callable[[list], dict]
     spreadsheet_env: str            # env var overriding the target spreadsheet
     default_spreadsheet_key: Callable[[], str]
-    extra_team_columns: tuple[str, ...] = ()
+    extra_columns: tuple[str, ...] = ()
     # Optional post-parse pass that resolves the join key from the league's own
     # API (see enrich_mlb); receives and mutates the snapshot list.
     enrich: Callable[[list[dict]], None] | None = None
@@ -218,7 +230,7 @@ class LeagueSpec:
 
     def sheet_headers(self) -> list[str]:
         return self.headers or _sheet_headers(
-            self.start_column, self.game_id_column, self.extra_team_columns
+            self.start_column, self.game_id_column, self.extra_columns
         )
 
     def spreadsheet_key(self) -> str:
@@ -236,6 +248,13 @@ def _mlb_spreadsheet_key() -> str:
     # Same spreadsheet as the MLB 紀錄 worksheet (see
     # migration/update_mlb_record.py), so odds can be joined by gamePk.
     return "11FV70TXVAxLTwYH6pLj7HwK1qq-fIa61QrePRCC8YUM"
+
+
+def _cpbl_spreadsheet_key() -> str:
+    # The CPBL spreadsheet that already holds 賽程 / 彙資, so a snapshot joins
+    # to the recorded game by GameSno.
+    import cpbl
+    return cpbl.SPREADSHEET_KEY
 
 
 NPB = LeagueSpec(
@@ -257,13 +276,28 @@ MLB = LeagueSpec(
     start_column="start_et",
     game_id_column="mlb_game_pk",
     team_fields=_mlb_team_fields,
-    extra_team_columns=("home_abbr", "away_abbr"),
+    extra_columns=("home_abbr", "away_abbr"),
     spreadsheet_env="MLB_ODDS_SPREADSHEET_KEY",
     default_spreadsheet_key=_mlb_spreadsheet_key,
     enrich=lambda snapshots: enrich_mlb(snapshots),
 )
 
-LEAGUES = {spec.key: spec for spec in (NPB, MLB)}
+CPBL = LeagueSpec(
+    key="cpbl",
+    league_id=CPBL_LEAGUE_ID,
+    tz=TPE,
+    start_column="start_tpe",
+    game_id_column="cpbl_game_sno",
+    team_fields=_cpbl_team_fields,
+    # 正式賽 (A) / 熱身賽 (G) number their games separately, so a GameSno only
+    # identifies a game alongside the kind code 賽程 was written from.
+    extra_columns=("kind_code",),
+    spreadsheet_env="CPBL_ODDS_SPREADSHEET_KEY",
+    default_spreadsheet_key=_cpbl_spreadsheet_key,
+    enrich=lambda snapshots: enrich_cpbl(snapshots),
+)
+
+LEAGUES = {spec.key: spec for spec in (NPB, MLB, CPBL)}
 
 
 def _build_session() -> requests.Session:
@@ -484,6 +518,58 @@ def enrich_mlb(snapshots: list[dict]) -> None:
         print(f"[odds] {unmatched} snapshot(s) had no MLB schedule match")
 
 
+def enrich_cpbl(snapshots: list[dict]) -> None:
+    """Fill in ``cpbl_game_sno``, ``kind_code`` and ``game_date`` in place.
+
+    Resolved from CPBL's own schedule so every row joins to ``賽程`` by
+    GameSno. A game we cannot match keeps its feed-derived date and a blank
+    GameSno: the row still carries the date and both short names, which is
+    enough to join by hand, and a schedule that is briefly unreachable is no
+    reason to drop the only snapshot of an opening line.
+    """
+    from baseball import cpbl_games
+
+    starts = [s["start"] for s in snapshots if s.get("start")]
+    if not starts:
+        return
+
+    def apply(index, rows: list[dict]) -> list[dict]:
+        missed = []
+        for s in rows:
+            game = index.find(s.get("home_norm", ""), s.get("away_norm", ""),
+                              s.get("start"))
+            if not game:
+                missed.append(s)
+                continue
+            s["cpbl_game_sno"] = game["game_sno"]
+            s["kind_code"] = game["kind_code"]
+            if game["game_date"]:
+                s["game_date"] = game["game_date"]
+        return missed
+
+    def index_for(kind_codes) -> object | None:
+        try:
+            return cpbl_games.build_index(starts, kind_codes=kind_codes)
+        except Exception as exc:  # network, anti-bot token, malformed payload
+            print(f"[odds] CPBL {kind_codes} schedule lookup failed ({exc}); "
+                  "rows keep blank GameSno")
+            return None
+
+    regular = index_for(("A",))
+    if regular is None:
+        return
+    unmatched = apply(regular, snapshots)
+    if unmatched:
+        # 熱身賽 (kindCode G) shares the board with the regular season through
+        # February and March, and costs a second round of requests — so it is
+        # only asked for once the regular season has come up empty.
+        preseason = index_for(("G",))
+        if preseason is not None:
+            unmatched = apply(preseason, unmatched)
+    if unmatched:
+        print(f"[odds] {len(unmatched)} snapshot(s) had no CPBL schedule match")
+
+
 def snapshots_to_rows(snapshots: list[dict], snapshot_type: str,
                       captured_at: str, league: LeagueSpec = NPB) -> list[list]:
     headers = league.sheet_headers()
@@ -591,7 +677,7 @@ def run_once(snapshot_type: str = "interim", *, write: bool = True,
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Scrape NPB / MLB odds from PS3838")
+        description="Scrape NPB / MLB / CPBL odds from PS3838")
     parser.add_argument(
         "--league", default="npb", choices=sorted(LEAGUES),
         help="which league's lines to scrape (default: npb)",
