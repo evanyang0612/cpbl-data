@@ -612,24 +612,60 @@ only reaches back to 2026-01, which is exactly the 2026-03 → 07 hole this
 season's scraper missed; The Odds API is the only one that reaches 2020; and
 nobody sells CPBL, so that one is ours to collect or not at all.
 
-### Before trusting OddsPapi (`baseball/oddspapi.py`)
+### OddsPapi (`baseball/oddspapi.py`) — the same book, read better
 
-Its odds payload is entirely numeric ids (`markets["10286"].outcomes["10287"]`)
-and the docs map none of them for baseball, never say where a handicap or a
-total's line is carried, and never say whether `participant1` is the home side.
-Guessing any of those yields a parser that looks right and prices the wrong
-team, so the writer half is not built until a live board has answered them:
+Read side by side against the PS3838 scraper on 2026-09-13, **27 of 32 fields
+were identical**; the five that differed were only *which rung* each calls the
+main line, never a price. `bookmakerMarketId` even carries PS3838's own league
+id (`line/3/187703/…`). It is the same Pinnacle board, reached a better way:
+
+| | PS3838 (`pinnacle_odds.py`) | OddsPapi |
+| --- | --- | --- |
+| Ladder | 3 rungs | **all of them** (totals 4.5–7.5, spreads ±2.5) |
+| Periods | full + 1st-5 | full + 1st-5 |
+| Resolution | ~30 min sample | **every price change** |
+| CPBL | ✅ | ✅ (tournament 32233) |
+| Cost | free | free |
+
+The full ladder is the point: `baseball/asian_lines.py` needs the whole margin
+curve and has never had it.
 
 ```bash
 ODDSPAPI_KEY=... uv run python -m baseball.oddspapi discover
-ODDSPAPI_KEY=... uv run python -m baseball.oddspapi discover --league cpbl \
-    --out-dir .cache/oddspapi
+ODDSPAPI_KEY=... uv run python -m baseball.oddspapi backfill --league cpbl \
+    --start 2026-09-13 --end 2026-09-20 --dry-run
 ```
 
-It walks sports → tournaments → one fixture → that fixture's board, resolves
-every id against the `/markets` catalogue, and prints whatever is left as
-`未知` — an unmapped id being the finding, not an error. It writes nothing to
-Sheets and is small enough for the free tier.
+`discover` resolves the numeric ids the payload is built from — the odds come
+back as `markets["1316"].outcomes["1317"]` and only the `/markets` catalogue
+says that means *Over Under, handicap 6.0, full game*. It prints anything it
+cannot resolve as `未知`, an unmapped id being the finding rather than an error.
+
+Details worth knowing:
+
+- **`participant1` is the home side**, confirmed against the scraper's own row
+  for 2026-09-13 Seibu vs Nippon-Ham (home 西武 1.8 = outcome `1`).
+- **The main line is the one Pinnacle marks**: every rung is its own market and
+  only the main one's `bookmakerMarketId` starts with `line/` (the rest are
+  `altLine/`). That is a different answer from this repo's balanced-juice
+  heuristic — on 2026-09-13 Pinnacle's main total was 6.0 where the most
+  balanced rung was 6.5 — which is why rows carry `source`.
+- Rows reuse `externalProviders.pinnacleId` as `event_id`, the same number the
+  PS3838 scraper writes, so scraped and collected rows **join exactly**.
+- Auth is a query parameter (`apiKey`), not a header. The free tier rate-limits
+  hard and answers 429 with its own `retryMs`, which `_rate_limited_get`
+  honours. `/fixtures` refuses a window wider than 10 days and answers an empty
+  window with 404 rather than an empty list.
+
+**It cannot reach the past.** On the free tier `/fixtures` lists upcoming games
+with odds and 66 finished ones *all carrying `hasOdds: false`*, and no paging
+parameter changes that — so a finished game cannot be addressed and
+`/historical-odds` only helps for a fixture still on the board. The 2026-03 →
+07 hole still needs The Odds API. Whether a paid OddsPapi tier opens the past
+up is untested.
+
+Run daily, it captures each game's whole line path from the moment the board
+opened — roughly nineteen hours ahead for a next-day NPB game.
 
 ---
 
