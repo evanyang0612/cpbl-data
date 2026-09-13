@@ -24,7 +24,8 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   ├── npb_tenki.py                 # tenki.jp hourly forecast, by ballpark
 │   ├── npb_weather.py               # Records each game's weather, which cannot be backfilled
 │   ├── mlb_games.py                 # Resolves MLB gamePk for an odds event
-│   └── cpbl_games.py                # Resolves CPBL GameSno for an odds event
+│   ├── cpbl_games.py                # Resolves CPBL GameSno for an odds event
+│   └── odds_history.py              # Backfills 盤口 from The Odds API's archive
 ├── migration/
 │   ├── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
 │   ├── backfill_npb_box.py          # Caches every npb.jp box score from 2016 on
@@ -519,6 +520,54 @@ pitch):
 uv run python migration/probe_cpbl_odds.py
 ```
 
+### Backfilling the ledger (`baseball/odds_history.py`)
+
+The scraper above started on 2026-07-18 — 259 NPB games. Telling a 3% edge
+from noise needs something like 4,400 settled bets, so the ledger is three
+seasons short and waiting is the only way it fills.
+
+[The Odds API](https://the-odds-api.com) keeps Pinnacle's board back to
+**2020-06-06** (10-minute snapshots; 5-minute from 2022-09) and carries
+`baseball_npb` and `baseball_mlb`. Rows land in the same `盤口` tab, in the
+scraper's own column order, so backfilled and live rows are one table.
+
+```bash
+export ODDS_API_KEY=...
+
+# does Pinnacle really cover this league, in the archive? ~90 credits
+uv run python -m baseball.odds_history probe --league npb
+
+# what a range costs, spending nothing
+uv run python -m baseball.odds_history backfill --league npb \
+    --start 2026-03-27 --end 2026-07-17 --dry-run
+
+uv run python -m baseball.odds_history backfill --league npb \
+    --start 2026-03-27 --end 2026-07-17 --snapshot-type close
+```
+
+| Range | Game days | Requests | Credits |
+| ----- | --------- | -------- | ------- |
+| 2026 season up to the scraper (3/27–7/17) | 98 | 196 | ~5,900 |
+| Everything the archive holds (2020-06-06 →) | 1,207 | 2,414 | ~72,400 |
+
+The API bills `10 × markets × regions` per request, so every run prints its
+plan first and `--dry-run` spends nothing.
+
+Two things keep the bill down, and one thing to know before trusting the data:
+
+- **One request per start time, not per game.** An NPB card that all starts at
+  18:00 is a single snapshot; every row still carries its own `mins_to_start`.
+- **Off days are skipped.** The `.cache/npb_box` filenames already say which
+  days had games — two winters, most Mondays and the all-star break come out,
+  which is what takes the full backfill from ~137,000 credits to ~72,000. Pass
+  `--every-day` to disable.
+- **The featured endpoint returns Pinnacle's main line only**, not the whole
+  ladder, so backfilled `all_totals` / `all_spreads` hold a single entry. Good
+  enough for closing-line value and for modelling the main number; *not* enough
+  for `baseball/asian_lines.py`, which needs the full margin curve.
+
+The Odds API does not carry CPBL — only NPB, MLB, KBO, MiLB and NCAA.
+
 ---
 
 ## GitHub Secrets
@@ -529,6 +578,7 @@ uv run python migration/probe_cpbl_odds.py
 | `SPREADSHEET_KEY`    | CPBL, Odds     | Google Sheets spreadsheet ID for CPBL   |
 | `NORDVPN_TOKEN`      | CPBL           | NordVPN token for WireGuard tunnel      |
 | `DECODO_PROXY_URL`   | CPBL, Odds     | Decodo residential proxy for PS3838 and cpbl.com.tw |
+| `ODDS_API_KEY`       | Odds backfill  | The Odds API key (manual runs only)     |
 | `TELEGRAM_BOT_TOKEN` | CPBL, NPB, MLB | Telegram bot token for failure alerts   |
 | `TELEGRAM_CHAT_ID`   | CPBL, NPB, MLB | Telegram chat ID for failure alerts     |
 
