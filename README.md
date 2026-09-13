@@ -24,7 +24,9 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   ├── npb_tenki.py                 # tenki.jp hourly forecast, by ballpark
 │   ├── npb_weather.py               # Records each game's weather, which cannot be backfilled
 │   ├── mlb_games.py                 # Resolves MLB gamePk for an odds event
-│   └── cpbl_games.py                # Resolves CPBL GameSno for an odds event
+│   ├── cpbl_games.py                # Resolves CPBL GameSno for an odds event
+│   ├── odds_history.py              # Backfills 盤口 from The Odds API's archive
+│   └── oddspapi.py                  # Discovery pass over OddsPapi's catalogue
 ├── migration/
 │   ├── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
 │   ├── backfill_npb_box.py          # Caches every npb.jp box score from 2016 on
@@ -519,6 +521,152 @@ pitch):
 uv run python migration/probe_cpbl_odds.py
 ```
 
+### Backfilling the ledger (`baseball/odds_history.py`)
+
+The scraper above started on 2026-07-18 — 259 NPB games. Telling a 3% edge
+from noise needs something like 4,400 settled bets, so the ledger is three
+seasons short and waiting is the only way it fills.
+
+[The Odds API](https://the-odds-api.com) keeps Pinnacle's board back to
+**2020-06-06** (10-minute snapshots; 5-minute from 2022-09) and carries
+`baseball_npb` and `baseball_mlb`. Rows land in the same `盤口` tab, in the
+scraper's own column order, so backfilled and live rows are one table.
+
+```bash
+export ODDS_API_KEY=...
+
+# does Pinnacle really cover this league, in the archive? ~90 credits
+uv run python -m baseball.odds_history probe --league npb
+
+# what a range costs, spending nothing
+uv run python -m baseball.odds_history backfill --league npb \
+    --start 2026-03-27 --end 2026-07-17 --dry-run
+
+uv run python -m baseball.odds_history backfill --league npb \
+    --start 2026-03-27 --end 2026-07-17 --snapshot-type close
+```
+
+The archive is a **snapshot series, not a single opening number** — every 10
+minutes from 2020-06-06, every 5 minutes from 2022-09 — so `--leads` is a
+choice about how much of the line's path to buy. Each lead time is another
+full-price request, and each sample labels itself: the furthest out is the
+`open`, the nearest the `close`, anything between `interim`.
+
+Over everything the archive holds (1,207 NPB game days, two start times each):
+
+| `--leads` | Points | Requests | Credits | Plan |
+| --------- | -----: | -------: | ------: | ---- |
+| `10` (close only) | 1 | 2,414 | ~72,400 | $59 / 100K |
+| `720 10` (open + close, **default**) | 2 | 4,828 | ~144,800 | $119 / 5M |
+| `720 240 10` | 3 | 7,242 | ~217,300 | $119 / 5M |
+| every 2h for 12h | 7 | 16,898 | ~506,900 | $119 / 5M |
+| every 30m for 6h | 13 | 31,382 | ~941,500 | $119 / 5M |
+
+Filling just 2026 up to the day the scraper started (3/27–7/17, 98 game days)
+is 196 requests / ~5,900 credits at the default.
+
+The API bills `10 × markets × regions` per request, so every run prints its
+plan first and `--dry-run` spends nothing.
+
+Two things keep the bill down, and one thing to know before trusting the data:
+
+- **One request per start time, not per game.** An NPB card that all starts at
+  18:00 is a single snapshot; every row still carries its own `mins_to_start`.
+- **Off days are skipped.** The `.cache/npb_box` filenames already say which
+  days had games — two winters, most Mondays and the all-star break come out,
+  which is what takes the full backfill from ~137,000 credits to ~72,000. Pass
+  `--every-day` to disable.
+- **The featured endpoint returns Pinnacle's main line only**, not the whole
+  ladder, so backfilled `all_totals` / `all_spreads` hold a single entry. Good
+  enough for closing-line value and for modelling the main number; *not* enough
+  for `baseball/asian_lines.py`, which needs the full margin curve.
+- **The two feeds do not name the same main line.** Read side by side on
+  2026-09-13, all four moneylines matched to the third decimal — but three of
+  four totals did not, because this scraper picks the most balanced line off
+  PS3838's whole ladder while The Odds API returns whatever Pinnacle flags as
+  featured. Every row therefore carries a `source` column (`ps3838` /
+  `the_odds_api`); compare moneylines freely, and condition on `source` before
+  comparing a total or a run line.
+
+| 2026-09-13 | The Odds API | PS3838 (this scraper) |
+| --- | --- | --- |
+| 日本ハム @ 西武 | ML 2.11/1.8 · O/U **6.0** | ML 2.11/1.8 · O/U **6.5** |
+| 中日 @ 阪神 | ML 2.55/1.56 · O/U 5.5 | ML 2.55/1.564 · O/U 5.5 |
+| 広島 @ ヤクルト | ML 2.02/1.87 · RL **−1.5** | ML 2.02/1.869 · RL **+1.5** |
+| 巨人 @ DeNA | ML 2.06/1.83 · O/U **8.0** | ML 2.06/1.833 · O/U **7.5** |
+
+The Odds API does not carry CPBL — only NPB, MLB, KBO, MiLB and NCAA.
+
+### Other sources, and what they are good for
+
+| Source | NPB | CPBL | History | Granularity | Cost |
+| ------ | --- | ---- | ------- | ----------- | ---- |
+| PS3838 (`pinnacle_odds.py`) | ✅ | ✅ | 2026-07-18 → | ~30 min, **full ladder** | free |
+| The Odds API (`odds_history.py`) | ✅ *verified* | ❌ | **2020-06** → | 5–10 min snapshots | paid |
+| OddsPapi (`oddspapi.py`) | ? | ? | 2026-01 → | **every price change** | **free** |
+| OddsPortal | ✅ | ✅ | deep | closing only | free, scraping prohibited |
+| bettingiscool | ? | ? | 2021 → | every change + devig | token-metered |
+
+They divide the problem rather than compete: OddsPapi is free and finer but
+only reaches back to 2026-01, which is exactly the 2026-03 → 07 hole this
+season's scraper missed; The Odds API is the only one that reaches 2020; and
+nobody sells CPBL, so that one is ours to collect or not at all.
+
+### OddsPapi (`baseball/oddspapi.py`) — the same book, read better
+
+Read side by side against the PS3838 scraper on 2026-09-13, **27 of 32 fields
+were identical**; the five that differed were only *which rung* each calls the
+main line, never a price. `bookmakerMarketId` even carries PS3838's own league
+id (`line/3/187703/…`). It is the same Pinnacle board, reached a better way:
+
+| | PS3838 (`pinnacle_odds.py`) | OddsPapi |
+| --- | --- | --- |
+| Ladder | 3 rungs | **all of them** (totals 4.5–7.5, spreads ±2.5) |
+| Periods | full + 1st-5 | full + 1st-5 |
+| Resolution | ~30 min sample | **every price change** |
+| CPBL | ✅ | ✅ (tournament 32233) |
+| Cost | free | free |
+
+The full ladder is the point: `baseball/asian_lines.py` needs the whole margin
+curve and has never had it.
+
+```bash
+ODDSPAPI_KEY=... uv run python -m baseball.oddspapi discover
+ODDSPAPI_KEY=... uv run python -m baseball.oddspapi backfill --league cpbl \
+    --start 2026-09-13 --end 2026-09-20 --dry-run
+```
+
+`discover` resolves the numeric ids the payload is built from — the odds come
+back as `markets["1316"].outcomes["1317"]` and only the `/markets` catalogue
+says that means *Over Under, handicap 6.0, full game*. It prints anything it
+cannot resolve as `未知`, an unmapped id being the finding rather than an error.
+
+Details worth knowing:
+
+- **`participant1` is the home side**, confirmed against the scraper's own row
+  for 2026-09-13 Seibu vs Nippon-Ham (home 西武 1.8 = outcome `1`).
+- **The main line is the one Pinnacle marks**: every rung is its own market and
+  only the main one's `bookmakerMarketId` starts with `line/` (the rest are
+  `altLine/`). That is a different answer from this repo's balanced-juice
+  heuristic — on 2026-09-13 Pinnacle's main total was 6.0 where the most
+  balanced rung was 6.5 — which is why rows carry `source`.
+- Rows reuse `externalProviders.pinnacleId` as `event_id`, the same number the
+  PS3838 scraper writes, so scraped and collected rows **join exactly**.
+- Auth is a query parameter (`apiKey`), not a header. The free tier rate-limits
+  hard and answers 429 with its own `retryMs`, which `_rate_limited_get`
+  honours. `/fixtures` refuses a window wider than 10 days and answers an empty
+  window with 404 rather than an empty list.
+
+**It cannot reach the past.** On the free tier `/fixtures` lists upcoming games
+with odds and 66 finished ones *all carrying `hasOdds: false`*, and no paging
+parameter changes that — so a finished game cannot be addressed and
+`/historical-odds` only helps for a fixture still on the board. The 2026-03 →
+07 hole still needs The Odds API. Whether a paid OddsPapi tier opens the past
+up is untested.
+
+Run daily, it captures each game's whole line path from the moment the board
+opened — roughly nineteen hours ahead for a next-day NPB game.
+
 ---
 
 ## GitHub Secrets
@@ -529,6 +677,8 @@ uv run python migration/probe_cpbl_odds.py
 | `SPREADSHEET_KEY`    | CPBL, Odds     | Google Sheets spreadsheet ID for CPBL   |
 | `NORDVPN_TOKEN`      | CPBL           | NordVPN token for WireGuard tunnel      |
 | `DECODO_PROXY_URL`   | CPBL, Odds     | Decodo residential proxy for PS3838 and cpbl.com.tw |
+| `ODDS_API_KEY`       | Odds backfill  | The Odds API key (manual runs only)     |
+| `ODDSPAPI_KEY`       | Odds discovery | OddsPapi key (manual runs only)         |
 | `TELEGRAM_BOT_TOKEN` | CPBL, NPB, MLB | Telegram bot token for failure alerts   |
 | `TELEGRAM_CHAT_ID`   | CPBL, NPB, MLB | Telegram chat ID for failure alerts     |
 

@@ -126,6 +126,9 @@ PERIOD_LABELS = {"0": "final", "1": "half"}
 IGNORED_PERIOD_KEYS = {"3"}
 
 SHEET_NAME = "盤口"
+# Value written to the ``source`` column by this scraper. Rows backfilled from
+# elsewhere carry their own (see baseball/odds_history.py).
+SOURCE = "ps3838"
 
 
 def _sheet_headers(start_column: str, game_id_column: str,
@@ -156,6 +159,14 @@ def _sheet_headers(start_column: str, game_id_column: str,
         "spread_hdp", "spread_home", "spread_away",
         "all_totals",        # JSON of every total line (backtest flexibility)
         "all_spreads",       # JSON of every spread line
+        # Which feed wrote the row. Two now do, and they disagree about which
+        # line is the main one: this scraper reads PS3838's whole ladder and
+        # picks the most balanced line, while The Odds API returns Pinnacle's
+        # own featured line and no ladder at all. On 2026-09-13 the four
+        # moneylines matched to the third decimal and three of four totals did
+        # not, so a row is only comparable once it says where it came from.
+        # Last on purpose: the tab already holds thousands of rows without it.
+        "source",
     ]
 
 
@@ -578,6 +589,7 @@ def snapshots_to_rows(snapshots: list[dict], snapshot_type: str,
         record = {
             "captured_at": captured_at,
             "snapshot_type": snapshot_type,
+            "source": SOURCE,
             league.game_id_column: "",
             **s,
             "all_totals": json.dumps(s.get("all_totals", []), ensure_ascii=False),
@@ -591,6 +603,8 @@ def snapshots_to_rows(snapshots: list[dict], snapshot_type: str,
 
 
 def _open_worksheet(league: LeagueSpec):
+    import gspread
+
     from baseball.sheets import GoogleSheetsClient
 
     headers = league.sheet_headers()
@@ -607,6 +621,12 @@ def _open_worksheet(league: LeagueSpec):
     values = ws.get_all_values()
     if not values:
         ws.append_row(headers, value_input_option="USER_ENTERED")
+        return ws
+    # A column added after the tab was created is missing from its header row;
+    # every existing row keeps its values because the new column is appended.
+    if len(values[0]) < len(headers):
+        ws.update([headers], f"A1:{gspread.utils.rowcol_to_a1(1, len(headers))}",
+                  value_input_option="USER_ENTERED")
     return ws
 
 
