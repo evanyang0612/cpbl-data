@@ -69,3 +69,42 @@ def test_fetch_announced_starters_is_empty_when_the_page_is_down(monkeypatch):
 
     monkeypatch.setattr(nd.requests, "get", lambda *a, **kw: _Resp())
     assert nd.fetch_announced_starters(year=2026) == {}
+
+
+# --- 予告先発 cell padding ------------------------------------------------
+
+def _announced_text(away_p, home_p):
+    announced = {("2026-09-13", "中日", "阪神"): (away_p, home_p)}
+    text, kind, _ = nd.game_text(SERIES[0], {}, None, announced)
+    assert kind == "announced"
+    return text
+
+
+def test_announced_names_sit_ten_spaces_apart():
+    """The 2023 sheet's own gap: 野村          松葉, 伊藤          大関.
+
+    A played cell is 投手 5格 比分 5格 投手; an announced one has no score
+    between them, so the gap has to carry that width itself. Starting from the
+    played cell's single-sided 5 left the two names half a score too close.
+    """
+    assert _announced_text("髙橋宏", "才木") == "髙橋宏" + " " * 10 + "才木"
+    assert _announced_text("野村", "松葉") == "野村" + " " * 10 + "松葉"
+
+
+def test_announced_padding_is_squeezed_when_the_names_are_long():
+    """Exactly how the 2023 sheet writes them: 石田        メンデス at 8."""
+    text = _announced_text("デュプランティエ", "ビーディ")
+    gap = len(text) - len("デュプランティエ") - len("ビーディ")
+    assert 1 <= gap < 10
+    assert text.startswith("デュプランティエ") and text.endswith("ビーディ")
+
+
+def test_announced_cell_stays_inside_the_column():
+    for away_p, home_p in (("髙橋宏", "才木"), ("デュプランティエ", "ビーディ"),
+                           ("エンス", "M"), ("石田", "メンデス")):
+        text = _announced_text(away_p, home_p)
+        gap = len(text) - len(away_p) - len(home_p)
+        width = (nd.text_px(away_p, nd.name_size(away_p))
+                 + nd.text_px(home_p, nd.name_size(home_p))
+                 + nd.text_px(" " * gap, 10))
+        assert width <= nd.FIT_TARGET_PX or gap == 1, (away_p, home_p, width)

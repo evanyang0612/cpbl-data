@@ -93,6 +93,9 @@ NAME_OVERRIDES = {
 FIT_TARGET_PX = 148
 MIN_FONT = 7
 MIN_NAME_CHARS = 4
+# The gap between two 予告先発 names, before fitting. Twice the played cell's
+# padding, because there is no score sitting between them to take up the middle.
+ANNOUNCED_PAD = 10
 
 
 def text_px(text, size):
@@ -727,7 +730,12 @@ def game_text(game, starters, name_limits=None, announced=None):
         away_p, home_p = (NAME_OVERRIDES.get(p, p) for p in pair)
         away_p = away_p[:limits.get(away_p, len(away_p))]
         home_p = home_p[:limits.get(home_p, len(home_p))]
-        pad = 5
+        # A played cell reads 投手 5格 比分 5格 投手. Take the score out and the
+        # gap has to carry that width itself, which is why the 2023 sheet writes
+        # these at ten (野村          松葉) and squeezes to eight only when the
+        # names are long (石田        メンデス). Starting from the played cell's
+        # single-sided 5 left every pair half a score too close.
+        pad = ANNOUNCED_PAD
         while (text_px(away_p, name_size(away_p)) + text_px(home_p, name_size(home_p))
                + text_px(" " * pad, 10) > FIT_TARGET_PX and pad > 1):
             pad -= 1
