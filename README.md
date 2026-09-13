@@ -25,7 +25,8 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   ├── npb_weather.py               # Records each game's weather, which cannot be backfilled
 │   ├── mlb_games.py                 # Resolves MLB gamePk for an odds event
 │   ├── cpbl_games.py                # Resolves CPBL GameSno for an odds event
-│   └── odds_history.py              # Backfills 盤口 from The Odds API's archive
+│   ├── odds_history.py              # Backfills 盤口 from The Odds API's archive
+│   └── oddspapi.py                  # Discovery pass over OddsPapi's catalogue
 ├── migration/
 │   ├── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
 │   ├── backfill_npb_box.py          # Caches every npb.jp box score from 2016 on
@@ -596,6 +597,40 @@ Two things keep the bill down, and one thing to know before trusting the data:
 
 The Odds API does not carry CPBL — only NPB, MLB, KBO, MiLB and NCAA.
 
+### Other sources, and what they are good for
+
+| Source | NPB | CPBL | History | Granularity | Cost |
+| ------ | --- | ---- | ------- | ----------- | ---- |
+| PS3838 (`pinnacle_odds.py`) | ✅ | ✅ | 2026-07-18 → | ~30 min, **full ladder** | free |
+| The Odds API (`odds_history.py`) | ✅ *verified* | ❌ | **2020-06** → | 5–10 min snapshots | paid |
+| OddsPapi (`oddspapi.py`) | ? | ? | 2026-01 → | **every price change** | **free** |
+| OddsPortal | ✅ | ✅ | deep | closing only | free, scraping prohibited |
+| bettingiscool | ? | ? | 2021 → | every change + devig | token-metered |
+
+They divide the problem rather than compete: OddsPapi is free and finer but
+only reaches back to 2026-01, which is exactly the 2026-03 → 07 hole this
+season's scraper missed; The Odds API is the only one that reaches 2020; and
+nobody sells CPBL, so that one is ours to collect or not at all.
+
+### Before trusting OddsPapi (`baseball/oddspapi.py`)
+
+Its odds payload is entirely numeric ids (`markets["10286"].outcomes["10287"]`)
+and the docs map none of them for baseball, never say where a handicap or a
+total's line is carried, and never say whether `participant1` is the home side.
+Guessing any of those yields a parser that looks right and prices the wrong
+team, so the writer half is not built until a live board has answered them:
+
+```bash
+ODDSPAPI_KEY=... uv run python -m baseball.oddspapi discover
+ODDSPAPI_KEY=... uv run python -m baseball.oddspapi discover --league cpbl \
+    --out-dir .cache/oddspapi
+```
+
+It walks sports → tournaments → one fixture → that fixture's board, resolves
+every id against the `/markets` catalogue, and prints whatever is left as
+`未知` — an unmapped id being the finding, not an error. It writes nothing to
+Sheets and is small enough for the free tier.
+
 ---
 
 ## GitHub Secrets
@@ -607,6 +642,7 @@ The Odds API does not carry CPBL — only NPB, MLB, KBO, MiLB and NCAA.
 | `NORDVPN_TOKEN`      | CPBL           | NordVPN token for WireGuard tunnel      |
 | `DECODO_PROXY_URL`   | CPBL, Odds     | Decodo residential proxy for PS3838 and cpbl.com.tw |
 | `ODDS_API_KEY`       | Odds backfill  | The Odds API key (manual runs only)     |
+| `ODDSPAPI_KEY`       | Odds discovery | OddsPapi key (manual runs only)         |
 | `TELEGRAM_BOT_TOKEN` | CPBL, NPB, MLB | Telegram bot token for failure alerts   |
 | `TELEGRAM_CHAT_ID`   | CPBL, NPB, MLB | Telegram chat ID for failure alerts     |
 
