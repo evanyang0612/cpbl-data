@@ -565,6 +565,20 @@ Two things keep the bill down, and one thing to know before trusting the data:
   ladder, so backfilled `all_totals` / `all_spreads` hold a single entry. Good
   enough for closing-line value and for modelling the main number; *not* enough
   for `baseball/asian_lines.py`, which needs the full margin curve.
+- **The two feeds do not name the same main line.** Read side by side on
+  2026-09-13, all four moneylines matched to the third decimal — but three of
+  four totals did not, because this scraper picks the most balanced line off
+  PS3838's whole ladder while The Odds API returns whatever Pinnacle flags as
+  featured. Every row therefore carries a `source` column (`ps3838` /
+  `the_odds_api`); compare moneylines freely, and condition on `source` before
+  comparing a total or a run line.
+
+| 2026-09-13 | The Odds API | PS3838 (this scraper) |
+| --- | --- | --- |
+| 日本ハム @ 西武 | ML 2.11/1.8 · O/U **6.0** | ML 2.11/1.8 · O/U **6.5** |
+| 中日 @ 阪神 | ML 2.55/1.56 · O/U 5.5 | ML 2.55/1.564 · O/U 5.5 |
+| 広島 @ ヤクルト | ML 2.02/1.87 · RL **−1.5** | ML 2.02/1.869 · RL **+1.5** |
+| 巨人 @ DeNA | ML 2.06/1.83 · O/U **8.0** | ML 2.06/1.833 · O/U **7.5** |
 
 The Odds API does not carry CPBL — only NPB, MLB, KBO, MiLB and NCAA.
 

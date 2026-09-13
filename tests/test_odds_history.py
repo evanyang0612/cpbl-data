@@ -143,3 +143,12 @@ def test_game_dates_falls_back_to_every_day_without_a_cache(tmp_path):
     dates = oh.game_dates("2026-04-01", "2026-04-03", po.NPB,
                           cache_dir=str(tmp_path / "missing"))
     assert dates == ["2026-04-01", "2026-04-02", "2026-04-03"]
+
+
+def test_backfilled_rows_are_labelled_with_their_own_source():
+    """The two feeds pick a different main line — see SOURCE in pinnacle_odds —
+    so a backfilled row must never read as one the scraper wrote."""
+    rows = oh.parse_snapshot(_raw(), league=po.NPB)
+    assert rows[0]["source"] == oh.SOURCE != po.SOURCE
+    values = po.snapshots_to_rows(rows, "close", rows[0]["captured_at"], po.NPB)
+    assert dict(zip(po.NPB.sheet_headers(), values[0]))["source"] == "the_odds_api"

@@ -475,3 +475,23 @@ def test_a_wholly_incoherent_board_raises_so_the_job_alerts(monkeypatch):
     monkeypatch.setattr(po, "parse_events", lambda *a, **k: _flip(final_only))
     with pytest.raises(RuntimeError, match="盤口"):
         po.run_once(write=True, league=po.NPB)
+
+
+# --- source column --------------------------------------------------------
+
+def test_every_row_says_which_book_feed_it_came_from():
+    """Two feeds write to one 盤口 tab and they disagree about which rung is
+    the main line — this scraper reads PS3838's whole ladder and picks the
+    most balanced, while The Odds API returns Pinnacle's own featured line and
+    no ladder. Their moneylines matched to the third decimal on 2026-09-13 and
+    three of four totals did not, so a row has to say where it came from
+    before either can be compared."""
+    rows = po.parse_events(_raw(), league=po.NPB)
+    values = po.snapshots_to_rows(rows, "interim", "2026-09-13 14:52:57", po.NPB)
+    assert dict(zip(po.NPB.sheet_headers(), values[0]))["source"] == "ps3838"
+
+
+def test_source_is_the_last_column_so_existing_rows_stay_aligned():
+    """The tab already holds tens of thousands of rows written without it."""
+    for spec in (po.NPB, po.MLB, po.CPBL):
+        assert spec.sheet_headers()[-1] == "source"

@@ -57,6 +57,11 @@ SPORT_KEYS = {"npb": "baseball_npb", "mlb": "baseball_mlb"}
 REGIONS = ("eu",)
 MARKETS = ("h2h", "spreads", "totals")
 BOOKMAKER = "pinnacle"
+# Written to the ``盤口`` sheet's ``source`` column. It matters: this feed gives
+# Pinnacle's own featured line and no ladder, while the PS3838 scraper reads the
+# whole ladder and picks the most balanced line. Their moneylines agree to the
+# third decimal; their totals and run lines often name a different number.
+SOURCE = "the_odds_api"
 CREDITS_PER_MARKET_REGION = 10
 
 # The instants a day's board is sampled at, in league-local time. NPB starts at
@@ -221,6 +226,7 @@ def parse_snapshot(raw: dict, league: LeagueSpec = NPB,
         start = _parse_utc(event.get("commence_time"))
         local_start = start.astimezone(league.tz) if start else None
         row = {
+            "source": SOURCE,
             "captured_at": (taken.astimezone(league.tz).strftime("%Y-%m-%d %H:%M:%S")
                             if taken else ""),
             "event_id": event.get("id", ""),
