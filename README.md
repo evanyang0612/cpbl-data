@@ -545,10 +545,24 @@ uv run python -m baseball.odds_history backfill --league npb \
     --start 2026-03-27 --end 2026-07-17 --snapshot-type close
 ```
 
-| Range | Game days | Requests | Credits |
-| ----- | --------- | -------- | ------- |
-| 2026 season up to the scraper (3/27–7/17) | 98 | 196 | ~5,900 |
-| Everything the archive holds (2020-06-06 →) | 1,207 | 2,414 | ~72,400 |
+The archive is a **snapshot series, not a single opening number** — every 10
+minutes from 2020-06-06, every 5 minutes from 2022-09 — so `--leads` is a
+choice about how much of the line's path to buy. Each lead time is another
+full-price request, and each sample labels itself: the furthest out is the
+`open`, the nearest the `close`, anything between `interim`.
+
+Over everything the archive holds (1,207 NPB game days, two start times each):
+
+| `--leads` | Points | Requests | Credits | Plan |
+| --------- | -----: | -------: | ------: | ---- |
+| `10` (close only) | 1 | 2,414 | ~72,400 | $59 / 100K |
+| `720 10` (open + close, **default**) | 2 | 4,828 | ~144,800 | $119 / 5M |
+| `720 240 10` | 3 | 7,242 | ~217,300 | $119 / 5M |
+| every 2h for 12h | 7 | 16,898 | ~506,900 | $119 / 5M |
+| every 30m for 6h | 13 | 31,382 | ~941,500 | $119 / 5M |
+
+Filling just 2026 up to the day the scraper started (3/27–7/17, 98 game days)
+is 196 requests / ~5,900 credits at the default.
 
 The API bills `10 × markets × regions` per request, so every run prints its
 plan first and `--dry-run` spends nothing.

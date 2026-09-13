@@ -111,8 +111,27 @@ def test_rows_match_the_scraper_s_own_headers():
 
 def test_close_snapshot_times_bracket_the_npb_start_times():
     """NPB starts at 14:00 or 18:00 JST; one snapshot each, just before."""
-    times = oh.snapshot_times("2026-07-01", po.NPB, lead_minutes=10)
-    assert times == ["2026-07-01T04:50:00Z", "2026-07-01T08:50:00Z"]
+    times = oh.snapshot_times("2026-07-01", po.NPB, leads=(10,))
+    assert [ts for ts, _ in times] == ["2026-07-01T04:50:00Z",
+                                       "2026-07-01T08:50:00Z"]
+
+
+def test_several_leads_sample_the_path_and_label_themselves():
+    """The archive is a 5-10 minute series, not one opening number, so the
+    caller says how much of the path to buy. The furthest sample out is the
+    open, the nearest is the close, and anything between is interim — the row
+    should not have to be told which run it came from."""
+    times = oh.snapshot_times("2026-07-01", po.NPB, leads=(10, 240, 720))
+    evening = [(ts, kind) for ts, kind in times if ts.startswith("2026-07-01T0")
+               and kind]
+    assert ("2026-07-01T08:50:00Z", "close") in evening      # 10m out
+    assert ("2026-07-01T05:00:00Z", "interim") in evening    # 4h out
+    assert ("2026-06-30T21:00:00Z", "open") in [(t, k) for t, k in times]
+
+
+def test_snapshot_times_are_chronological():
+    times = oh.snapshot_times("2026-07-01", po.NPB, leads=(10, 720))
+    assert [ts for ts, _ in times] == sorted(ts for ts, _ in times)
 
 
 def test_credit_cost_is_ten_per_market_per_region():
@@ -120,10 +139,19 @@ def test_credit_cost_is_ten_per_market_per_region():
     assert oh.credit_cost(markets=("h2h",), regions=("eu",)) == 10
 
 
-def test_backfill_plan_reports_what_it_will_cost_before_spending(capsys):
-    plan = oh.plan(["2026-07-01", "2026-07-02"], po.NPB, lead_minutes=10)
+def test_backfill_plan_reports_what_it_will_cost_before_spending():
+    plan = oh.plan(["2026-07-01", "2026-07-02"], po.NPB, leads=(10,))
     assert plan["requests"] == 4          # two start times a day
     assert plan["credits"] == 4 * 30
+
+
+def test_plan_scales_with_how_much_of_the_path_is_bought():
+    """Each extra sample point is another full-price request; the plan says so
+    before a single credit is spent."""
+    one = oh.plan(["2026-07-01"], po.NPB, leads=(10,))
+    three = oh.plan(["2026-07-01"], po.NPB, leads=(10, 240, 720))
+    assert three["requests"] == one["requests"] * 3
+    assert three["credits"] == one["credits"] * 3
 
 
 def test_off_days_are_dropped_from_the_plan(tmp_path):

@@ -107,29 +107,44 @@ def credit_cost(*, markets=MARKETS, regions=REGIONS) -> int:
     return CREDITS_PER_MARKET_REGION * len(markets) * len(regions)
 
 
+# How far before first pitch to sample, in minutes. The archive is a 5-10
+# minute series rather than a single opening number, so this is a choice about
+# how much of the path to buy: each extra point is another full-price request.
+# The default buys the two numbers a backtest actually needs.
+DEFAULT_LEADS = (720, 10)   # ~12h out (open) and 10 minutes out (close)
+
+
 def snapshot_times(date: str, league: LeagueSpec = NPB,
-                   lead_minutes: int = 10) -> list[str]:
-    """The UTC instants to sample ``date``'s board at, one per start time.
+                   leads=DEFAULT_LEADS) -> list[tuple[str, str]]:
+    """[(UTC instant, snapshot_type)] to sample ``date``'s board at.
 
     Sampling per start time rather than on a fixed grid is what keeps the bill
     down: a six-game NPB card that all starts at 18:00 costs one request, not
     six, and every row still carries its own ``mins_to_start``.
+
+    Each instant labels itself so a multi-point run does not have to be told
+    what it fetched: the furthest sample out is the open, the nearest is the
+    close, and anything in between is interim.
     """
+    leads = tuple(sorted({int(m) for m in leads}, reverse=True))
+    labels = {leads[0]: "open", leads[-1]: "close"}
     out = []
     for clock in LOCAL_START_HOURS.get(league.key, ("18:00",)):
         hour, minute = (int(part) for part in clock.split(":"))
         local = dt.datetime.fromisoformat(date).replace(
             hour=hour, minute=minute, tzinfo=league.tz)
-        stamp = (local - dt.timedelta(minutes=lead_minutes)).astimezone(dt.timezone.utc)
-        out.append(stamp.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        for lead in leads:
+            stamp = (local - dt.timedelta(minutes=lead)).astimezone(dt.timezone.utc)
+            out.append((stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        labels.get(lead, "interim")))
     return sorted(out)
 
 
-def plan(dates: list[str], league: LeagueSpec = NPB, lead_minutes: int = 10,
+def plan(dates: list[str], league: LeagueSpec = NPB, leads=DEFAULT_LEADS,
          *, markets=MARKETS, regions=REGIONS) -> dict:
     """What a backfill will ask for, and what it will cost, before it runs."""
-    times = [ts for date in dates
-             for ts in snapshot_times(date, league, lead_minutes)]
+    times = [pair for date in dates
+             for pair in snapshot_times(date, league, leads)]
     return {"dates": len(dates), "requests": len(times),
             "credits": len(times) * credit_cost(markets=markets, regions=regions),
             "times": times}
@@ -309,13 +324,13 @@ def game_dates(start: str, end: str, league: LeagueSpec = NPB,
 
 
 def backfill(start: str, end: str, *, league: LeagueSpec = NPB, api_key: str,
-             snapshot_type: str = "close", lead_minutes: int = 10,
-             write: bool = True, pause: float = 0.2, every_day: bool = False,
+             leads=DEFAULT_LEADS, write: bool = True, pause: float = 0.2,
+             every_day: bool = False,
              session: requests.Session | None = None) -> list[dict]:
     """Walk the range, one request per start time per day, and append the rows."""
     dates = (daterange(start, end) if every_day
              else game_dates(start, end, league))
-    budget = plan(dates, league, lead_minutes)
+    budget = plan(dates, league, leads)
     skipped = len(daterange(start, end)) - len(dates)
     print(f"[history] {league.key.upper()} {start}~{end}: "
           f"{budget['dates']} 個比賽日"
@@ -327,7 +342,7 @@ def backfill(start: str, end: str, *, league: LeagueSpec = NPB, api_key: str,
     sport_key = SPORT_KEYS[league.key]
     session = session or requests.Session()
     all_rows, seen, credits = [], set(), {}
-    for when in budget["times"]:
+    for when, kind in budget["times"]:
         try:
             raw, credits = fetch_snapshot(sport_key, when, api_key=api_key,
                                           session=session)
@@ -335,13 +350,15 @@ def backfill(start: str, end: str, *, league: LeagueSpec = NPB, api_key: str,
             print(f"[history] {when} 失敗（{exc}），跳過")
             continue
         rows = parse_snapshot(raw, league)
+        for row in rows:
+            row["snapshot_type"] = kind
         # A slate that has not moved between two sampled instants comes back
         # twice; the ledger only wants one row per (event, snapshot).
         fresh = [r for r in rows
                  if (r["event_id"], r["captured_at"]) not in seen]
         seen.update((r["event_id"], r["captured_at"]) for r in fresh)
         all_rows.extend(fresh)
-        print(f"[history] {when} -> {len(fresh)} 場"
+        print(f"[history] {when} [{kind}] -> {len(fresh)} 場"
               f"（剩 {credits.get('x-requests-remaining')} credits）")
         time.sleep(pause)
 
@@ -351,9 +368,9 @@ def backfill(start: str, end: str, *, league: LeagueSpec = NPB, api_key: str,
             by_capture.setdefault(row["captured_at"], []).append(row)
         written = 0
         for captured_at, group in sorted(by_capture.items()):
+            # Every row carries its own snapshot_type, which wins over this one.
             written += write_snapshots(
-                snapshots_to_rows(group, snapshot_type, captured_at, league),
-                league)
+                snapshots_to_rows(group, "interim", captured_at, league), league)
         print(f"[history] 寫入 {written} 列到『盤口』")
     return all_rows
 
@@ -373,7 +390,7 @@ def probe(league: LeagueSpec = NPB, *, api_key: str,
     print(f"[probe] {league.key.upper()} ({sport_key}) — "
           f"{credit_cost()} credits/次，共 {len(dates)} 次")
     for date in dates:
-        when = snapshot_times(date, league)[-1]
+        when = snapshot_times(date, league, leads=(10,))[-1][0]
         try:
             raw, credits = fetch_snapshot(sport_key, when, api_key=api_key,
                                           session=session)
@@ -402,10 +419,11 @@ def main() -> None:
     parser.add_argument("--league", default="npb", choices=sorted(SPORT_KEYS))
     parser.add_argument("--start", help="YYYY-MM-DD")
     parser.add_argument("--end", help="YYYY-MM-DD")
-    parser.add_argument("--snapshot-type", default="close",
-                        choices=["open", "close", "interim"])
-    parser.add_argument("--lead-minutes", type=int, default=10,
-                        help="how long before first pitch to sample (default: 10)")
+    parser.add_argument("--leads", type=int, nargs="+", default=list(DEFAULT_LEADS),
+                        metavar="MIN",
+                        help="minutes before first pitch to sample; each one is "
+                             "another full-price request (default: 720 10, i.e. "
+                             "the open and the close)")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the request plan and its cost, spend nothing")
     parser.add_argument("--every-day", action="store_true",
@@ -425,8 +443,8 @@ def main() -> None:
     if not args.dry_run and not api_key:
         parser.error("ODDS_API_KEY is not set")
     backfill(args.start, args.end, league=league, api_key=api_key or "",
-             snapshot_type=args.snapshot_type, lead_minutes=args.lead_minutes,
-             write=not args.dry_run, every_day=args.every_day)
+             leads=tuple(args.leads), write=not args.dry_run,
+             every_day=args.every_day)
 
 
 if __name__ == "__main__":
