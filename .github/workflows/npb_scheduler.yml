@@ -6,7 +6,12 @@ on:
 jobs:
   update-sheet:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Typical sweeps finish in 4-7 minutes. Ten left no room for a Sheets
+    # 503 storm, and four runs in three days were cancelled at 10.3 minutes
+    # inside one — see baseball/sheets.py MAX_RUN_WAIT, which now gives up
+    # loudly at three minutes of cumulative retrying rather than letting the
+    # job be axed silently.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
