@@ -24,7 +24,8 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   ├── npb_tenki.py                 # tenki.jp hourly forecast, by ballpark
 │   ├── npb_weather.py               # Records each game's weather, which cannot be backfilled
 │   ├── mlb_games.py                 # Resolves MLB gamePk for an odds event
-│   └── cpbl_games.py                # Resolves CPBL GameSno for an odds event
+│   ├── cpbl_games.py                # Resolves CPBL GameSno for an odds event
+│   └── odds_audit.py                # Invariants every 盤口 row must satisfy
 ├── migration/
 │   ├── audit_npb_history.py         # Re-scrapes recent NPB games and diffs them
 │   ├── backfill_npb_box.py          # Caches every npb.jp box score from 2016 on
@@ -518,6 +519,62 @@ pitch):
 ```bash
 uv run python migration/probe_cpbl_odds.py
 ```
+
+### What is in 盤口, and what to leave out of a backtest
+
+PS3838 hands over bare positional arrays, and `0faface` (2026-08-25) fixed two
+readings of them at once: the handicap's sign and the moneyline's sides. Rows
+written before that carried both errors. A wrong row here does not look wrong —
+every number is in range — it reads as a signal pointing the wrong way, and
+主場受讓 is one of the theses this ledger exists to test.
+
+Two invariants hold of any correctly-read board, whatever the feed's field order
+happens to be that day. `baseball/odds_audit.py` states them:
+
+```
+the home price must fall as the home team receives more runs
+home receiving  <  home moneyline  <  home laying
+```
+
+The scraper runs every parsed row through them and refuses what cannot be a
+real board; a board where *every* row fails raises, so the workflow alerts
+rather than writing a quiet nothing.
+
+```bash
+uv run python -m baseball.odds_audit              # all three sheets
+uv run python -m baseball.odds_audit --league npb
+```
+
+Rows already written were repaired by two one-off migrations, both found by
+reading the ladder rather than by date — on 2026-08-25 the MLB board produced
+both good and bad rows, and a date cutoff would have corrupted the good ones:
+
+| | rows repaired |
+| --- | ---: |
+| `migration/repair_odds_spread_sign.py` | NPB 950, MLB 5,334 |
+| `migration/repair_odds_moneyline_sides.py` | NPB 134, MLB 1,690 |
+
+**What a backtest should still exclude.** 1,492 rows written before the fix sit
+where both orientations satisfy the bracket, so no row-level proof exists
+either way:
+
+| | rows | captured |
+| --- | ---: | --- |
+| NPB | 341 | 2026-07-18 → 08-25 |
+| MLB | 1,151 | 2026-08-04 → 08-24 |
+
+In NPB every one of the 134 decidable rows from that window needed the swap, so
+these almost certainly did too. In MLB 176 decidable rows did **not** — the
+array order varies there — so guessing would corrupt as much as it fixed. Both
+windows fall inside 2021-onward Pinnacle archives (see the backfill section),
+and are better replaced than inferred.
+
+Two further rows stay flagged rather than repaired: 2026-08-17
+`G1 St. Louis Cardinals @ G1 Cincinnati Reds`, a doubleheader whose `G1`/`G2`
+prefixes PS3838 appears to have misaligned. Neither orientation satisfies the
+bracket, so the cause is something other than the swap and overwriting them
+would bury it.
+
 
 ---
 
