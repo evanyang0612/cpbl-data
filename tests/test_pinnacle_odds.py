@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 import requests
 
 from baseball import pinnacle_odds as po
@@ -428,3 +429,49 @@ def test_enrich_cpbl_leaves_the_snapshot_usable_when_the_schedule_is_down(
     po.enrich_cpbl(snapshots)
     assert snapshots[0].get("cpbl_game_sno", "") == ""
     assert "schedule lookup failed" in capsys.readouterr().out
+
+
+# --- refusing an incoherent board -----------------------------------------
+
+def _flip(rows):
+    """The pre-#79 bug, reproduced: every handicap on the wrong side."""
+    return [dict(r, all_spreads=[{"hdp": -s["hdp"], "home": s["home"],
+                                  "away": s["away"]} for s in r["all_spreads"]])
+            for r in rows]
+
+
+def test_an_incoherent_row_is_dropped_before_it_reaches_the_sheet(
+        monkeypatch, capsys):
+    """A misparse is worse than a gap: its numbers are all in range, so it
+    reads as a signal pointing the wrong way. PR #94 had to repair 6,284 rows
+    written before anything checked.
+
+    The 1st-5 row survives because its ladder is a single rung — there is no
+    direction to read off one point, so it is allowed through rather than
+    guessed at."""
+    written = _capture_writes(monkeypatch)
+    rows = _flip(po.parse_events(_raw(), league=po.NPB))
+    monkeypatch.setattr(po, "parse_events", lambda *a, **k: rows)
+    po.run_once(write=True, league=po.NPB)
+    out = capsys.readouterr().out
+    assert "不寫入" in out and "略過 1 列" in out
+    assert len(written[0]) == 1
+    assert dict(zip(po.NPB.sheet_headers(), written[0][0]))["period"] == "half"
+
+
+def test_a_coherent_board_is_written_as_before(monkeypatch):
+    written = _capture_writes(monkeypatch)
+    monkeypatch.setattr(po, "fetch_baseball_events", lambda **kw: _raw())
+    po.run_once(write=True, league=po.NPB)
+    assert written and len(written[0]) == 2
+
+
+def test_a_wholly_incoherent_board_raises_so_the_job_alerts(monkeypatch):
+    """One bad row is a hiccup; every row bad means the feed's field order
+    moved under us, and that has to page rather than write a quiet nothing."""
+    _capture_writes(monkeypatch)
+    final_only = [r for r in po.parse_events(_raw(), league=po.NPB)
+                  if r["period"] == "final"]
+    monkeypatch.setattr(po, "parse_events", lambda *a, **k: _flip(final_only))
+    with pytest.raises(RuntimeError, match="盤口"):
+        po.run_once(write=True, league=po.NPB)
