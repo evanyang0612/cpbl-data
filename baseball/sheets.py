@@ -22,6 +22,25 @@ class LoggingBackOffHTTPClient(HTTPClient):
 
     MAX_TOTAL_WAIT = 63
 
+    # And a budget for the whole run, because the per-request cap bounds one
+    # stall and nothing bounded a run of them. On 2026-09-13 npb_scheduler was
+    # cancelled at its ten-minute timeout inside a Sheets 503 retry, part-way
+    # through rewriting 投手主客, which left the tab empty. Every request was
+    # politely waiting under its own cap; their sum ran the job out of time.
+    #
+    # Giving up at the budget is the better failure: it raises, so the
+    # workflow's alert fires. Being cancelled at the timeout is silent.
+    MAX_RUN_WAIT = 180
+    _run_waited = 0.0
+
+    @classmethod
+    def reset_retry_budget(cls) -> None:
+        cls._run_waited = 0.0
+
+    @classmethod
+    def retry_budget_spent(cls) -> float:
+        return cls._run_waited
+
     def _send(self, *args, **kwargs):
         return super().request(*args, **kwargs)
 
@@ -32,7 +51,10 @@ class LoggingBackOffHTTPClient(HTTPClient):
             try:
                 return self._send(*args, **kwargs)
             except APIError as err:
-                if not self._retryable(err) or waited + wait > self.MAX_TOTAL_WAIT:
+                cls = LoggingBackOffHTTPClient
+                if (not self._retryable(err)
+                        or waited + wait > self.MAX_TOTAL_WAIT
+                        or cls._run_waited + wait > cls.MAX_RUN_WAIT):
                     raise
                 print(
                     f"Sheets API {err.code}, retrying in {wait}s "
@@ -41,6 +63,7 @@ class LoggingBackOffHTTPClient(HTTPClient):
                 )
                 time.sleep(wait)
                 waited += wait
+                LoggingBackOffHTTPClient._run_waited += wait
                 wait *= 2
 
     @staticmethod

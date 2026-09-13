@@ -6,6 +6,7 @@ team line, ERA over thirds of an inning, and ranking within a league.
 
 import pytest
 
+from baseball import npb_pitching_splits_sheet as nps
 from baseball.npb_pitching_splits import (
     BULLPEN,
     DEFAULT_SPLIT,
@@ -232,3 +233,62 @@ def test_the_header_is_written_once_and_frozen_rather_than_repeated():
     assert values[group][LEFT_START:LEFT_START + len(GROUP_ROW)] == GROUP_ROW
     assert header < FROZEN_ROWS                 # inside the pinned block
     assert roles[header + 1] == ROW_SECTION     # and the first table follows it
+
+
+# --- surviving a cancelled run --------------------------------------------
+
+class _FakeSheet:
+    """Records the order of operations so a half-finished run can be replayed."""
+
+    def __init__(self, existing):
+        self.values = [list(r) for r in existing]
+        self.id = 7
+        self.log = []
+
+    def get_all_values(self):
+        return [list(r) for r in self.values]
+
+    def clear(self):
+        self.log.append("clear")
+        self.values = []
+
+    def update(self, *, range_name, values, value_input_option=None):
+        self.log.append("update")
+        self.values = [list(r) for r in values]
+
+    def batch_clear(self, ranges):
+        self.log.append(f"batch_clear:{ranges}")
+
+
+def test_the_write_lands_before_anything_is_cleared():
+    """A GitHub Actions job cancelled at its 10-minute timeout stops wherever
+    it is. Clearing first leaves the tab empty and 投手主客 sat blank for a
+    day; writing first means the worst case is stale data, which at least
+    still reads as data."""
+    sheet = _FakeSheet([["old", "rows"]])
+    nps.write_values(sheet, [["new", "rows"]], unmerge=lambda: sheet.log.append("unmerge"))
+    assert sheet.log.index("update") < next(
+        (i for i, step in enumerate(sheet.log) if step.startswith("batch_clear")),
+        len(sheet.log))
+    assert sheet.values == [["new", "rows"]]
+
+
+def test_merges_are_dropped_before_the_values_land():
+    """Writing into a merged range keeps only its top-left cell, so last run's
+    banners would eat this run's header row."""
+    sheet = _FakeSheet([["old"]])
+    nps.write_values(sheet, [["new"]], unmerge=lambda: sheet.log.append("unmerge"))
+    assert sheet.log.index("unmerge") < sheet.log.index("update")
+
+
+def test_rows_past_the_new_data_are_cleared_not_left_behind():
+    """A shorter table must not leave last run's tail showing under it."""
+    sheet = _FakeSheet([["a"], ["b"], ["c"], ["d"]])
+    nps.write_values(sheet, [["a"], ["b"]], unmerge=lambda: None)
+    assert any(step.startswith("batch_clear:['A3:") for step in sheet.log)
+
+
+def test_nothing_is_cleared_when_the_table_did_not_shrink():
+    sheet = _FakeSheet([["a"], ["b"]])
+    nps.write_values(sheet, [["a"], ["b"], ["c"]], unmerge=lambda: None)
+    assert not any(step.startswith("batch_clear") for step in sheet.log)

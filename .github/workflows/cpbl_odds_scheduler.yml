@@ -52,9 +52,9 @@ jobs:
           DECODO_PROXY_URL: ${{ secrets.DECODO_PROXY_URL }}
         run: uv run python -m baseball.pinnacle_odds --league cpbl
 
-      - name: Send failure Telegram message
-        if: failure()
+      - name: Telegram on failure or cancellation
+        if: failure() || cancelled()
         run: |
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=CPBL odds scraper failed. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            -d "text=CPBL odds scraper ${{ job.status }}. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

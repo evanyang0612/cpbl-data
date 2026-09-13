@@ -359,6 +359,33 @@ def _format(spreadsheet, sheet, values: list[list]) -> None:
     spreadsheet.batch_update({"requests": requests})
 
 
+def write_values(sheet, values: list[list], *, unmerge) -> None:
+    """Replace the tab's contents in an order a cancelled run can survive.
+
+    The job this runs inside is capped at ten minutes and is routinely
+    cancelled on that cap — four times in the three days to 2026-09-13, each
+    at 10.3 minutes. A cancelled step simply stops, so the order decides what
+    a half-finished run leaves behind. Clearing first leaves an empty tab, and
+    an empty tab reads as broken; writing first leaves last run's numbers,
+    which at least still read as numbers.
+
+    Merges are dropped before the values land because writing into a merged
+    range keeps only its top-left cell, so last run's banners would otherwise
+    eat this run's header row.
+
+    Only the rows past the new data are cleared, and only when the table
+    actually shrank.
+    """
+    # Measured before anything is touched: the tab is only sized when it is
+    # first created, so a shorter table would otherwise leave last run's tail
+    # showing underneath this one.
+    before = len(sheet.get_all_values())
+    unmerge()
+    sheet.update(range_name="A1", values=values, value_input_option="USER_ENTERED")
+    if before > len(values):
+        sheet.batch_clear([f"A{len(values) + 1}:ZZ{before}"])
+
+
 def refresh(*, dry_run: bool = False) -> int:
     """Rebuild 投手主客 from 分析表紀錄. Returns the number of rows written."""
     client = GoogleSheetsClient()
@@ -380,13 +407,8 @@ def refresh(*, dry_run: bool = False) -> int:
     spreadsheet = client.spreadsheet(TARGET_SPREADSHEET_KEY)
     sheet = _worksheet(spreadsheet, TARGET_SHEET,
                        rows=len(values) + 10, cols=max(TOTAL_WIDTH, RAW_WIDTH) + 1)
-    sheet.clear()
-    # Before the values, not after: writing into a merged range keeps only the
-    # top-left cell and drops the rest, so last run's banners would silently
-    # eat this run's header row.
-    spreadsheet.batch_update(
-        {"requests": [{"unmergeCells": {"range": {"sheetId": sheet.id}}}]})
-    sheet.update(range_name="A1", values=values, value_input_option="USER_ENTERED")
+    write_values(sheet, values, unmerge=lambda: spreadsheet.batch_update(
+        {"requests": [{"unmergeCells": {"range": {"sheetId": sheet.id}}}]}))
     _format(spreadsheet, sheet, values)
     print(f"[splits] wrote {len(values)} row(s) to {TARGET_SHEET}")
     return len(values)

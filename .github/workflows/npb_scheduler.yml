@@ -6,7 +6,12 @@ on:
 jobs:
   update-sheet:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Typical sweeps finish in 4-7 minutes. Ten left no room for a Sheets
+    # 503 storm, and four runs in three days were cancelled at 10.3 minutes
+    # inside one — see baseball/sheets.py MAX_RUN_WAIT, which now gives up
+    # loudly at three minutes of cumulative retrying rather than letting the
+    # job be axed silently.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -86,9 +91,9 @@ jobs:
             -d "text=NPB 天氣 log failed (the sweep itself was fine). Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
 
-      - name: Send failure Telegram message
-        if: failure()
+      - name: Telegram on failure or cancellation
+        if: failure() || cancelled()
         run: |
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=NPB updater failed. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            -d "text=NPB updater ${{ job.status }}. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
