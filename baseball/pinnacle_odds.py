@@ -668,11 +668,43 @@ def run_once(snapshot_type: str = "interim", *, write: bool = True,
             f"O/U {s.get('total_line')} {s.get('total_over')}/{s.get('total_under')} "
             f"RL {s.get('spread_hdp')} {s.get('spread_home')}/{s.get('spread_away')}"
         )
+    snapshots, refused = _drop_incoherent(snapshots)
     if write and snapshots:
         rows = snapshots_to_rows(snapshots, snapshot_type, captured_at, league)
         n = write_snapshots(rows, league)
         print(f"[odds] wrote {n} rows to '{SHEET_NAME}'")
+    if refused and not snapshots:
+        # Every row unreadable means the feed's field order moved, not that one
+        # game is odd. Raise so the workflow's failure alert fires instead of
+        # the run reporting a quiet, clean nothing.
+        raise RuntimeError(
+            f"盤口: all {refused} parsed rows failed the coherence check; "
+            "PS3838's field order has probably changed")
     return snapshots
+
+
+def _drop_incoherent(snapshots: list[dict]) -> tuple[list[dict], int]:
+    """Keep only the rows that can be a real board, and say what was dropped.
+
+    A misparsed row is worse than a missing one. Its numbers are all in range,
+    so nothing downstream notices — it simply reads as a signal pointing the
+    wrong way. PR #94 had to repair 6,284 rows written before anything looked.
+    """
+    from baseball.odds_audit import incoherence
+
+    kept, refused = [], 0
+    for snap in snapshots:
+        reason = incoherence(snap)
+        if reason is None:
+            kept.append(snap)
+            continue
+        refused += 1
+        print(f"[odds] 不寫入 {snap.get('game_date')} "
+              f"{snap.get('away_norm')}@{snap.get('home_norm')} "
+              f"[{snap.get('period')}]：{reason}")
+    if refused:
+        print(f"[odds] 因不合理而略過 {refused} 列")
+    return kept, refused
 
 
 def main() -> None:
