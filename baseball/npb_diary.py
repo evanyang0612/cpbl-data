@@ -113,9 +113,9 @@ NPB_SCHEDULE_PAGES = ([f"/games/{{year}}/schedule_{m:02d}_detail.html" for m in 
 # NPB's daily 出場選手登録／登録抹消 公示. The date form builds this path in JS
 # (/common/js/announcement.js), which is why no query string reaches it.
 NPB_ROSTER = "https://npb.jp/announcement/roster/roster_{md}.html"
-# 予告先発. One request, today only — which is all NPB announces. A game whose
-# starters are out but which has not been played yet shows the two names with no
-# score, the way the 2023 sheet writes it (東克樹        横川凱).
+# 予告先発. One request, one day — which is all NPB announces at a time. A game
+# whose starters are out but which has not been played yet shows the two names
+# with no score, the way the 2023 sheet writes it (東克樹        横川凱).
 NPB_STARTERS = "https://npb.jp/announcement/starter/"
 
 # 公示 spells teams out in full; the note spells them the way Evan's own 2023
@@ -277,12 +277,36 @@ def fetch_schedule(start, end, cache=None):
     return out
 
 
-def fetch_announced_starters():
-    """{(away team, home team): (away pitcher, home pitcher)} for today.
+def _announcement_date(unit, year: int) -> str | None:
+    """The day the heading above this unit is announcing, as an ISO date.
+
+    Read off the page (「9月13日の予告先発投手」) rather than taken from the
+    clock, so that an evening run which finds NPB has already moved on to
+    tomorrow dates the announcement the way NPB does.
+    """
+    heading = unit.find_previous(["h4", "h5"])
+    if heading is None:
+        return None
+    match = re.search(r"(\d{1,2})月(\d{1,2})日",
+                      heading.get_text(" ", strip=True))
+    if not match:
+        return None
+    return f"{year:04d}-{int(match.group(1)):02d}-{int(match.group(2)):02d}"
+
+
+def fetch_announced_starters(year: int | None = None):
+    """{(date, away team, home team): (away pitcher, home pitcher)}.
 
     NPB lists the home side on the left of each 予告先発 unit and the visitor on
     the right; the team is only identifiable from the crest's alt text.
+
+    The date is part of the key because NPB plays 三連戦 — the same pairing, at
+    the same ballpark, three days running. A pairing on its own does not name a
+    game, and keying on one wrote today's announcement into every row of the
+    series: 2026-09-13's starters appeared again on 9/14 and 9/15, for games
+    nobody had named a pitcher for yet.
     """
+    year = year or datetime.date.today().year
     try:
         response = requests.get(NPB_STARTERS, headers=UA, timeout=30)
         response.encoding = "utf-8"
@@ -305,8 +329,9 @@ def fetch_announced_starters():
             continue
         home, home_pitcher = side(home_block)
         away, away_pitcher = side(away_block)
-        if home and away:
-            out[(away, home)] = (away_pitcher, home_pitcher)
+        date = _announcement_date(unit, year)
+        if home and away and date:
+            out[(date, away, home)] = (away_pitcher, home_pitcher)
     return out
 
 
@@ -692,7 +717,8 @@ def game_text(game, starters, name_limits=None, announced=None):
         text = " ".join(f"{CODE_OF[game['away']]} 戦 雨 天 中 止".split())
         return text, "cancelled", None
     if game["status"] != "試合終了":
-        pair = (announced or {}).get((game["away"], game["home"]))
+        pair = (announced or {}).get(
+            (game["date"], game["away"], game["home"]))
         if not pair or not all(pair):
             return CODE_OF[game["away"]], "scheduled", None
         # Starters announced but no score yet: two names, no separator, exactly
@@ -960,8 +986,8 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
         # family name — which is what the map would have produced anyway.
         return display.get(name) or display.get(surname(name)) or surname(name)
 
-    announced = {teams: tuple(spell(p) for p in pair)
-                 for teams, pair in fetch_announced_starters().items()}
+    announced = {key: tuple(spell(p) for p in pair)
+                 for key, pair in fetch_announced_starters().items()}
     if announced:
         print(f"予告先発 {len(announced)} 場")
     rows = build_rows(schedule, starters, roster, name_limits, window=window,
