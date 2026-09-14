@@ -52,7 +52,7 @@ GAMES = {
 
 
 def _fetch(url):
-    if url.endswith("/schedule/"):
+    if "/schedule/" in url:
         return SCHEDULE_HTML
     for game_id, html in GAMES.items():
         if game_id in url:
@@ -152,7 +152,7 @@ def test_the_forecast_comes_off_the_same_page_as_the_starters():
         "<body>", "<body>" + WEATHER_HTML)
 
     def fetch(url):
-        if url.endswith("/schedule/"):
+        if "/schedule/" in url:
             return SCHEDULE_HTML
         for game_id, html in games.items():
             if game_id in url:
@@ -249,7 +249,7 @@ def test_a_roofed_game_carries_no_forecast():
         "<body>", "<body>" + WEATHER_HTML + _round_line("ZOZOマリン"))
 
     def fetch(url):
-        if url.endswith("/schedule/"):
+        if "/schedule/" in url:
             return SCHEDULE_HTML
         if "weather.yahoo" in url:
             return FORECAST_HTML
@@ -421,7 +421,7 @@ def test_the_forecast_survives_a_page_with_no_readable_starters():
     live = live.replace("<body>", "<body>" + WEATHER_HTML + _round_line("ZOZOマリン"))
 
     def fetch(url):
-        if url.endswith("/schedule/"):
+        if "/schedule/" in url:
             return SCHEDULE_HTML
         if "weather.yahoo" in url:
             return FORECAST_HTML
@@ -451,3 +451,47 @@ def test_the_regional_grounds_npb_publishes_are_known():
     assert ns.park_bearing("松山") == 180      # 松山坊っちゃんスタジアム
     assert ns.park_bearing("倉敷") == 180      # 倉敷マスカットスタジアム
     assert ns.park_bearing("ほっと神戸") == 180   # 坐北朝南, per Evan
+
+
+# --- asking for the right week --------------------------------------------
+
+def test_the_schedule_is_asked_for_by_date():
+    """Yahoo's schedule page shows one Monday-to-Sunday week. Fetching it bare
+    gets whichever week *today* falls in, so on a Sunday evening the next
+    day — a Monday — is not on it at all, and the whole slate comes back with
+    no starters and no weather. The 9/14 開盤 went out that way on 2026-09-13
+    at 22:15 with team names where the pitchers belong."""
+    asked = []
+
+    def fetch(url):
+        asked.append(url)
+        return SCHEDULE_HTML if "/schedule/" in url else _fetch(url)
+
+    ns.fetch_slate("2026-09-14", fetch=fetch)
+    assert asked[0].endswith("schedule/?date=2026-09-14")
+
+
+def test_the_bare_schedule_still_answers_when_the_dated_one_will_not():
+    """The dated form has 500'd before; losing the week is better than losing
+    the broadcast."""
+    asked = []
+
+    def fetch(url):
+        asked.append(url)
+        if "?date=" in url:
+            raise RuntimeError("500")
+        return SCHEDULE_HTML if "/schedule/" in url else _fetch(url)
+
+    ns.fetch_slate("2026-08-25", fetch=fetch)
+    assert asked[0].endswith("schedule/?date=2026-08-25")
+    assert asked[1].endswith("schedule/")
+
+
+def test_a_schedule_that_never_answers_costs_the_names_not_the_broadcast():
+    def fetch(url):
+        if "/schedule/" in url:
+            raise RuntimeError("down")
+        return _fetch(url)
+
+    slate = ns.fetch_slate("2026-08-25", fetch=fetch)
+    assert slate.starters == {} and slate.weather == {}
