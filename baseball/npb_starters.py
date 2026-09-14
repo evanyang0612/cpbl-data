@@ -449,6 +449,29 @@ def _tenki_forecast(venue: str, game_date: str, hour: int, *, fetch):
     return replace(forecast, url=url, venue=venue)
 
 
+def _schedule_for(game_date: str, *, fetch=_get) -> str | None:
+    """The weekly schedule page containing ``game_date``, or None.
+
+    The page shows one Monday-to-Sunday week, and fetching it bare gets
+    whichever week *today* falls in. On a Sunday evening that is the week
+    about to end, so the next day — a Monday — is not on it at all: the
+    2026-09-14 開盤 went out on 2026-09-13 at 22:15 with team names where the
+    pitchers belong, and no sky either, because both are read off the game
+    pages that week never listed.
+
+    Asking by date is exact. It is tried first and the bare page is kept as a
+    fallback, since the dated form has answered 500 before and losing the
+    right week is better than losing the broadcast.
+    """
+    for url in (f"{BASE_URL}schedule/?date={game_date}", f"{BASE_URL}schedule/"):
+        try:
+            return fetch(url)
+        except Exception as exc:  # network, DNS, timeout — all non-fatal
+            print(f"[starters] {url} failed ({exc})")
+    print("[starters] no schedule page; no pitcher names and no weather")
+    return None
+
+
 def fetch_slate(game_date: str, *, fetch=_get) -> Slate:
     """Starters and forecasts for ``game_date``, from the same game pages.
 
@@ -458,13 +481,8 @@ def fetch_slate(game_date: str, *, fetch=_get) -> Slate:
     Never raises: the lines are worth broadcasting even when Yahoo is
     unreachable or the starters have not been announced yet.
     """
-    try:
-        # The bare schedule page lists a week of game ids and is reliable; the
-        # ?date= variant answers 500. Each game page carries its own date in
-        # the title, which is what the filtering below uses anyway.
-        schedule = fetch(f"{BASE_URL}schedule/")
-    except Exception as exc:  # network, DNS, timeout — all equally non-fatal
-        print(f"[starters] schedule lookup failed ({exc}); no pitcher names")
+    schedule = _schedule_for(game_date, fetch=fetch)
+    if schedule is None:
         return Slate(starters={}, weather={})
 
     wanted = _japanese_date(game_date)
