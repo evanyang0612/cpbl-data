@@ -37,10 +37,18 @@ HEADERS = ["日期", "球隊", "真正的先發", "備註"]
 TEAM_ALIASES = {"横浜": "DeNA", "橫濱": "DeNA", "ベイスターズ": "DeNA"}
 
 # An opener's shape: gone inside an inning, with someone behind him who went
-# long. Three outs is the opener's whole job, and three innings is more than a
-# club asks of the first arm out of a bullpen game — between them they separate
-# "the plan was one inning" from "the start fell apart". Both are only ever a
-# question; see the module docstring.
+# long. Both are only ever a question; see the module docstring.
+#
+# Deliberately loose. Over the 18,820 team-games cached from 2016 on, this asks
+# about 98 of them — nine a season — and most are not openers at all but starts
+# that fell apart: of the nine it found in 2026, seven had the first pitcher
+# leaving on two to six runs. Tightening it is easy and was measured. Requiring
+# the pitcher behind him to go five innings rather than three cuts it to 1.4 a
+# season; also asking that the first gave up no more than a run cuts it to 1.7.
+#
+# Kept wide anyway, per Evan. A question costs a line in a Telegram note and is
+# answered by ignoring it. A miss costs a season of a pitcher's record filed
+# under the wrong man, silently, with nothing downstream that would show it.
 OPENER_OUTS = 3
 RELIEVED_BY_OUTS = 9
 

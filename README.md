@@ -359,6 +359,10 @@ uv run python migration/add_npb_starter_override_sheet.py
   long outing behind him is the shape of an opener, and every such game with no
   row gets named in one Telegram note at the end of the run, once per game
   however many times it is parsed. Answering it is filling in a row.
+- The question is deliberately loose — about nine a season across the cached
+  box scores, most of them starts that fell apart rather than openers. A
+  question is answered by ignoring it; a miss files a season of a pitcher's
+  record under the wrong man with nothing downstream that would show it.
 - A designated pitcher who never took the mound — a typo — falls back to the
   first pitcher and says so in the log. The correction is lost; the game is not.
 - Correcting a game already written: fill the row in, then
