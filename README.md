@@ -21,6 +21,7 @@ Automated scrapers that pull game results from CPBL, NPB, and MLB, then write st
 │   ├── npb_record_sync.py           # Mirrors 分析表紀錄 -> 紀錄總表 (other workbook)
 │   ├── npb_diary.py                 # Keeps the 2026・野球日記 tab current
 │   ├── npb_box.py                   # Reads a pitching line out of an npb.jp box score
+│   ├── npb_starter_overrides.py     # 先發指定: who really started, when an opener did not
 │   ├── npb_tenki.py                 # tenki.jp hourly forecast, by ballpark
 │   ├── npb_weather.py               # Records each game's weather, which cannot be backfilled
 │   ├── mlb_games.py                 # Resolves MLB gamePk for an odds event
@@ -320,6 +321,55 @@ python migration/write_npb_starter_log.py
   every rolling window this table feeds is a sum.
 - Relief appearances are parsed and cached but not written to the sheet —
   bullpen fatigue is a different question with a different shape.
+
+### 先發指定 / openers (`baseball/npb_starter_overrides.py`)
+
+Every reader of a box score here assumed the same thing: the first pitcher in a
+team's table is the starter. That is true of almost every game and wrong about
+an opener. On 2026-09-15 西武 sent 森脇 亮介 out for one inning and gave the next
+seven to 平良 海馬, and the record read "西武's starter went 1 inning, 0 ER" for a
+game 平良 threw eight innings of one-run ball in.
+
+The **先發指定** tab (in the same workbook as 賽錄) names the real starter of one
+game, and nothing else:
+
+| 日期 | 球隊 | 真正的先發 | 備註 |
+| --- | --- | --- | --- |
+| 2026-09-15 | 西武 | 平良 海馬 | 森脇 亮介 開局 1 局 |
+
+```bash
+uv run python migration/add_npb_starter_override_sheet.py --dry-run
+uv run python migration/add_npb_starter_override_sheet.py
+```
+
+- The rule a row triggers is the whole mechanism: **every pitcher ahead of the
+  named one is folded into his line.** One opener or two, an inning or three —
+  the name is enough, and nothing has to say how many innings to merge.
+- A game with no row behaves exactly as it always has, so the tab holds only
+  exceptions. A missing or unreachable tab costs the corrections, not the run.
+- All three readers of a box score go through `_parse_team_pitching` in `npb.py`
+  or `merged_starter` in the 先発明細 backfill, and all three read this tab.
+  Before, the rule was written out three times; a backfill would have put the
+  opener back into a record the sweep had already corrected.
+- **Nothing is detected automatically.** An opener pulled after an inning and a
+  starter chased out of one are the same box score, and Yahoo registers the
+  opener as 先発 either way — 予告先発 names him too, because that is who the club
+  announced. The difference is the club's intent, so a person supplies it.
+- What the sweep does do is **ask**. A first pitcher gone inside an inning with a
+  long outing behind him is the shape of an opener, and every such game with no
+  row gets named in one Telegram note at the end of the run, once per game
+  however many times it is parsed. Answering it is filling in a row.
+- The question is deliberately loose — about nine a season across the cached
+  box scores, most of them starts that fell apart rather than openers. A
+  question is answered by ignoring it; a miss files a season of a pitcher's
+  record under the wrong man with nothing downstream that would show it.
+- A designated pitcher who never took the mound — a typo — falls back to the
+  first pitcher and says so in the log. The correction is lost; the game is not.
+- Correcting a game already written: fill the row in, then
+  `uv run python migration/audit_npb_history.py --game-ids <id> --write-sheet`,
+  which re-scrapes through the same parser and rewrites 賽錄 and 分析表紀錄.
+  The weekly audit reads the tab as well, so a designated game stops being
+  reported as a disagreement.
 
 ### 天氣 (`baseball/npb_weather.py`)
 

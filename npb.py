@@ -2134,6 +2134,114 @@ async def _official_caught_stealing_for_game(
     return _parse_official_caught_stealing(html or "")
 
 
+# Yahoo Baseball's pitching table, one row per pitcher in the order they took
+# the mound. Score cells (12 of them) run:
+#   ERA(0), IP(1), PC(2), BF(3), H(4), HR(5), SO(6), BB(7), HBP(8), BK(9), R(10), ER(11)
+# There is no Str (好球數) or WP (暴投) column, so stats[3] and stats[9] stay 0.
+# The 13-value stats array every sheet downstream reads runs:
+#   [IP, BF, PC, Str, H, HR, BB, HBP, SO, WP, BK, R, ER]
+def _pitch_zero() -> list:
+    return [0] * 13
+
+
+def _pitch_ip_str(outs: int) -> str:
+    full, rem = divmod(outs, 3)
+    if rem == 0:
+        return str(full)
+    return f"{full}.3333" if rem == 1 else f"{full}.6667"
+
+
+def _pitch_outs(ip_raw) -> int:
+    try:
+        parts = str(ip_raw).strip().split(".")
+        return int(parts[0]) * 3 + (int(parts[1]) if len(parts) > 1 else 0)
+    except Exception:
+        return 0
+
+
+def _pitch_int(cell) -> int:
+    try:
+        return int(cell.text.strip())
+    except Exception:
+        return 0
+
+
+def _pitch_accumulate(stats: list, cells: list) -> None:
+    """Add one pitcher's row into stats[], which may already hold others."""
+    n = len(cells)
+    if n >= 11:
+        stats[2] += _pitch_int(cells[2])   # PC  (投球數)
+        stats[1] += _pitch_int(cells[3])   # BF  (打席)
+        stats[4] += _pitch_int(cells[4])   # H   (被安打)
+        stats[5] += _pitch_int(cells[5])   # HR  (被HR)
+        stats[8] += _pitch_int(cells[6])   # SO  (三振)
+        stats[6] += _pitch_int(cells[7])   # BB  (四球)
+        stats[7] += _pitch_int(cells[8])   # HBP (死球)
+        if n >= 12:
+            stats[10] += _pitch_int(cells[9])   # BK (ボーク)
+    elif n >= 10:
+        # Older 10-cell format: ERA, IP, BF, H, HR, BB, HBP, SO, R, ER
+        stats[1] += _pitch_int(cells[2])   # BF
+        stats[4] += _pitch_int(cells[3])   # H
+        stats[5] += _pitch_int(cells[4])   # HR
+        stats[6] += _pitch_int(cells[5])   # BB
+        stats[7] += _pitch_int(cells[6])   # HBP
+        stats[8] += _pitch_int(cells[7])   # SO
+    # R and ER are the last two cells whichever format this is.
+    if n >= 10:
+        stats[11] += _pitch_int(cells[-2])  # R  (失分)
+        stats[12] += _pitch_int(cells[-1])  # ER (自責分)
+
+
+def _pitcher_entries(ptbl) -> list:
+    """(name, score cells, outs) per pitcher, in the order they pitched."""
+    entries = []
+    for row in ptbl.find_all(class_="bb-scoreTable__row"):
+        cells = row.find_all(class_="bb-scoreTable__data--score")
+        if len(cells) < 2:
+            continue
+        name_el = row.find(class_="bb-scoreTable__data--player")
+        raw_name = name_el.text.strip() if name_el else ""
+        name = re.sub(r"\s*[（(][右左][）)]\s*", "", raw_name).strip()
+        entries.append((name, cells, _pitch_outs(cells[1].text.strip())))
+    return entries
+
+
+def _parse_team_pitching(ptbl, *, game_date: str = "", team: str = ""):
+    """One team's pitching table → (starter line, whole-team line, starter name).
+
+    The starter is the table's first pitcher, which is what Yahoo registers and
+    what is true of almost every game. Where a club used an opener it is not,
+    and no box score can say so — see baseball/npb_starter_overrides.py. A game
+    somebody has designated there reads the starter's line across every pitcher
+    up to and including the one they named, so the innings an opener was sent
+    out to cover land on the pitcher the club actually started.
+    """
+    from baseball import npb_starter_overrides as overrides
+
+    entries = _pitcher_entries(ptbl)
+    if not entries:
+        return _pitch_zero(), _pitch_zero(), ""
+
+    names = [name for name, _, _ in entries]
+    outs = [count for _, _, count in entries]
+    designation = overrides.designated(game_date, team) if team else None
+    span = overrides.starter_span(names, designation)
+    # Asked about, never acted on: an opener and a start that fell apart are the
+    # same box score, and only a person can tell them apart.
+    if team and designation is None and overrides.looks_like_an_opener(outs):
+        overrides.note_candidate(game_date, team, names, outs)
+
+    s_stats, t_stats = _pitch_zero(), _pitch_zero()
+    for index, (_, cells, _outs) in enumerate(entries):
+        if index < span:
+            _pitch_accumulate(s_stats, cells)
+        _pitch_accumulate(t_stats, cells)
+    s_stats[0] = _pitch_ip_str(sum(outs[:span]))
+    t_stats[0] = _pitch_ip_str(sum(outs))
+    return s_stats, t_stats, names[span - 1]
+
+
 async def get_sailu_game_data(
     game_id: str, session: aiohttp.ClientSession
 ) -> Optional[dict]:
@@ -2248,25 +2356,11 @@ async def get_sailu_game_data(
     away_qs = home_qs = 0
 
     for p_idx, ptbl in enumerate(soup.find_all(class_="bb-scoreTable")[:2]):
-        rows = ptbl.find_all(class_="bb-scoreTable__row")
-        if not rows:
+        team = away_raw if p_idx == 0 else home_raw
+        s_pitch, _, name = _parse_team_pitching(ptbl, game_date=date_str, team=team)
+        if not name:
             continue
-        row = rows[0]  # starter is always first row
-
-        # Name — strip any (右)/(左) suffix that may appear
-        name_el = row.find(class_="bb-scoreTable__data--player")
-        raw_name = name_el.text.strip() if name_el else ""
-        name = re.sub(r"\s*[（(][右左][）)]\s*", "", raw_name).strip()
-
-        # score cells current format: [ERA, IP, PC, Str, BF, H, HR, BB, HBP, SO, …, R, ER]
-        # [0]=ERA, [1]=IP, [-2]=R, [-1]=ER (positions are format-independent)
-        score_cells = row.find_all(class_="bb-scoreTable__data--score")
-        ip = score_cells[1].text.strip() if len(score_cells) > 1 else ""
-        try:
-            er = int(score_cells[-1].text) if score_cells else 0
-        except ValueError:
-            er = 0
-
+        ip, er = s_pitch[0], s_pitch[12]
         # QS: 7+ IP & <=3 ER, or 6+ IP & <=2 ER, or 5+ IP & <=1 ER.
         qs = NpbRowsService.qs_flag(ip, er)
 
@@ -2437,106 +2531,21 @@ async def get_schedule_game_data(
                 home_r, home_h, home_e = _si(total_el), _si(hits_el), _si(error_el)
 
     # ── Pitching stats ─────────────────────────────────────────────────────
-    # pitch_tables[0]=away pitchers, [1]=home pitchers
-    # Yahoo Baseball current cell order (score cells only, 12 cells):
-    #   ERA(0), IP(1), PC(2), BF(3), H(4), HR(5), SO(6), BB(7), HBP(8), BK(9), R(10), ER(11)
-    # No Str (好球數) or WP (暴投) column — stats[3] and stats[9] stay 0.
-    # Stats array order for 賽程 sheet (13 values, indices 0-12):
-    #   [IP, BF, PC, Str, H, HR, BB, HBP, SO, WP, BK, R, ER]
-    def _parse_pitch_block(ptbl):
-        def _zero():
-            return [0] * 13
-
-        def _ip_str(outs):
-            full, rem = divmod(outs, 3)
-            if rem == 0:
-                return str(full)
-            return f"{full}.3333" if rem == 1 else f"{full}.6667"
-
-        def _parse_outs(ip_raw):
-            try:
-                parts = str(ip_raw).strip().split(".")
-                return int(parts[0]) * 3 + (int(parts[1]) if len(parts) > 1 else 0)
-            except Exception:
-                return 0
-
-        def _safe(cell):
-            try:
-                return int(cell.text.strip())
-            except Exception:
-                return 0
-
-        def _accumulate(stats, cells):
-            """Accumulate stats from one pitcher row into stats[].
-            Uses += throughout so it works for both single-pitcher (starter)
-            and multi-pitcher (total) aggregation."""
-            n = len(cells)
-            if n >= 11:
-                # Current 12-cell format: ERA(0), IP(1), PC(2), BF(3), H(4), HR(5),
-                #   SO(6), BB(7), HBP(8), BK(9), R(10), ER(11)
-                stats[2] += _safe(cells[2])  # PC  (投球數)
-                stats[1] += _safe(cells[3])  # BF  (打席)
-                stats[4] += _safe(cells[4])  # H   (被安打)
-                stats[5] += _safe(cells[5])  # HR  (被HR)
-                stats[8] += _safe(cells[6])  # SO  (三振)
-                stats[6] += _safe(cells[7])  # BB  (四球)
-                stats[7] += _safe(cells[8])  # HBP (死球)
-                if n >= 12:
-                    stats[10] += _safe(cells[9])  # BK  (ボーク)
-            elif n >= 10:
-                # Older 10-cell format: ERA, IP, BF, H, HR, BB, HBP, SO, R, ER
-                stats[1] += _safe(cells[2])  # BF
-                stats[4] += _safe(cells[3])  # H
-                stats[5] += _safe(cells[4])  # HR
-                stats[6] += _safe(cells[5])  # BB
-                stats[7] += _safe(cells[6])  # HBP
-                stats[8] += _safe(cells[7])  # SO
-            # R and ER are always the last two cells regardless of format
-            if n >= 10:
-                stats[11] += _safe(cells[-2])  # R  (失分)
-                stats[12] += _safe(cells[-1])  # ER (自責分)
-
-        rows = ptbl.find_all(class_="bb-scoreTable__row")
-        if not rows:
-            return _zero(), _zero(), ""
-
-        s_stats = _zero()
-        t_stats = _zero()
-        starter_name = ""
-        total_outs = 0
-
-        for i, row in enumerate(rows):
-            cells = row.find_all(class_="bb-scoreTable__data--score")
-            if len(cells) < 2:
-                continue
-            outs = _parse_outs(cells[1].text.strip())
-            total_outs += outs
-
-            if i == 0:
-                name_el = row.find(class_="bb-scoreTable__data--player")
-                if name_el:
-                    starter_name = re.sub(
-                        r"\s*[（(][右左][）)]\s*", "", name_el.text.strip()
-                    ).strip()
-                s_stats[0] = _ip_str(outs)
-                _accumulate(s_stats, cells)  # starter only
-
-            _accumulate(t_stats, cells)  # all pitchers → total
-
-        t_stats[0] = _ip_str(total_outs)
-        return s_stats, t_stats, starter_name
-
-    away_s_pitch = [0] * 13
-    away_t_pitch = [0] * 13
-    home_s_pitch = [0] * 13
-    home_t_pitch = [0] * 13
+    away_s_pitch = _pitch_zero()
+    away_t_pitch = _pitch_zero()
+    home_s_pitch = _pitch_zero()
+    home_t_pitch = _pitch_zero()
     away_starter = home_starter = ""
 
     pitch_tables = soup.find_all(class_="bb-scoreTable")[:2]
     if len(pitch_tables) >= 1:
-        away_s_pitch, away_t_pitch, away_starter = _parse_pitch_block(pitch_tables[0])
+        away_s_pitch, away_t_pitch, away_starter = _parse_team_pitching(
+            pitch_tables[0], game_date=date_str, team=away_raw
+        )
     if len(pitch_tables) >= 2:
-        home_s_pitch, home_t_pitch, home_starter = _parse_pitch_block(pitch_tables[1])
+        home_s_pitch, home_t_pitch, home_starter = _parse_team_pitching(
+            pitch_tables[1], game_date=date_str, team=home_raw
+        )
 
     # ── QS: 7+ IP & <=3 ER, or 6+ IP & <=2 ER, or 5+ IP & <=1 ER ───────────
     away_qs = NpbRowsService.qs_flag(away_s_pitch[0], away_s_pitch[12])
