@@ -576,3 +576,29 @@ def test_a_held_run_does_not_scrape_yahoo_for_the_starters(monkeypatch):
     slate[0]["all_totals"] = TOTALS
     on.run_once(game_date="2026-08-25", phase="open", ledger=_Ledger())
     assert scrapes == ["2026-08-25"]
+
+
+def test_the_forecast_links_to_the_page_it_was_read_from():
+    """One hour of a forecast is what fits in the post; the rest is a tap away.
+
+    The summary is the reading for first pitch alone, and a marginal sky is
+    exactly where a reader wants the hours either side of it. Carrying them in
+    the message would cost more lines than the line itself; carrying the page
+    costs none, so the sky is linked the way the pitchers are.
+    """
+    from baseball.npb_starters import Slate, Weather
+
+    page = "https://tenki.jp/forecast/3/16/4410/13105/1hour.html"
+    sky = Slate(starters={}, weather={"巨人": Weather("曇り", temp_c="28", url=page)})
+    text = on.build_message([_snapshot()], now=NOW, context=sky)
+    assert f'<a href="{page}">曇り 28℃</a>' in text
+
+
+def test_a_forecast_with_no_page_behind_it_is_still_printed():
+    """Yahoo's game card names a sky it does not link to for every ground."""
+    from baseball.npb_starters import Slate, Weather
+
+    sky = Slate(starters={}, weather={"巨人": Weather("曇り", temp_c="28")})
+    text = on.build_message([_snapshot()], now=NOW, context=sky)
+    assert "曇り 28℃" in text
+    assert "<a href=" not in text

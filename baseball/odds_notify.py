@@ -148,6 +148,26 @@ def _pitcher_label(team: str, starters: dict, *, link: bool = True) -> str:
     return f'<a href="{starter.url}">{_escape(name)}</a>'
 
 
+def _forecast_label(sky, *, link: bool = True) -> str:
+    """The sky, linked to the page the reading came from.
+
+    What the post carries is one hour of a forecast — the hour of first pitch —
+    and a marginal sky is exactly where a reader wants the hours either side of
+    it. Those would cost more lines than the whole game's entry; the page they
+    are on costs none, so the summary is linked the way the pitchers are.
+
+    Only the opening post links, for the same reason the pitchers only do
+    there: it is the one read hours ahead, where the rest of the day still
+    matters. Both sources carry a page — tenki.jp's hourly table, or the Yahoo
+    pinpoint page its game card points at — but a ground that fell back to a
+    bare game-card icon has none, and the line is printed unlinked.
+    """
+    summary = _escape(sky.summary())
+    if not summary or not link or not sky.url:
+        return summary
+    return f'<a href="{_escape(sky.url)}">{summary}</a>'
+
+
 def _start_time(snapshot: dict, league: LeagueSpec) -> tuple[str, str]:
     """(sort key, display time) for a snapshot's first pitch."""
     raw = snapshot.get(league.start_column) or ""
@@ -259,7 +279,7 @@ def build_message(snapshots: list[dict], *, now: datetime,
             lines.append("　".join(row).rstrip("　"))
         sky = context.weather.get(home) or context.weather.get(away) if weather else None
         if sky is not None:
-            lines.append(f"　　{_escape(sky.summary())}")
+            lines.append(f"　　{_forecast_label(sky, link=link)}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
