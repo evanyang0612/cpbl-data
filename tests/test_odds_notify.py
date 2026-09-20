@@ -164,10 +164,16 @@ def _stub_feed(monkeypatch, snapshots):
     monkeypatch.setattr(on, "fetch_baseball_events", lambda: {})
     monkeypatch.setattr(on, "parse_events", lambda raw, league=None: snapshots)
     monkeypatch.setattr(on, "_send", lambda msg: sent.append(msg) or True)
-    # Starters come from Yahoo; these tests are about the broadcast, not it.
+    # Starters and the day's game count both come from Yahoo; these tests are
+    # about the broadcast, not about it. A slate whose size is unknown is one
+    # the completeness gate leaves alone, so the default here is no answer and
+    # the tests that are about the gate give it one (see _league).
+    from baseball import npb_starters
     from baseball.npb_starters import Slate
     monkeypatch.setattr(on, "_starters_for",
                         lambda league, game_date: Slate(starters={}, weather={}))
+    monkeypatch.setattr(npb_starters, "fetch_scheduled_count",
+                        lambda game_date, **kw: None)
     return sent
 
 
@@ -602,3 +608,145 @@ def test_a_forecast_with_no_page_behind_it_is_still_printed():
     text = on.build_message([_snapshot()], now=NOW, context=sky)
     assert "曇り 28℃" in text
     assert "<a href=" not in text
+
+
+# ---------------------------------------------------------------------------
+# A board that has opened only part of the slate
+# ---------------------------------------------------------------------------
+# PS3838 opens a day's games in waves: on 2026-09-19 four of the six 9/20
+# games were on the board at 22:01 and the other two arrived at 22:30. The
+# 22:01 run priced all four cleanly, posted them, and the ledger kept every
+# later run quiet — so the slate went out two games short. A settled board is
+# not the same thing as a complete one, and how many games a day has is
+# something Yahoo's schedule already knows.
+
+
+def _clock(when):
+    """A fixed now that still parses ISO timestamps the way the module needs."""
+    class _Clock:
+        @staticmethod
+        def now(tz=None):
+            return when.astimezone(tz) if tz else when
+
+        @staticmethod
+        def fromisoformat(text):
+            return datetime.fromisoformat(text)
+
+    return _Clock
+
+
+def _league(scheduled):
+    """NPB, with the schedule answering a fixed count rather than Yahoo."""
+    from dataclasses import replace
+    return replace(on.NPB, scheduled_games=lambda game_date: scheduled)
+
+
+def _partial_slate(mins_to_start=300):
+    return [_snapshot(event_id="1", game_date="2026-08-25",
+                      start="2026-08-25T18:00:00+09:00",
+                      mins_to_start=mins_to_start)]
+
+
+def _full_slate(mins_to_start=300):
+    return _partial_slate(mins_to_start) + [
+        _snapshot(event_id="2", home="中日", away="阪神",
+                  game_date="2026-08-25", start="2026-08-25T18:00:00+09:00",
+                  mins_to_start=mins_to_start)]
+
+
+def test_a_board_short_of_the_days_games_waits_for_the_next_run(monkeypatch):
+    """Every line on the board is priced, so nothing is unsettled — but the
+    day has two games and the board carries one, and the open is the post that
+    covers the whole day."""
+    sent = _stub_feed(monkeypatch, _partial_slate())
+    ledger = _Ledger()
+
+    assert on.run_once(_league(2), game_date="2026-08-25", phase="open",
+                       ledger=ledger) == []
+    assert sent == []
+    assert ledger.recorded == []   # nothing sent, so a later run still may
+
+
+def test_the_whole_slate_goes_out_on_the_run_that_completes_it(monkeypatch):
+    slate = _partial_slate()
+    sent = _stub_feed(monkeypatch, slate)
+    ledger = _Ledger()
+    league = _league(2)
+
+    on.run_once(league, game_date="2026-08-25", phase="open", ledger=ledger)
+    slate.extend(_full_slate()[1:])
+    on.run_once(league, game_date="2026-08-25", phase="open", ledger=ledger)
+
+    assert len(sent) == 1
+    assert "阪神 @ 中日" in sent[0]
+    assert ledger.recorded == [("2026-08-25", "open", 2)]
+
+
+def test_a_schedule_that_cannot_be_read_does_not_hold_the_slate(monkeypatch):
+    """Yahoo is allowed to be down; it costs the pitcher names, and it must
+    not cost the broadcast."""
+    sent = _stub_feed(monkeypatch, _partial_slate())
+
+    on.run_once(_league(None), game_date="2026-08-25", phase="open",
+                ledger=_Ledger())
+
+    assert len(sent) == 1
+
+
+def test_waiting_for_the_missing_games_stops_before_the_day_rolls(monkeypatch):
+    """The opening broadcast is only polled from the evening into the small
+    hours, and at DAY_ROLLS_AT it starts aiming at the next slate. A hold that
+    outlives the window is not a hold, it is a post that never happens."""
+    monkeypatch.setattr(on, "datetime",
+                        _clock(datetime(2026, 8, 25, 5, 45, tzinfo=JST)))
+    sent = _stub_feed(monkeypatch, _partial_slate(mins_to_start=735))
+
+    on.run_once(_league(2), game_date="2026-08-25", phase="open",
+                ledger=_Ledger())
+
+    assert len(sent) == 1
+
+
+def test_the_last_call_also_releases_a_board_that_never_settled(monkeypatch):
+    """Same window, same reason: a game the ladder never priced would
+    otherwise hold the open past the point anything still runs."""
+    monkeypatch.setattr(on, "datetime",
+                        _clock(datetime(2026, 8, 25, 5, 45, tzinfo=JST)))
+    thin = _partial_slate(mins_to_start=735)
+    thin[0]["all_totals"] = UNSETTLED_TOTALS
+    sent = _stub_feed(monkeypatch, thin)
+
+    on.run_once(game_date="2026-08-25", phase="open", ledger=_Ledger())
+
+    assert len(sent) == 1
+
+
+def test_the_close_is_not_measured_against_the_whole_day(monkeypatch):
+    """A closing post belongs to one first pitch, so a 18:00 group of one on a
+    two-game day is complete, not short."""
+    sent = _stub_feed(monkeypatch, _partial_slate(mins_to_start=20))
+
+    on.run_once(_league(2), game_date="2026-08-25", phase="close",
+                ledger=_Ledger())
+
+    assert len(sent) == 1
+
+
+def test_the_schedule_is_only_asked_once_the_board_is_otherwise_ready(monkeypatch):
+    """Yahoo answers a burst with 500s and the job is re-triggered every few
+    minutes, so an unsettled board is held without asking anything of it."""
+    from dataclasses import replace
+
+    asked = []
+    slate = _partial_slate()
+    slate[0]["all_totals"] = UNSETTLED_TOTALS
+    _stub_feed(monkeypatch, slate)
+    league = replace(on.NPB,
+                     scheduled_games=lambda game_date: asked.append(game_date) or 1)
+
+    on.run_once(league, game_date="2026-08-25", phase="open", ledger=_Ledger())
+    assert asked == []
+
+    slate[0]["all_totals"] = TOTALS
+    on.run_once(league, game_date="2026-08-25", phase="open", ledger=_Ledger())
+    assert asked == ["2026-08-25"]

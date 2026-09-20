@@ -237,6 +237,11 @@ class LeagueSpec:
     # Optional post-parse pass that resolves the join key from the league's own
     # API (see enrich_mlb); receives and mutates the snapshot list.
     enrich: Callable[[list[dict]], None] | None = None
+    # Optional count of the games a date is scheduled to have, from a source
+    # of the league's own. The opening broadcast holds a slate the board has
+    # not finished listing, and without this it cannot tell a four-game day
+    # from a six-game day the board has opened four of.
+    scheduled_games: Callable[[str], int | None] | None = None
     headers: list[str] = field(default_factory=list)
 
     def sheet_headers(self) -> list[str]:
@@ -253,6 +258,12 @@ def _npb_spreadsheet_key() -> str:
     # dedicated 盤口 tab.
     import npb
     return npb.NPB_SPREADSHEET_KEY
+
+
+def _npb_scheduled_games(game_date: str) -> int | None:
+    # Yahoo's weekly schedule, which the starter lookup already reads.
+    from baseball.npb_starters import fetch_scheduled_count
+    return fetch_scheduled_count(game_date)
 
 
 def _mlb_spreadsheet_key() -> str:
@@ -277,6 +288,7 @@ NPB = LeagueSpec(
     team_fields=_npb_team_fields,
     spreadsheet_env="ODDS_SPREADSHEET_KEY",
     default_spreadsheet_key=_npb_spreadsheet_key,
+    scheduled_games=lambda game_date: _npb_scheduled_games(game_date),
     headers=SHEET_HEADERS,
 )
 

@@ -63,6 +63,12 @@ CLOSE_WITHIN_MINUTES = 30
 # pitch, where a gap in the post beats no post at all.
 SETTLE_WITHIN_MINUTES = 10
 
+# Waiting also stops this long before the slate rolls over. The opening
+# broadcast is only polled from the evening into the small hours, so a hold
+# carried past the roll is not a hold but a post that never happens — whatever
+# the board has by the last runs of the window is what goes out.
+LAST_CALL_MINUTES = 30
+
 
 def _quotes(snapshot: dict) -> tuple[al.Quote | None, al.Quote | None]:
     """Price one game's handicap and total from its full odds ladder."""
@@ -92,6 +98,20 @@ def _unsettled(snapshots: list[dict]) -> list[str]:
             home = snap.get("home_norm") or snap.get("home_team") or ""
             unsettled.append(f"{away} @ {home}")
     return unsettled
+
+
+def _incomplete(games: list[dict], scheduled: int | None) -> str:
+    """Why the day's board is still short of the day, if it is.
+
+    Settled is not the same as complete: PS3838 opens a slate in waves, and on
+    2026-09-19 four of the next day's six games were priced at 22:01 while the
+    other two only appeared at 22:30. Every line the board had was clean, so
+    nothing read as unsettled and the four-game post went out as the day.
+    """
+    listed = len(_pick_full_game(games))
+    if not scheduled or listed >= scheduled:
+        return ""
+    return f"{listed} of {scheduled} games"
 
 
 def _total_text(quote: al.Quote | None) -> str:
@@ -293,6 +313,14 @@ def build_message(snapshots: list[dict], *, now: datetime,
 DAY_ROLLS_AT = 6
 
 
+def _last_call(now: datetime) -> bool:
+    """Whether this is the last of the runs the held slate can wait for."""
+    roll = now.replace(hour=DAY_ROLLS_AT, minute=0, second=0, microsecond=0)
+    if now >= roll:
+        roll += timedelta(days=1)
+    return (roll - now) <= timedelta(minutes=LAST_CALL_MINUTES)
+
+
 def _next_day(league: LeagueSpec) -> str:
     """The slate the evening broadcast is about."""
     now = datetime.now(tz=league.tz) - timedelta(hours=DAY_ROLLS_AT)
@@ -415,26 +443,41 @@ def _by_first_pitch(slate: list[dict], league: LeagueSpec) -> dict[str, list[dic
 def _broadcast(games: list[dict], *, league: LeagueSpec, game_date: str | None,
                phase: str, slot: str, label: str, send: bool, ledger,
                context=None, link: bool = True, weather: bool = True,
+               scheduled=None,
                settle_within: int = SETTLE_WITHIN_MINUTES) -> str | None:
     """Post one message and remember it, unless that slot already went out.
 
-    A slate the board has not settled is held rather than sent: nothing is
+    A slate the board has not finished is held rather than sent: nothing is
     posted and nothing is recorded, so the next trigger tries the same slot
-    again against a board that has had a few more minutes to fill in.
+    again against a board that has had a few more minutes to fill in. Finished
+    means two things — every game it lists is priced, and it lists every game
+    the day has.
 
-    ``context`` is a callable rather than a slate so that nothing is scraped
-    for a post that is not going out.
+    ``context`` and ``scheduled`` are callables rather than values so that
+    nothing is scraped for a post that is not going out.
     """
     if game_date and ledger.sent(game_date, slot):
         print(f"[notify] {game_date} {slot} already broadcast; nothing to do")
         return None
-    unsettled = _unsettled(games)
+    now = datetime.now(tz=league.tz)
     lead = _minutes_to_first_pitch(games)
-    if unsettled and lead is not None and lead > settle_within:
-        print(f"[notify] the board has not settled {', '.join(unsettled)}; "
-              f"holding {slot} for a later run")
-        return None
-    message = build_message(games, now=datetime.now(tz=league.tz),
+    # Past either edge of the window there is no later run worth holding for,
+    # and a gap in the post beats no post at all.
+    patient = lead is not None and lead > settle_within and not _last_call(now)
+    if patient:
+        unsettled = _unsettled(games)
+        if unsettled:
+            print(f"[notify] the board has not settled {', '.join(unsettled)}; "
+                  f"holding {slot} for a later run")
+            return None
+        # Asked only here: the schedule is re-read for as long as a slate is
+        # held, so an unsettled board is held without troubling Yahoo at all.
+        short = _incomplete(games, scheduled() if scheduled else None)
+        if short:
+            print(f"[notify] the board is still opening — {short}; "
+                  f"holding {slot} for a later run")
+            return None
+    message = build_message(games, now=now,
                             league=league, phase_label=label, context=context(),
                             link=link, weather=weather)
     if message is None:
@@ -484,9 +527,15 @@ def run_once(league: LeagueSpec = NPB, *, send: bool = True,
     context = cache(lambda: _starters_for(league, game_date))
 
     if phase != "close":
+        # Only the open is measured against the day: a closing post belongs to
+        # one first pitch, so a 18:00 group is complete at two games on a
+        # six-game card.
+        scheduled = cache(lambda: league.scheduled_games(game_date)
+                          if league.scheduled_games and game_date else None)
         sent = _broadcast(slate, league=league, game_date=game_date, phase=phase,
                           slot=phase, label=title, send=send, ledger=ledger,
-                          context=context, settle_within=settle_within)
+                          context=context, scheduled=scheduled,
+                          settle_within=settle_within)
         return [sent] if sent else []
 
     messages = []
