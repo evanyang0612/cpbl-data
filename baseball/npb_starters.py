@@ -472,6 +472,24 @@ def _schedule_for(game_date: str, *, fetch=_get) -> str | None:
     return None
 
 
+def fetch_scheduled_count(game_date: str, *, fetch=_get) -> int | None:
+    """How many games NPB has scheduled on ``game_date``, or None if unknown.
+
+    The opening broadcast needs this to tell a board that has finished opening
+    from one that is still opening in waves: PS3838 lists a day's games in
+    batches, and four priced games read exactly like a four-game day. It is
+    asked every few minutes for as long as a slate is held, so it stops at the
+    schedule page — the same one, for the same week — and never opens a game.
+
+    Unknown rather than zero wherever the page cannot answer: a day nobody can
+    count is a day the broadcast must not wait on.
+    """
+    schedule = _schedule_for(game_date, fetch=fetch)
+    if schedule is None:
+        return None
+    return len(_game_ids_on(schedule, _japanese_date(game_date))) or None
+
+
 def fetch_slate(game_date: str, *, fetch=_get) -> Slate:
     """Starters and forecasts for ``game_date``, from the same game pages.
 

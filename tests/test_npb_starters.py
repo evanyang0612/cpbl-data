@@ -495,3 +495,59 @@ def test_a_schedule_that_never_answers_costs_the_names_not_the_broadcast():
 
     slate = ns.fetch_slate("2026-08-25", fetch=fetch)
     assert slate.starters == {} and slate.weather == {}
+
+
+# --- how many games the day has -------------------------------------------
+
+def test_the_scheduled_count_is_read_off_the_schedule_page_alone():
+    """How many games a day has is the one thing the weekly schedule already
+    knows, and the broadcast asks it every few minutes for as long as a slate
+    is held — so the count must not cost a request per game the way the
+    starters do."""
+    asked = []
+
+    def fetch(url):
+        asked.append(url)
+        if "/schedule/" in url:
+            return SCHEDULE_HTML
+        raise AssertionError(f"the count should not open {url}")
+
+    assert ns.fetch_scheduled_count("2026-08-25", fetch=fetch) == 2
+    assert len(asked) == 1
+
+
+def test_the_count_asks_for_the_week_the_slate_is_in():
+    """Same lookup as the starters, and for the same reason: a Monday slate is
+    counted on the Sunday evening before, from a week the bare page has not
+    reached."""
+    next_week = """
+    <html><body>
+      <h2>9月1日</h2>
+      <a href="/npb/game/2021039501/index">試合</a>
+      <a href="/npb/game/2021039502/index">試合</a>
+    </body></html>
+    """
+    asked = []
+
+    def fetch(url):
+        asked.append(url)
+        return next_week if "?date=" in url else SCHEDULE_HTML
+
+    assert ns.fetch_scheduled_count("2026-09-01", fetch=fetch) == 2
+    assert asked[0].endswith("schedule/?date=2026-09-01")
+
+
+def test_a_day_no_schedule_page_carries_has_no_known_count():
+    """A date the page does not list has no games on it, which says nothing
+    about how many the day has — and must not read as none."""
+    assert ns.fetch_scheduled_count("2026-08-26",
+                                    fetch=lambda url: SCHEDULE_HTML) is None
+
+
+def test_an_unreachable_schedule_leaves_the_count_unknown():
+    """Unknown holds nothing back: the broadcast must not wait on a day
+    nobody can count."""
+    def broken(url):
+        raise OSError("network down")
+
+    assert ns.fetch_scheduled_count("2026-08-25", fetch=broken) is None
