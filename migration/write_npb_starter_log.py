@@ -44,6 +44,32 @@ COLUMNS = [
 ]
 
 
+# Counting stats, which merge by adding. Everything else about the merged line
+# — who it belongs to, what he was credited with — comes from the real starter.
+_TOTALLED = ("pitches", "batters", "outs", "hits", "hr", "bb", "hbp", "so",
+             "wp", "balk", "runs", "er")
+
+
+def merged_starter(pitchers: list[dict], game_date: str, team: str) -> dict:
+    """The starter's line, with any opener sent out ahead of him folded in.
+
+    npb.jp lists the opener first, the same way Yahoo does, so this reads the
+    same 先發指定 tab the live sweep reads — otherwise a backfill would put the
+    opener back in a record the sweep had already corrected.
+    """
+    from baseball import npb_starter_overrides as overrides
+
+    span = overrides.starter_span(
+        [p.get("name", "") for p in pitchers],
+        overrides.designated(game_date, team),
+    )
+    starter = dict(pitchers[span - 1])
+    if span > 1:
+        for key in _TOTALLED:
+            starter[key] = sum(p.get(key) or 0 for p in pitchers[:span])
+    return starter
+
+
 def starter_rows(record: dict) -> list[list]:
     """The two starters' rows for one game, or none at all.
 
@@ -63,7 +89,7 @@ def starter_rows(record: dict) -> list[list]:
         (away_pitchers, record["away"], record["home"], "客"),
         (home_pitchers, record["home"], record["away"], "主"),
     ):
-        p = pitchers[0]
+        p = merged_starter(pitchers, record.get("date", ""), team)
         rows.append([
             record["date"], record["game_code"], team, opponent, side,
             p["name"], p.get("player_id") or "", p.get("result", ""),

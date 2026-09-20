@@ -2932,6 +2932,26 @@ class NpbSailuService:
             self._module = importlib.import_module("npb")
         return self._module
 
+    @staticmethod
+    def ask_about_openers() -> None:
+        """Pass on any game that looked like an opener, for a person to judge.
+
+        Sent rather than acted on: an opener pulled after an inning and a
+        starter chased out of one are the same box score, and reading the guess
+        into the record would quietly delete real starts. The note names both
+        pitchers and leaves the decision — and the row in 先發指定 — to whoever
+        reads it.
+        """
+        from baseball import npb_starter_overrides as overrides
+
+        message = overrides.candidate_message(overrides.take_candidates())
+        if not message:
+            return
+        print(message)
+        import utils
+
+        utils.send_telegram(message)
+
     async def update(self, session):
         module = self.module
         rows_service = NpbRowsService(module=module)
@@ -3081,6 +3101,7 @@ class NpbSailuService:
             f"[sailu] Done. Filled {filled} source row(s) and "
             f"{target_filled} target row(s)."
         )
+        self.ask_about_openers()
         source_written_ids = [gid for gid, _ in source_regular_games[:filled]]
         target_written_ids = [gid for gid, _ in target_regular_games[:target_filled]]
         written_ids = list(dict.fromkeys(source_written_ids + target_written_ids))
