@@ -4,7 +4,7 @@ name: NPB Odds Closing Broadcast
 # open is one post for the whole day, fired the evening before as soon as the
 # 早盤 board carries the slate. The close is per first pitch — on a staggered
 # card the 13:00 games have closed long before the 18:00 games stop moving —
-# so this runs through the playing day and posts each start time 30 minutes
+# so this runs through the playing day and posts each start time 10 minutes
 # before it begins, with games sharing a start time going out together.
 #
 # Triggered from cron-job.org on a tight interval; the broadcast ledger keeps

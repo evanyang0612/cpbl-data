@@ -27,7 +27,7 @@
 - [x] 3.2 Date the message by the games rather than by the broadcast
 - [x] 3.3 Narrow a broadcast to one target slate
 - [x] 3.4 Add the opening phase: whole slate, sent as soon as it appears
-- [x] 3.5 Add the closing phase: grouped by first pitch, held until 30 minutes
+- [x] 3.5 Add the closing phase: grouped by first pitch, held until 10 minutes
       before each start
 - [x] 3.6 Add the Sheets-backed ledger, keyed by game date, league and phase
 - [x] 3.7 Always resolve a concrete target date, so the ledger guard cannot be

@@ -39,13 +39,13 @@ SHALL NOT depend on being triggered at a particular time.
 
 ### Requirement: Announce the closing line per first pitch
 
-The closing broadcast SHALL be sent 30 minutes before first pitch and SHALL be
+The closing broadcast SHALL be sent 10 minutes before first pitch and SHALL be
 scoped to one start time, because a staggered card closes at different moments.
 Games sharing a start time SHALL be announced together in one message.
 
 #### Scenario: A staggered card
 
-- **WHEN** the earliest games are within 30 minutes of starting while later
+- **WHEN** the earliest games are within 10 minutes of starting while later
   games are hours away
 - **THEN** only the earliest start time is broadcast, and the later ones are
   broadcast by subsequent runs as each becomes due

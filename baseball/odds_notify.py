@@ -12,7 +12,7 @@ reaches PS3838's 早盤 board once the previous evening's games have finished,
 and not at a fixed hour, so it posts on whichever run first sees the games —
 one message for the whole day.
 
-``--phase close`` posts the closing line 30 minutes before first pitch, and is
+``--phase close`` posts the closing line 10 minutes before first pitch, and is
 therefore per start time rather than per day: on a staggered card the 13:00
 games have long closed while the 18:00 games are still moving, so each first
 pitch gets its own post. Games sharing a start time go out together.
@@ -54,8 +54,10 @@ HANDICAP_SLOT = 4
 
 # The closing line is only the closing line near first pitch. Posting one five
 # hours early just repeats the open, so a close waits for the slate to come
-# within this many minutes of starting.
-CLOSE_WITHIN_MINUTES = 30
+# within this many minutes of starting. Ten is the settle floor below as well,
+# so a close never holds for an unsettled board: that near first pitch the
+# board has had a day to fill in, and a gap in the post beats no post at all.
+CLOSE_WITHIN_MINUTES = 10
 
 # A board that has just opened is often still filling in, and a game it cannot
 # price yet is worth waiting for: the job is re-triggered every few minutes and

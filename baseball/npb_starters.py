@@ -375,7 +375,7 @@ def _parse_game(html: str, wanted_date: str) -> dict[str, Starter]:
     Read from that table rather than from the page's player links at large: a
     fixture stops being the only two-link page on the site about an hour before
     first pitch, when the lineups are published and twenty-odd batters join
-    them. The closing line goes out at thirty minutes, well inside that.
+    them. The closing line goes out at ten minutes, well inside that.
     """
     title = re.search(r"<title>(.*?)</title>", html, re.S)
     if not title or wanted_date not in title.group(1):

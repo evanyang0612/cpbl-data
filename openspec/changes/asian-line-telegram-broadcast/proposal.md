@@ -38,7 +38,7 @@ Two defects blocked this and were found while building it:
 - Broadcast to a Telegram channel in two phases. The **open** is one post for
   the whole slate, sent the evening before as soon as the 早盤 board carries it.
   The **close** is per first pitch — a staggered card closes at different times
-  — sent 30 minutes before each start, with games sharing a start time grouped.
+  — sent 10 minutes before each start, with games sharing a start time grouped.
 - Trigger both from cron-job.org on a tight interval rather than GitHub's
   scheduler, which dropped 11 of 20 scheduled runs on 2026-08-23. Because
   neither phase knows when it will be due, each run decides for itself and a

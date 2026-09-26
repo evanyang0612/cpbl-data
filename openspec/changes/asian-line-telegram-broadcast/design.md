@@ -96,7 +96,7 @@ produces one post and one record.
 - **Two runs could overlap** and both find the record absent. A workflow
   concurrency group serialises them; runs are short and idempotent, so queueing
   costs nothing.
-- **The `PK` threshold and the 30-minute closing window are judgement calls.**
+- **The `PK` threshold and the 10-minute closing window are judgement calls.**
   Both are named constants and overridable from the CLI, so they can be tuned
   against real sheets without touching the derivation.
 - **We publish a fair line, a local book publishes a shaded one.** Expect small
