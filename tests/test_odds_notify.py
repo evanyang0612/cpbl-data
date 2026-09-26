@@ -212,7 +212,7 @@ def test_open_and_close_are_tracked_as_separate_broadcasts(monkeypatch):
     """The same slate goes out twice — once when it opens, once before first
     pitch — so the ledger has to key on which one, not just the date."""
     slate = [_snapshot(game_date="2026-08-25",
-                       start="2026-08-25T18:00:00+09:00", mins_to_start=20)]
+                       start="2026-08-25T18:00:00+09:00", mins_to_start=8)]
     sent = _stub_feed(monkeypatch, slate)
     ledger = _Ledger()
 
@@ -236,6 +236,22 @@ def test_closing_broadcast_waits_until_first_pitch_is_near(monkeypatch):
     assert on.run_once(game_date="2026-08-25", phase="close", ledger=ledger) == []
     assert sent == []
     assert ledger.recorded == []   # a later run, nearer the game, still posts
+
+
+def test_the_close_waits_until_ten_minutes_before_first_pitch(monkeypatch):
+    """Twenty minutes out the line is still moving; the close is the number
+    the game actually starts on, so it holds until ten minutes before."""
+    slate = [_snapshot(game_date="2026-08-25",
+                       start="2026-08-25T18:00:00+09:00", mins_to_start=20)]
+    sent = _stub_feed(monkeypatch, slate)
+    ledger = _Ledger()
+
+    assert on.run_once(game_date="2026-08-25", phase="close", ledger=ledger) == []
+
+    slate[0]["mins_to_start"] = 10
+    on.run_once(game_date="2026-08-25", phase="close", ledger=ledger)
+    assert len(sent) == 1
+    assert ledger.recorded == [("2026-08-25", "close 18:00", 1)]
 
 
 def test_opening_broadcast_does_not_wait_for_first_pitch(monkeypatch):
@@ -262,7 +278,7 @@ def _staggered(monkeypatch, early_lead, late_lead):
 def test_a_staggered_card_closes_one_start_time_at_a_time(monkeypatch):
     """The 14:00 games have long closed while the 18:00 games are still moving,
     so each first pitch gets its own closing post."""
-    sent = _staggered(monkeypatch, early_lead=20, late_lead=260)
+    sent = _staggered(monkeypatch, early_lead=8, late_lead=260)
     ledger = _Ledger()
 
     on.run_once(game_date="2026-08-25", phase="close", ledger=ledger)
@@ -274,11 +290,11 @@ def test_a_staggered_card_closes_one_start_time_at_a_time(monkeypatch):
 
 
 def test_the_later_start_still_closes_on_a_later_run(monkeypatch):
-    sent = _staggered(monkeypatch, early_lead=20, late_lead=260)
+    sent = _staggered(monkeypatch, early_lead=8, late_lead=260)
     ledger = _Ledger()
     on.run_once(game_date="2026-08-25", phase="close", ledger=ledger)
 
-    sent = _staggered(monkeypatch, early_lead=-220, late_lead=20)
+    sent = _staggered(monkeypatch, early_lead=-220, late_lead=8)
     on.run_once(game_date="2026-08-25", phase="close", ledger=ledger)
 
     assert len(sent) == 1
@@ -289,10 +305,10 @@ def test_the_later_start_still_closes_on_a_later_run(monkeypatch):
 def test_games_sharing_a_first_pitch_close_in_one_post(monkeypatch):
     slate = [
         _snapshot(event_id="a", game_date="2026-08-25",
-                  start="2026-08-25T18:00:00+09:00", mins_to_start=20),
+                  start="2026-08-25T18:00:00+09:00", mins_to_start=8),
         _snapshot(event_id="b", home="楽天", away="西武",
                   game_date="2026-08-25", start="2026-08-25T18:00:00+09:00",
-                  mins_to_start=20),
+                  mins_to_start=8),
     ]
     sent = _stub_feed(monkeypatch, slate)
     ledger = _Ledger()
@@ -551,15 +567,16 @@ def test_a_game_with_no_line_at_all_holds_the_slate(monkeypatch):
     assert sent == []
 
 
-def test_a_closing_line_waits_for_the_board_within_its_own_window(monkeypatch):
-    """The close already holds until first pitch is near; an unsettled board
-    holds it further, but only down to the same floor the open stops at."""
+def test_a_closing_line_does_not_hold_for_an_unsettled_board(monkeypatch):
+    """The close only opens at ten minutes, which is the same floor the open
+    stops waiting at — there is no later run to hold for, and a gap in the post
+    beats no post at all."""
     slate = [_snapshot(game_date="2026-08-25", all_totals=UNSETTLED_TOTALS,
-                       start="2026-08-25T18:00:00+09:00", mins_to_start=20)]
+                       start="2026-08-25T18:00:00+09:00", mins_to_start=8)]
     sent = _stub_feed(monkeypatch, slate)
 
-    assert on.run_once(game_date="2026-08-25", phase="close", ledger=_Ledger()) == []
-    assert sent == []
+    on.run_once(game_date="2026-08-25", phase="close", ledger=_Ledger())
+    assert len(sent) == 1
 
 
 def test_a_held_run_does_not_scrape_yahoo_for_the_starters(monkeypatch):
@@ -724,7 +741,7 @@ def test_the_last_call_also_releases_a_board_that_never_settled(monkeypatch):
 def test_the_close_is_not_measured_against_the_whole_day(monkeypatch):
     """A closing post belongs to one first pitch, so a 18:00 group of one on a
     two-game day is complete, not short."""
-    sent = _stub_feed(monkeypatch, _partial_slate(mins_to_start=20))
+    sent = _stub_feed(monkeypatch, _partial_slate(mins_to_start=8))
 
     on.run_once(_league(2), game_date="2026-08-25", phase="close",
                 ledger=_Ledger())

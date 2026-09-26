@@ -390,7 +390,7 @@ def test_a_game_already_under_way_yields_no_starters():
 
 
 def test_the_starters_survive_the_lineups_being_announced():
-    """The closing line goes out 30 minutes before first pitch, by which time
+    """The closing line goes out 10 minutes before first pitch, by which time
     Yahoo has published both lineups — twenty-odd player links added to a page
     that is still a fixture. Counting the links on the whole page reads that as
     a game already under way, and the 2026-08-28 18:00 close lost the starters
