@@ -91,6 +91,17 @@ class TestSpottingAnOpener:
     def test_a_team_that_used_one_pitcher_is_not_asked_about(self):
         assert so.looks_like_an_opener([27]) is False
 
+    def test_two_openers_sharing_the_first_inning_are_asked_about(self):
+        """2026-10-03 ロッテ: 唐川 got one out, 益田 two, then 高野 went three
+        innings. Reading only the second pitcher found 益田's 0.2 and stayed
+        quiet, though 先發指定 already folds any number of openers."""
+        assert so.looks_like_an_opener([1, 2, 9, 3, 3, 3, 3, 3]) is True
+
+    def test_openers_are_judged_by_their_innings_together(self):
+        """Two short outings that add up to more than an inning are a start
+        coming apart, the same as one pitcher lasting that long would be."""
+        assert so.looks_like_an_opener([3, 3, 21]) is False
+
 
 class TestTheQueueOfQuestions:
     def setup_method(self):
@@ -102,6 +113,16 @@ class TestTheQueueOfQuestions:
             {"date": "2026-09-15", "team": "西武",
              "opener": "森脇 亮介", "opener_outs": 3,
              "starter": "平良 海馬", "starter_outs": 21}
+        ]
+
+    def test_every_opener_is_named_and_the_long_outing_is_the_starter(self):
+        so.note_candidate("2026-10-03", "ロッテ",
+                          ["唐川 侑己", "益田 直也", "高野 脩汰", "坂本 光士郎"],
+                          [1, 2, 9, 3])
+        assert so.take_candidates() == [
+            {"date": "2026-10-03", "team": "ロッテ",
+             "opener": "唐川 侑己、益田 直也", "opener_outs": 3,
+             "starter": "高野 脩汰", "starter_outs": 9}
         ]
 
     def test_taking_them_empties_the_queue(self):
@@ -245,3 +266,53 @@ class TestReadingAnOpenersBoxScore:
     def test_a_designated_game_is_not_asked_about_again(self, monkeypatch):
         self._parse(monkeypatch, {("2026-09-15", "西武"): "平良 海馬"})
         assert so.take_candidates() == []
+
+
+# 2026-10-03 ロッテ, trimmed to the name cells: 唐川 and 益田 got the first out
+# between them and 高野 脩汰 took it from there. Yahoo links every pitcher.
+LOTTE_PITCHERS = """
+<table class="bb-scoreTable">
+  <tr class="bb-scoreTable__row"><td class="bb-scoreTable__data--player">
+    <a href="/npb/player/1000771/top">唐川 侑己</a></td></tr>
+  <tr class="bb-scoreTable__row"><td class="bb-scoreTable__data--player">
+    <a href="/npb/player/1100104/top">益田 直也</a></td></tr>
+  <tr class="bb-scoreTable__row"><td class="bb-scoreTable__data--player">
+    <a href="/npb/player/2105534/top">高野 脩汰</a></td></tr>
+</table>
+"""
+
+
+class TestADesignatedStartersHand:
+    """/top's 先発 row names the opener, so the real starter's hand is looked up.
+
+    2026-10-03 楽天 and ロッテ both came back with 主投別 blank: the hand is read
+    off the 予告 row, which names 辛島 and 唐川, and neither matches the pitcher
+    先發指定 put in their place.
+    """
+
+    def _hand(self, monkeypatch, hand, starter):
+        import asyncio
+
+        from bs4 import BeautifulSoup
+        import npb
+
+        asked = []
+
+        async def throw_hand(player_id, _session):
+            asked.append(player_id)
+            return "左投"
+
+        monkeypatch.setattr(npb, "_player_throw_hand", throw_hand)
+        table = BeautifulSoup(LOTTE_PITCHERS, "html.parser").find(
+            class_="bb-scoreTable")
+        found = asyncio.run(npb._starter_throw_hand(hand, table, starter, None))
+        return found, asked
+
+    def test_a_blank_hand_is_read_off_the_starters_own_page(self, monkeypatch):
+        assert self._hand(monkeypatch, "", "高野 脩汰") == ("左", ["2105534"])
+
+    def test_a_hand_already_found_is_kept_without_a_fetch(self, monkeypatch):
+        assert self._hand(monkeypatch, "右", "唐川 侑己") == ("右", [])
+
+    def test_a_starter_not_in_the_table_stays_blank(self, monkeypatch):
+        assert self._hand(monkeypatch, "", "佐々木 朗希") == ("", [])
