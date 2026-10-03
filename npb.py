@@ -1736,6 +1736,28 @@ async def _player_throw_hand(player_id: str, session: aiohttp.ClientSession) -> 
     return hand
 
 
+async def _starter_throw_hand(
+    hand: str, ptbl, starter: str, session: aiohttp.ClientSession
+) -> str:
+    """The starter's hand, from his own page when /top's 先発 row missed him.
+
+    That row is the announced starter, so a game 先發指定 has moved to the
+    pitcher behind an opener names somebody else, and the hand comes back
+    blank. Only then is the starter's page fetched — every other game keeps
+    the hand /top already gave, in /top's one-character form.
+    """
+    if hand or not starter or ptbl is None:
+        return hand
+    wanted = re.sub(r"[\s　]+", "", starter)
+    for link in ptbl.find_all("a", href=True):
+        if re.sub(r"[\s　]+", "", link.text) != wanted:
+            continue
+        found = re.search(r"/npb/player/(\d+)", link["href"])
+        if found:
+            return (await _player_throw_hand(found.group(1), session))[:1]
+    return hand
+
+
 async def _enrich_home_run_batter_hands(
     events: list[dict[str, str]], session: aiohttp.ClientSession
 ) -> list[dict[str, str]]:
@@ -2393,6 +2415,11 @@ async def get_sailu_game_data(
                         or home_starter in pitcher_name
                     ):
                         home_hand = handedness
+    score_tables = soup.find_all(class_="bb-scoreTable")[:2] + [None, None]
+    away_hand, home_hand = await asyncio.gather(
+        _starter_throw_hand(away_hand, score_tables[0], away_starter, session),
+        _starter_throw_hand(home_hand, score_tables[1], home_starter, session),
+    )
 
     return {
         "賽事編號": game_id,
@@ -2570,6 +2597,13 @@ async def get_schedule_game_data(
                         pitcher_name in home_starter or home_starter in pitcher_name
                     ):
                         home_hand = handedness
+    away_hand, home_hand = await asyncio.gather(
+        _starter_throw_hand(
+            away_hand, pitch_tables[0] if pitch_tables else None, away_starter, session),
+        _starter_throw_hand(
+            home_hand, pitch_tables[1] if len(pitch_tables) > 1 else None,
+            home_starter, session),
+    )
 
     # ── Batting stats ──────────────────────────────────────────────────────
     # bb-statsTable[0]=away, [1]=home
