@@ -355,8 +355,9 @@ uv run python migration/add_npb_starter_override_sheet.py
   starter chased out of one are the same box score, and Yahoo registers the
   opener as 先発 either way — 予告先発 names him too, because that is who the club
   announced. The difference is the club's intent, so a person supplies it.
-- What the sweep does do is **ask**. A first pitcher gone inside an inning with a
-  long outing behind him is the shape of an opener, and every such game with no
+- What the sweep does do is **ask**. Openers gone inside an inning between them
+  — one, or two sharing it — with a long outing behind them is the shape of an
+  opener, and every such game with no
   row gets named in one Telegram note at the end of the run, once per game
   however many times it is parsed. Answering it is filling in a row.
 - The question is deliberately loose — about nine a season across the cached

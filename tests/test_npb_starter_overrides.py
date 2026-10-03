@@ -91,6 +91,17 @@ class TestSpottingAnOpener:
     def test_a_team_that_used_one_pitcher_is_not_asked_about(self):
         assert so.looks_like_an_opener([27]) is False
 
+    def test_two_openers_sharing_the_first_inning_are_asked_about(self):
+        """2026-10-03 ロッテ: 唐川 got one out, 益田 two, then 高野 went three
+        innings. Reading only the second pitcher found 益田's 0.2 and stayed
+        quiet, though 先發指定 already folds any number of openers."""
+        assert so.looks_like_an_opener([1, 2, 9, 3, 3, 3, 3, 3]) is True
+
+    def test_openers_are_judged_by_their_innings_together(self):
+        """Two short outings that add up to more than an inning are a start
+        coming apart, the same as one pitcher lasting that long would be."""
+        assert so.looks_like_an_opener([3, 3, 21]) is False
+
 
 class TestTheQueueOfQuestions:
     def setup_method(self):
@@ -102,6 +113,16 @@ class TestTheQueueOfQuestions:
             {"date": "2026-09-15", "team": "西武",
              "opener": "森脇 亮介", "opener_outs": 3,
              "starter": "平良 海馬", "starter_outs": 21}
+        ]
+
+    def test_every_opener_is_named_and_the_long_outing_is_the_starter(self):
+        so.note_candidate("2026-10-03", "ロッテ",
+                          ["唐川 侑己", "益田 直也", "高野 脩汰", "坂本 光士郎"],
+                          [1, 2, 9, 3])
+        assert so.take_candidates() == [
+            {"date": "2026-10-03", "team": "ロッテ",
+             "opener": "唐川 侑己、益田 直也", "opener_outs": 3,
+             "starter": "高野 脩汰", "starter_outs": 9}
         ]
 
     def test_taking_them_empties_the_queue(self):

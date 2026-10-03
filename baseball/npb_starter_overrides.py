@@ -36,15 +36,19 @@ HEADERS = ["日期", "球隊", "真正的先發", "備註"]
 # the collisions worth having; anything else is filed under what was typed.
 TEAM_ALIASES = {"横浜": "DeNA", "橫濱": "DeNA", "ベイスターズ": "DeNA"}
 
-# An opener's shape: gone inside an inning, with someone behind him who went
-# long. Both are only ever a question; see the module docstring.
+# An opener's shape: gone inside an inning — alone or with a second opener —
+# with someone behind them who went long. Both are only ever a question; see
+# the module docstring.
 #
 # Deliberately loose. Over the 18,820 team-games cached from 2016 on, this asks
-# about 98 of them — nine a season — and most are not openers at all but starts
+# about 102 of them — nine a season — and most are not openers at all but starts
 # that fell apart: of the nine it found in 2026, seven had the first pitcher
 # leaving on two to six runs. Tightening it is easy and was measured. Requiring
 # the pitcher behind him to go five innings rather than three cuts it to 1.4 a
 # season; also asking that the first gave up no more than a run cuts it to 1.7.
+# Judging two openers together, rather than reading only the second pitcher,
+# added 4 of the 102 — among them 2025-09-30 ロッテ, 美馬 and 澤村 sharing the
+# first inning ahead of six from サモンズ.
 #
 # Kept wide anyway, per Evan. A question costs a line in a Telegram note and is
 # answered by ignoring it. A miss costs a season of a pitcher's record filed
@@ -166,27 +170,44 @@ def starter_span(names: list[str], designation: str | None) -> int:
     return 1
 
 
+def _long_outing(outs: list[int]) -> int | None:
+    """Where the long outing starts, if everyone ahead of it was an opener.
+
+    The openers are judged together — two who share the first inning are one
+    opening, and two who share three are a start coming apart. Reading only the
+    second pitcher missed 2026-10-03 ロッテ, where 唐川 got one out and 益田 two
+    before 高野 took the next three innings.
+    """
+    opened = 0
+    for index, count in enumerate(outs):
+        if index and count >= RELIEVED_BY_OUTS:
+            return index
+        opened += count
+        if opened > OPENER_OUTS:
+            return None
+    return None
+
+
 def looks_like_an_opener(outs: list[int]) -> bool:
     """Whether this team's pitching has the shape worth asking a person about.
 
     Never a reason to change anything on its own — see the module docstring.
     """
-    if len(outs) < 2:
-        return False
-    return outs[0] <= OPENER_OUTS and outs[1] >= RELIEVED_BY_OUTS
+    return _long_outing(outs) is not None
 
 
 def note_candidate(game_date: str, team: str, names: list[str],
                    outs: list[int]) -> None:
     """Remember a game to ask about, once, however often it is parsed."""
     key = (normalise_date(game_date), normalise_team(team))
+    split = _long_outing(outs) or 1
     _candidates.setdefault(key, {
         "date": key[0],
         "team": team,
-        "opener": names[0] if names else "",
-        "opener_outs": outs[0] if outs else 0,
-        "starter": names[1] if len(names) > 1 else "",
-        "starter_outs": outs[1] if len(outs) > 1 else 0,
+        "opener": "、".join(names[:split]),
+        "opener_outs": sum(outs[:split]),
+        "starter": names[split] if len(names) > split else "",
+        "starter_outs": outs[split] if len(outs) > split else 0,
     })
 
 
