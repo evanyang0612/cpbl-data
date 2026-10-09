@@ -7,10 +7,13 @@ list to keep.
 
 A slate is announced twice, and the two are not the same job:
 
-``--phase open`` posts the opening line the evening before. A day's slate only
+``--phase open`` posts the opening line the day before. A day's slate only
 reaches PS3838's 早盤 board once the previous evening's games have finished,
 and not at a fixed hour, so it posts on whichever run first sees the games —
-one message for the whole day.
+one message for the whole day. After a day with no games, as between
+postseason stages, there is nothing to wait for and the board opens in the
+afternoon: the slate for 2026-10-10 was up by 16:00 the day before. So runs
+start at noon JST, not in the evening.
 
 ``--phase close`` posts the closing line 10 minutes before first pitch, and is
 therefore per start time rather than per day: on a staggered card the 13:00
@@ -66,7 +69,7 @@ CLOSE_WITHIN_MINUTES = 10
 SETTLE_WITHIN_MINUTES = 10
 
 # Waiting also stops this long before the slate rolls over. The opening
-# broadcast is only polled from the evening into the small hours, so a hold
+# broadcast is only polled from noon into the small hours, so a hold
 # carried past the roll is not a hold but a post that never happens — whatever
 # the board has by the last runs of the window is what goes out.
 LAST_CALL_MINUTES = 30
@@ -307,8 +310,8 @@ def build_message(snapshots: list[dict], *, now: datetime,
 
 
 # A baseball day is treated as rolling over in the early morning, not at
-# midnight. The opening broadcast is polled from the evening into the small
-# hours because the board can open late, and counting from the calendar date
+# midnight. The opening broadcast is polled from noon into the small hours
+# because the board can open late, and counting from the calendar date
 # would make a 01:00 run aim a slate too far — at a board not yet open, while
 # the one that had just appeared went unsent. Nothing starts near this hour, so
 # it can sit anywhere in the small-hours gap.
