@@ -108,3 +108,12 @@ def test_announced_cell_stays_inside_the_column():
                  + nd.text_px(home_p, nd.name_size(home_p))
                  + nd.text_px(" " * gap, 10))
         assert width <= nd.FIT_TARGET_PX or gap == 1, (away_p, home_p, width)
+
+
+def test_the_diary_runs_through_the_last_makeup_game():
+    # Rainouts were made up 10/5–10/8, after the last date on the original
+    # schedule; ヤクルト@阪神 on 10/8 closed the regular season.
+    schedule = {"2026-10-08": [_game("2026-10-08", "ヤクルト", "阪神")]}
+    rows = nd.build_rows(schedule, {})
+    assert rows[-1][0] == "10/8"
+    assert rows[-1][2][nd.COL_OF["阪神"]][1] is nd.WHITE
