@@ -60,7 +60,9 @@ SHEET_TITLE = "2026・野球日記"
 SOURCE_SHEET = "2023・野球日記"
 
 SEASON_START = datetime.date(2026, 3, 27)   # 開幕 (3/20–3/22 are オープン戦)
-SEASON_END = datetime.date(2026, 10, 4)     # last dated regular-season game
+# Not the last date on the original schedule (10/4): rainouts were made up
+# 10/5–10/8, and a window clamped to 10/4 silently wrote nothing after it.
+SEASON_END = datetime.date(2026, 10, 8)     # last regular-season game
 
 # How the 2023 sheet marks a walk-off: 。 for an ordinary サヨナラ, * for a
 # サヨナラ本塁打 — the asterisk is the firework.
