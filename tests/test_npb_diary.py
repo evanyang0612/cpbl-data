@@ -1,5 +1,7 @@
 """Unit tests for the 2026・野球日記 tab writer (baseball/npb_diary.py)."""
 
+import datetime
+
 from baseball import npb_diary as nd
 
 
@@ -114,6 +116,388 @@ def test_the_diary_runs_through_the_last_makeup_game():
     # Rainouts were made up 10/5–10/8, after the last date on the original
     # schedule; ヤクルト@阪神 on 10/8 closed the regular season.
     schedule = {"2026-10-08": [_game("2026-10-08", "ヤクルト", "阪神")]}
-    rows = nd.build_rows(schedule, {})
-    assert rows[-1][0] == "10/8"
-    assert rows[-1][2][nd.COL_OF["阪神"]][1] is nd.WHITE
+    rows = {label: cells for label, _, cells, _ in nd.build_rows(schedule, {})}
+    assert rows["10/8"][nd.COL_OF["阪神"]][1] is nd.WHITE
+
+
+# --- Postseason ----------------------------------------------------------
+#
+# Evan's own 2026 sheet (プロ野球データ分析2026.xlsx, tab 2026) carries the
+# Climax Series on by hand from 10/8; these pin the program to that layout.
+
+STANDINGS_2026 = {
+    "阪神": ("セ", 1), "巨人": ("セ", 2), "DeNA": ("セ", 3),
+    "広島": ("セ", 4), "ヤクルト": ("セ", 5), "中日": ("セ", 6),
+    "ソフトバンク": ("パ", 1), "西武": ("パ", 2), "日本ハム": ("パ", 3),
+    "オリックス": ("パ", 4), "ロッテ": ("パ", 5), "楽天": ("パ", 6),
+}
+
+
+def _final(date, away, home, away_score, home_score, venue=""):
+    return {"date": date, "away": away, "home": home, "status": "試合終了",
+            "away_score": str(away_score), "home_score": str(home_score),
+            "venue": venue or nd.HOME_VENUE[home]}
+
+
+def _postseason_2026():
+    games = [
+        _final("2026-10-08", "ヤクルト", "阪神", 4, 0),
+        _final("2026-10-10", "DeNA", "巨人", 2, 1),
+        _final("2026-10-10", "日本ハム", "西武", 2, 3),
+        _final("2026-10-11", "DeNA", "巨人", 4, 1),
+        _final("2026-10-11", "日本ハム", "西武", 1, 0),
+        _final("2026-10-12", "日本ハム", "西武", 4, 1),
+        _final("2026-10-14", "DeNA", "阪神", 2, 0),
+        _final("2026-10-14", "日本ハム", "ソフトバンク", 4, 6),
+        _final("2026-10-15", "DeNA", "阪神", 1, 0),
+        _final("2026-10-15", "日本ハム", "ソフトバンク", 2, 6),
+        _final("2026-10-16", "DeNA", "阪神", 4, 0),
+        _final("2026-10-16", "日本ハム", "ソフトバンク", 2, 6),
+        _final("2026-10-17", "DeNA", "阪神", 8, 5),
+        _game("2026-10-24", "ソフトバンク", "DeNA"),
+        _game("2026-10-25", "ソフトバンク", "DeNA"),
+        _game("2026-10-27", "DeNA", "ソフトバンク"),
+    ]
+    schedule = {}
+    for g in games:
+        schedule.setdefault(g["date"], []).append(g)
+    return schedule
+
+
+def _rows_by_date(schedule=None, standings=STANDINGS_2026):
+    rows = nd.build_rows(schedule or _postseason_2026(), {}, standings=standings,
+                         window=(nd.SEASON_END, nd.POSTSEASON_END))
+    out = {}
+    for label, _, cells, _ in rows:
+        month, day = label.split("/")
+        out[f"2026-{int(month):02d}-{int(day):02d}"] = cells
+    return out
+
+
+def test_the_diary_runs_past_the_regular_season_into_the_postseason():
+    rows = _rows_by_date()
+    assert "2026-10-17" in rows and "2026-10-27" in rows
+    assert max(rows) == nd.POSTSEASON_END.isoformat()
+
+
+def test_final_standings_label_each_column_on_the_last_day_it_is_free():
+    """10/8 for every club that did not play the last regular-season day; 阪神
+    and ヤクルト played it, so theirs drop to 10/9 — as Evan laid it out."""
+    rows = _rows_by_date()
+    giants = rows["2026-10-08"][nd.COL_OF["巨人"]]
+    assert giants[0] == "セ・リーグ   二  位"
+    assert giants[1] == nd.rgb("FF6600")
+    assert rows["2026-10-08"][nd.COL_OF["ソフトバンク"]][0] == "パ･リーグ   優  勝"
+    assert rows["2026-10-08"][nd.COL_OF["楽天"]][0] == "パ･リーグ   六  位"
+    # 阪神 hosted the 10/8 game, so that cell is still the game.
+    assert "4" in rows["2026-10-08"][nd.COL_OF["阪神"]][0]
+    assert rows["2026-10-09"][nd.COL_OF["阪神"]][0] == "セ・リーグ   優  勝"
+    assert rows["2026-10-09"][nd.COL_OF["ヤクルト"]][0] == "セ・リーグ   五  位"
+
+
+def test_standings_wait_for_the_regular_season_to_finish():
+    schedule = _postseason_2026()
+    schedule["2026-10-08"] = [_game("2026-10-08", "ヤクルト", "阪神")]
+    rows = _rows_by_date(schedule)
+    assert rows["2026-10-08"][nd.COL_OF["巨人"]][0] == ""
+
+
+def test_postseason_days_are_white_not_purple():
+    rows = _rows_by_date()
+    for date in ("2026-10-10", "2026-10-13", "2026-10-20"):
+        for col, *_ in nd.TEAMS:
+            text, bg, _ = rows[date][col]
+            if not text:
+                assert bg is nd.WHITE, (date, col)
+
+
+def test_climax_series_games_go_in_the_hosts_column():
+    rows = _rows_by_date()
+    first = rows["2026-10-10"]
+    assert first[nd.COL_OF["巨人"]][0].replace(" ", "").startswith("2-1")
+    assert first[nd.COL_OF["西武"]][0].replace(" ", "").startswith("2")
+    assert first[nd.COL_OF["DeNA"]][0] == ""
+
+
+def test_each_stage_is_titled_the_day_before_it_opens():
+    rows = _rows_by_date()
+    assert rows["2026-10-09"][nd.COL_OF["巨人"]][0] == "Climax Series 1st"
+    assert rows["2026-10-09"][nd.COL_OF["巨人"]][1] == nd.rgb("99CC00")
+    assert rows["2026-10-09"][nd.COL_OF["西武"]][0] == "Climax Series 1st"
+    assert rows["2026-10-09"][nd.COL_OF["西武"]][1] == nd.rgb("3366FF")
+    assert rows["2026-10-13"][nd.COL_OF["阪神"]][0] == "C S  Final  Stage"
+    assert rows["2026-10-13"][nd.COL_OF["ソフトバンク"]][0] == "C S  Final  Stage"
+
+
+def test_the_series_winner_is_named_the_day_after_it_clinches():
+    rows = _rows_by_date()
+    # DeNA swept the 1st stage 10/10–10/11; 日本ハム took it 2-1 on 10/12.
+    yokohama = rows["2026-10-12"][nd.COL_OF["巨人"]]
+    assert yokohama[0] == "橫  浜   F S   進 出"
+    assert yokohama[1] == nd.rgb("003366")
+    assert rows["2026-10-13"][nd.COL_OF["西武"]][0] == "日本ハム   F S   進 出"
+    # ソフトバンク's advantage win plus 10/14–10/16 makes four.
+    assert rows["2026-10-17"][nd.COL_OF["ソフトバンク"]][0].startswith("ソフトB")
+    assert "日本一" in rows["2026-10-17"][nd.COL_OF["ソフトバンク"]][0]
+    assert rows["2026-10-18"][nd.COL_OF["阪神"]][0].startswith("橫  浜")
+
+
+def test_series_result_counts_the_hosts_advantage_and_its_ties():
+    def series(*results):
+        return [_final(f"2026-10-{10 + i}", "日本ハム", "西武", a, h)
+                for i, (a, h) in enumerate(results)]
+    # 1st stage: a tie and a host win leave the visitor unable to reach two.
+    assert nd.series_result(series((1, 1), (0, 2)), "first") == ("2026-10-11", "西武")
+    assert nd.series_result(series((1, 0), (2, 0)), "first") == ("2026-10-11", "日本ハム")
+    assert nd.series_result(series((1, 0),), "first") is None
+    # Final stage: the pennant winner starts a game up.
+    assert nd.series_result(series((0, 1), (0, 1), (0, 1)), "final") == ("2026-10-12", "西武")
+    assert nd.series_result(series((1, 0), (1, 0), (1, 0)), "final") is None
+
+
+def test_japan_series_is_written_across_the_middle():
+    rows = _rows_by_date()
+    middle = nd.JAPAN_SERIES_COL
+    assert rows["2026-10-23"][middle][0] == "2026  年 度    日  本  シリーズ"
+    assert rows["2026-10-23"][middle][1] == nd.rgb("0000FF")
+    # Not played, starters not announced: which league's park it is.
+    assert rows["2026-10-24"][middle][0] == "(セ・リーグ)"
+    assert rows["2026-10-27"][middle][0] == "(パ・リーグ)"
+    # The travel day between the two parks is greyed out.
+    assert rows["2026-10-26"][middle][1] == nd.JAPAN_SERIES_OFF
+    # The home club's own column does not repeat the game.
+    assert nd.japan_series_merge_dates(_postseason_2026(), STANDINGS_2026) >= {
+        "2026-10-23", "2026-10-24", "2026-10-25", "2026-10-26", "2026-10-27"}
+
+
+def test_japan_series_champion_is_named_the_day_after():
+    schedule = _postseason_2026()
+    for date in ("2026-10-24", "2026-10-25"):
+        schedule[date] = [_final(date, "ソフトバンク", "DeNA", 3, 1)]
+    schedule["2026-10-27"] = [_final("2026-10-27", "DeNA", "ソフトバンク", 0, 2)]
+    schedule["2026-10-28"] = [_final("2026-10-28", "DeNA", "ソフトバンク", 0, 5)]
+    rows = _rows_by_date(schedule)
+    champion = rows["2026-10-29"][nd.JAPAN_SERIES_COL]
+    assert champion[0] == "福岡ソフトバンクホークス  日本シリーズ   優  勝"
+    assert champion[1] == nd.rgb("FFCC00")
+    assert "2026-10-29" in nd.japan_series_merge_dates(schedule, STANDINGS_2026)
+
+
+def test_postseason_play_by_play_is_numbered_by_game_of_the_series():
+    """CS and 日本シリーズ pages are not on the monthly schedule; their URL
+    counts games within the series (/scores/2026/1012/l-f-03/)."""
+    urls = nd.postseason_score_urls(_postseason_2026(), STANDINGS_2026, 2026)
+    assert urls[("2026-10-12", "西武")] == "https://npb.jp/scores/2026/1012/l-f-03/"
+    assert urls[("2026-10-17", "阪神")] == "https://npb.jp/scores/2026/1017/t-db-04/"
+    assert ("2026-10-08", "阪神") not in urls
+
+
+STANDINGS_HTML = """
+<table class="tablefix2"><tbody class="bis-table-body">
+<tr class="ststats"><td>阪神タイガース</td><td>143</td></tr>
+<tr class="ststats"><td>読売ジャイアンツ</td><td>143</td></tr>
+<tr class="ststats"><td>横浜DeNAベイスターズ</td><td>143</td></tr>
+</tbody></table>
+"""
+
+
+def test_parse_standings_reads_npbs_order():
+    assert nd.parse_standings(STANDINGS_HTML, "セ") == {
+        "阪神": ("セ", 1), "巨人": ("セ", 2), "DeNA": ("セ", 3)}
+
+
+def test_parse_standings_keeps_the_first_table():
+    """The page carries more than one table of the same six clubs; only the
+    first is the standings, and the rest must not renumber them."""
+    assert nd.parse_standings(STANDINGS_HTML * 2, "セ")["DeNA"] == ("セ", 3)
+
+
+YAHOO_DAY_HTML = """
+<header class="bb-head01"><h2 class="bb-head01__title">{title}</h2></header>
+<li class="bb-score__item">
+  <p class="bb-score__venue">横浜</p>
+  <p class="bb-score__homeLogo">DeNA</p><p class="bb-score__awayLogo">ソフトバンク</p>
+  <span class="bb-score__score--left"></span><span class="bb-score__score--right"></span>
+  <p class="bb-score__link">試合前</p>
+</li>
+"""
+
+
+def test_fetch_schedule_ignores_the_page_yahoo_falls_back_to(monkeypatch):
+    """Past the last scheduled day Yahoo answers every date with that day's
+    page — 11/5 came back as 11/1's 日本シリーズ game 7, and the diary wrote a
+    game on every day to the end of the tab."""
+    class _Resp:
+        def __init__(self, url):
+            title = "11月1日（日）"
+            self.text = YAHOO_DAY_HTML.format(title=title)
+
+    monkeypatch.setattr(nd.requests, "get", lambda url, **kw: _Resp(url))
+    import datetime
+    out = nd.fetch_schedule(datetime.date(2026, 11, 1), datetime.date(2026, 11, 2))
+    assert len(out["2026-11-01"]) == 1
+    assert out["2026-11-02"] == []
+
+
+# --- オープン戦 -----------------------------------------------------------
+#
+# The tab now opens with the spring games, 2/21–3/22, above 開幕. 賽錄 only
+# covers 公式戦, so their starters come from NPB's own オープン戦 box scores.
+
+PRESEASON_BOX = """
+<html><body>
+<div id="table_linescore"><table id="tablefix_ls"><tbody>
+  <tr class="top"><th>西武</th>
+    <td>4</td><td>2</td><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td><td>2</td><td>0</td>
+    <td class="total-1">10</td><td class="total-2">12</td><td class="total-2">0</td></tr>
+  <tr class="bottom"><th>ソフトバンク</th>
+    <td>0</td><td>2</td><td>1</td><td>0</td><td>1</td><td>0</td><td>2</td><td>0</td><td>0</td>
+    <td class="total-1">6</td><td class="total-2">11</td><td class="total-2">0</td></tr>
+</tbody></table></div>
+<table id="tablefix_t_p"><tbody>
+  <tr><td>○</td><td class="player"><a href="/bis/players/31035150.html">佐藤爽</a></td></tr>
+  <tr><td></td><td class="player"><a href="/bis/players/01005136.html">高橋礼</a></td></tr>
+</tbody></table>
+<table id="tablefix_b_p"><tbody>
+  <tr><td>●</td><td class="player"><a href="/bis/players/01005137.html">東浜</a></td></tr>
+  <tr><td></td><td class="player"><a href="/bis/players/53755138.html">スチュワート・ジュニア</a></td></tr>
+</tbody></table>
+</body></html>
+"""
+
+
+def test_preseason_box_names_the_first_pitcher_on_each_side():
+    box = nd.parse_preseason_box(PRESEASON_BOX)
+    assert box["away_starter"] == "31035150"
+    assert box["home_starter"] == "01005137"
+    assert box["walkoff"] is False
+
+
+def test_preseason_box_reads_a_walkoff_off_the_linescore():
+    """NPB writes the deciding frame as ``1x``; a bare ``x`` is a bottom half
+    the home side never had to bat, which is no walk-off at all."""
+    walkoff = PRESEASON_BOX.replace("<td>0</td>\n    <td class=\"total-1\">6",
+                                    "<td>1x</td>\n    <td class=\"total-1\">6")
+    assert nd.parse_preseason_box(walkoff)["walkoff"] is True
+    unplayed = PRESEASON_BOX.replace("<td>0</td>\n    <td class=\"total-1\">6",
+                                     "<td>x</td>\n    <td class=\"total-1\">6")
+    assert nd.parse_preseason_box(unplayed)["walkoff"] is False
+
+
+def test_the_tab_opens_on_the_preseason_banner():
+    rows = nd.build_rows({}, {}, window=(nd.SHEET_START, nd.SEASON_START))
+    label, _, cells, _ = rows[0]
+    assert label == "2/20"
+    assert nd.row_index(nd.SHEET_START) == 1
+    assert "オ ー プ ン 戦" in cells[nd.TEAMS[0][0]][0]
+
+
+def test_opening_day_is_announced_on_the_day_before():
+    """2023 titles its 公式戦 on the free day before 開幕; 2026's is 3/26."""
+    rows = {label: cells for label, _, cells, _ in
+            nd.build_rows({}, {}, window=(nd.SHEET_START, nd.SEASON_START))}
+    title, bg, _ = rows["3/26"][nd.TEAMS[0][0]]
+    assert "公 式 戦" in title and bg is nd.PURPLE
+
+
+def test_banner_text_is_white_18pt_whatever_its_colour():
+    rows = nd.build_rows({}, {}, window=(nd.SHEET_START, nd.SHEET_START))
+    banner = nd.sheet_payload(rows, with_header=False)[0]["values"][nd.TEAMS[0][0]]
+    fmt = banner["userEnteredFormat"]["textFormat"]
+    assert fmt["fontSize"] == 18 and fmt["bold"]
+    assert fmt["foregroundColor"] == nd.rgb("FFFFFF")
+
+
+def test_a_preseason_game_is_written_like_any_other():
+    """アイビー is SoftBank's camp park in Miyazaki, so the venue goes in the score."""
+    game = _final("2026-03-01", "西武", "ソフトバンク", 10, 6, venue="アイビー")
+    starters = {("2026-03-01", "ソフトバンク"): {
+        "away_starter": "佐藤爽", "home_starter": "東浜", "walkoff": False}}
+    rows = {label: cells for label, _, cells, _ in
+            nd.build_rows({"2026-03-01": [game]}, starters,
+                          window=(nd.SHEET_START, nd.SEASON_START))}
+    text, bg, _ = rows["3/1"][nd.COL_OF["ソフトバンク"]]
+    assert bg is nd.WHITE
+    assert text.startswith("佐藤爽") and text.endswith("東浜") and "(アイビー)" in text
+    # Nobody else played that day.
+    assert rows["3/1"][nd.COL_OF["巨人"]][1] is nd.PURPLE
+
+
+def test_preseason_and_regular_season_starters_share_one_spelling():
+    """A second 髙橋 who only started in March still makes every 髙橋 ambiguous."""
+    regular = {("2026-04-01", "西武"): {"away_starter": "髙橋 光成",
+                                        "home_starter": "今井 達也", "walkoff": False}}
+    spring = {("2026-03-01", "中日"): {"away_starter": "東 克樹",
+                                       "home_starter": "髙橋 宏斗", "walkoff": False}}
+    out, _ = nd.resolve_starters({**regular, **spring})
+    assert out[("2026-04-01", "西武")]["away_starter"] == "髙橋光"
+    assert out[("2026-03-01", "中日")]["home_starter"] == "髙橋宏"
+
+
+def test_a_preseason_walkoff_is_probed_at_its_own_score_page(monkeypatch):
+    """オープン戦 games are not on the monthly 公式戦 schedule pages."""
+    def no_monthly_pages(*a, **kw):
+        raise AssertionError("the 公式戦 schedule pages were fetched")
+
+    class _Resp:
+        status_code = 200
+        encoding = "utf-8"
+        text = "<p>10回裏 正木 レフトソロホームラン（打点1）</p><p>一般社団法人日本野球機構について</p>"
+
+    asked = []
+    monkeypatch.setattr(nd, "npb_score_urls", no_monthly_pages)
+    monkeypatch.setattr(nd.requests, "get",
+                        lambda url, **kw: asked.append(url) or _Resp())
+    key = ("2026-03-01", "ソフトバンク")
+    starters = {key: {"away_starter": "佐藤爽", "home_starter": "東浜", "walkoff": True,
+                      "score_url": "https://npb.jp/scores/2026/0301/h-l-01/"}}
+    schedule = {"2026-03-01": [_final("2026-03-01", "西武", "ソフトバンク", 6, 7)]}
+    assert nd.mark_walkoff_home_runs(starters, schedule) == 1
+    assert asked == ["https://npb.jp/scores/2026/0301/h-l-01/playbyplay.html"]
+
+
+def test_npb_player_names_are_spelled_the_way_saiboku_spells_them():
+    """NPB's player pages write 伊藤大海's 海 as U+FA45 and keep a foreigner's
+    initial (Ａ．コックス); 賽錄 has neither. Left alone, each read as a second
+    pitcher of the same name, and 伊藤大 turned into 伊藤大海 all season."""
+    assert nd.normalize_full_name("伊藤　大海") == "伊藤 大海"
+    assert nd.normalize_full_name("Ａ．コックス") == "コックス"
+    assert nd.normalize_full_name("Ｃ．スチュワート・ジュニア") == "スチュワート・ジュニア"
+    assert nd.normalize_full_name("髙橋　宏斗") == "髙橋 宏斗"
+
+
+def test_practice_games_are_left_off_the_preseason():
+    """Yahoo's calendar carries 練習試合 alongside the オープン戦 (2/25 SOKKEN
+    ロッテ@オリックス); only NPB's own オープン戦 schedule decides what is written.
+    A rained-out オープン戦 is still on it, and so is every 公式戦 game."""
+    practice = _final("2026-02-25", "ロッテ", "オリックス", 1, 6, venue="SOKKEN")
+    rainout = dict(_game("2026-03-03", "中日", "DeNA"), status="試合中止")
+    regular = _final("2026-03-27", "巨人", "阪神", 1, 3)
+    schedule = {"2026-02-25": [practice], "2026-03-03": [rainout],
+                "2026-03-27": [regular]}
+    preseason = {("2026-03-03", "DeNA"): {}}
+    kept = nd.drop_practice_games(schedule, preseason)
+    assert kept == {"2026-02-25": [], "2026-03-03": [rainout], "2026-03-27": [regular]}
+
+
+def test_a_crowded_spring_cell_does_not_shorten_a_name_all_season():
+    """Spring games are mostly at camp parks, so the venue rides inside the score
+    and the cell is tighter. Fitting the whole season at once cut ウィットリー to
+    ウィット on every 公式戦 cell he ever started; only March should give."""
+    spring = _final("2026-02-23", "広島", "巨人", 0, 3, venue="那覇")
+    regular = _final("2026-03-31", "中日", "阪神", 5, 2)
+    starters = {
+        ("2026-02-23", "巨人"): {"away_starter": "ウィットリー", "home_starter": "ラグズデール",
+                                 "walkoff": False},
+        ("2026-03-31", "阪神"): {"away_starter": "ウィットリー", "home_starter": "金丸",
+                                 "walkoff": False},
+    }
+    schedule = {"2026-02-23": [spring], "2026-03-31": [regular]}
+    season, early = nd.solve_season_name_lengths(schedule, starters)
+    assert "ウィットリー" not in season
+    assert early["ウィットリー"] < len("ウィットリー")
+    rows = {label: cells for label, _, cells, _ in nd.build_rows(
+        schedule, starters, name_limits=season, preseason_limits=early,
+        window=(nd.SHEET_START, datetime.date(2026, 3, 31)))}
+    assert rows["3/31"][nd.COL_OF["阪神"]][0].startswith("ウィットリー")
+    assert not rows["2/23"][nd.COL_OF["巨人"]][0].startswith("ウィットリー")

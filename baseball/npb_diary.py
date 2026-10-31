@@ -13,6 +13,9 @@ What the 2023 sheet encodes by hand, and this reproduces:
 * 雨天中止 puts ``<相手コード> 戦 雨 天 中 止`` in the home column, and paints both
   teams' cells blue
 * a team with no game that day is purple; a day with no games at all is grey
+* before 開幕: the オープン戦, starters from NPB's box scores (2023 has none)
+* after the regular season: final places, the Climax Series in each host's
+  column, and the 日本シリーズ across H:J (see postseason_plan)
 
 Schedule and status come from Yahoo (the same pages ``npb.py`` already reads);
 starters come from the 賽錄 tab of the NPB spreadsheet, joined on (date, home team).
@@ -21,7 +24,7 @@ Two modes:
 
 ``--full`` rebuilds the tab from scratch — it creates the sheet, paints every
 row, sets the column widths and lays the season-phase banners out. It sweeps
-Yahoo's schedule for all 226 days of the season, which is enough requests that
+Yahoo's schedule for every day from the オープン戦 to the 日本シリーズ, which is enough requests that
 Yahoo starts refusing partway through if it is run often.
 
 The default is incremental and is what the scheduler runs: only the rows in a
@@ -43,6 +46,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -59,10 +63,20 @@ WORKBOOK_KEY = "1FTn1L5hi3TAHSf9JjoiEpcBYUlJ46cV49cxldfL3Wzc"
 SHEET_TITLE = "2026・野球日記"
 SOURCE_SHEET = "2023・野球日記"
 
-SEASON_START = datetime.date(2026, 3, 27)   # 開幕 (3/20–3/22 are オープン戦)
+SEASON_START = datetime.date(2026, 3, 27)   # 開幕
+# The tab opens with the オープン戦 (2/21–3/22, npb.jp/preseason/2026/), which
+# 2023 left off. Its first row is the day before, titled like any other stretch
+# of the season (see BANNERS); every row number counts from here.
+PRESEASON_START = datetime.date(2026, 2, 21)
+SHEET_START = PRESEASON_START - datetime.timedelta(days=1)
 # Not the last date on the original schedule (10/4): rainouts were made up
 # 10/5–10/8, and a window clamped to 10/4 silently wrote nothing after it.
 SEASON_END = datetime.date(2026, 10, 8)     # last regular-season game
+# …but not the end of the tab. The Climax Series and the 日本シリーズ follow, and
+# the 2023 sheet carries on through them (see postseason_plan). 11/8 leaves
+# room for a 日本シリーズ stretched by ties and rainouts; the rows after the
+# champion is named stay blank, as 2023's do.
+POSTSEASON_END = datetime.date(2026, 11, 8)
 
 # How the 2023 sheet marks a walk-off: 。 for an ordinary サヨナラ, * for a
 # サヨナラ本塁打 — the asterisk is the firework.
@@ -122,6 +136,21 @@ NPB_ROSTER = "https://npb.jp/announcement/roster/roster_{md}.html"
 # whose starters are out but which has not been played yet shows the two names
 # with no score, the way the 2023 sheet writes it (東克樹        横川凱).
 NPB_STARTERS = "https://npb.jp/announcement/starter/"
+# Final 公式戦 standings, one page per league, rows already in finishing order.
+# The postseason is read off them: who hosts which stage, and each club's place.
+NPB_STANDINGS = "https://npb.jp/bis/{year}/stats/std_{league}.html"
+# The オープン戦: one schedule page with every game's score link, and per game a
+# box score whose pitching tables list each side's starter first. The box score
+# gives only NPB's short name (佐藤爽), so the full one is read off the player's
+# page and run through the same disambiguation as 賽錄's.
+NPB_PRESEASON_SCHEDULE = "https://npb.jp/preseason/{year}/schedule_detail.html"
+NPB_PLAYER = "https://npb.jp/bis/players/{player_id}.html"
+# The sweep's result, checked in. Display names are resolved season-wide, so
+# every run needs the spring starters — a second 髙橋 who only pitched in March
+# still changes how the others are spelled — and the games never change once
+# played. Without the file, a run would make ~230 npb.jp requests to rebuild it.
+PRESEASON_STARTERS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "data", "npb_preseason_2026.json")
 
 # 公示 spells teams out in full; the note spells them the way Evan's own 2023
 # comments do, and keeps the two leagues in separate blocks.
@@ -160,6 +189,10 @@ PINK = {"red": 1.0, "green": 0.6, "blue": 0.8}          # FF99CC 交流戦の告
 # H:J. 交流戦 2026 runs 5/26–6/14 (npb.jp/interleague/2026/), so its Monday is
 # 5/25. Dates are explicit rather than derived: NPB moves these around.
 BANNERS = {
+    "2026-02-20": ("2026 年 オ ー プ ン 戦", PURPLE),
+    # 2023 titles its 公式戦 on the free day before 開幕, in the purple of a day
+    # off (3/28, the day before 3/30's Pacific opener); 2026's free day is 3/26.
+    "2026-03-26": ("2026 年 シーズン 公 式 戦", PURPLE),
     "2026-05-25": ("2026 日 本 生 命 セ・パ 交 流 戦", PINK),
 }
 
@@ -187,6 +220,10 @@ ALLSTAR_GAMES = {
     "2026-07-28": ("伊藤", "7", "東京", "5", "山野"),      # 全パ 7 - 5 全セ @東京ドーム
     "2026-07-29": ("髙橋", "8", "富山", "7", "エスピノーザ"),  # 全セ 8 - 7 全パ @富山
 }
+
+# Only a banner puts text on these backgrounds; a day off or the 交流戦 tail
+# never does.
+BANNER_COLORS = tuple({id(bg): bg for _, bg in BANNERS.values()}.values())
 
 INTERLEAGUE_TAIL = frozenset(
     ("2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18")
@@ -237,6 +274,225 @@ VENUE_SHORT = {
     "ほっと神戸": "神戸",
 }
 
+# --- Postseason ---------------------------------------------------------------
+# Laid out the way Evan carries his own 2026 sheet on by hand, and 2023's before
+# it: each club's final place, in its own colours, the first day it is free once
+# the regular season is over; each Climax stage titled in the host's column the
+# day before it opens, its games written in that column, and the winner named
+# there the day after it clinches; then the 日本シリーズ across the middle (H:J).
+# Every team column stays white from here on — nobody is "off" in October.
+TEAM_COLORS = {name: (bg, fg) for _, name, _, _, bg, fg, *_ in TEAMS}
+RANK_TEXT = {1: "優  勝", 2: "二  位", 3: "三  位", 4: "四  位", 5: "五  位", 6: "六  位"}
+# The パ label is written with a half-width ･ on both sheets; the セ one is not.
+LEAGUE_TEXT = {"セ": "セ・リーグ", "パ": "パ･リーグ"}
+STAGE_TITLE = {"first": "Climax Series 1st", "final": "C S  Final  Stage"}
+STAGE_COLOR = {"セ": rgb("99CC00"), "パ": rgb("3366FF")}
+ADVANCE_TEXT = {"first": "F S", "final": "日本一"}
+# (wins needed, most games, host's advantage). When neither side gets there in
+# the stage's games the host goes through, which is how ties end up counting.
+# The 日本シリーズ has no cap: a tie adds a game rather than deciding anything.
+SERIES_RULES = {"first": (2, 3, 0), "final": (4, 6, 1), "japan": (4, None, 0)}
+# What the 進出 cell calls each club. 橫 is Evan's own spelling of 横浜.
+SERIES_NAME = {
+    "巨人": "巨  人", "中日": "中  日", "阪神": "阪  神", "ヤクルト": "ヤクルト",
+    "広島": "広  島", "DeNA": "橫  浜", "ロッテ": "ロッテ", "西武": "西  武",
+    "ソフトバンク": "ソフトB", "オリックス": "オリックス", "日本ハム": "日本ハム",
+    "楽天": "楽  天",
+}
+JAPAN_SERIES_COL = 7                    # H, the anchor of the H:J merge
+JAPAN_SERIES_SPAN = (7, 10)             # H:J
+JAPAN_SERIES_OFF = rgb("D9D9D9")        # travel day between the two parks
+FINISHED = ("試合終了", "試合中止", "ノーゲーム")
+
+
+def fitted_size(text, size=10):
+    """Largest size up to ``size`` at which a label clears the column."""
+    while size > MIN_FONT and text_px(text, size) > FIT_TARGET_PX:
+        size -= 1
+    return size
+
+
+def team_label(text, team):
+    """A cell painted in the club's own header colours, bold."""
+    bg, fg = TEAM_COLORS[team]
+    return (text, rgb(bg), [run_at(0, fg=fg, bold=True, size=fitted_size(text))])
+
+
+def parse_standings(html, league):
+    """npb.jp's standings page -> {team: (league, place)}."""
+    out = {}
+    for tr in bs(html, "html.parser").select("tbody.bis-table-body tr.ststats"):
+        first = tr.find("td")
+        team = OFFICIAL_TO_TEAM.get(re.sub(r"\s+", "", first.get_text())) if first else None
+        if team and team not in out:
+            out[team] = (league, len(out) + 1)
+    return out
+
+
+def fetch_standings(year):
+    out = {}
+    for league, code in (("セ", "c"), ("パ", "p")):
+        try:
+            resp = requests.get(NPB_STANDINGS.format(year=year, league=code),
+                                headers=UA, timeout=30)
+            resp.encoding = "utf-8"
+        except requests.RequestException:
+            continue
+        if resp.status_code == 200:
+            out.update(parse_standings(resp.text, league))
+    return out
+
+
+def postseason_series(schedule, standings):
+    """{(stage, league): [game, ...]} for every game after the regular season.
+
+    The stage is read off the host: the pennant winner hosts the final stage and
+    the runner-up the 1st, and two leagues meeting is the 日本シリーズ.
+    """
+    out = {}
+    for date in sorted(schedule):
+        if date <= SEASON_END.isoformat():
+            continue
+        for game in schedule[date]:
+            home, away = game["home"], game["away"]
+            if home not in standings or away not in standings:
+                continue
+            league, place = standings[home]
+            if standings[away][0] != league:
+                key = ("japan", None)
+            elif place in (1, 2):
+                key = ("final" if place == 1 else "first", league)
+            else:
+                continue
+            out.setdefault(key, []).append(dict(game, date=date))
+    return out
+
+
+def series_result(games, stage):
+    """(date it was decided, winner), or None while it is still open."""
+    need, most, advantage = SERIES_RULES[stage]
+    if not games:
+        return None
+    host, visitor = games[0]["home"], games[0]["away"]
+    wins = {host: advantage, visitor: 0}
+    played = 0
+    for game in sorted(games, key=lambda g: g["date"]):
+        if game["status"] != "試合終了":
+            continue
+        try:
+            away_n, home_n = int(game["away_score"]), int(game["home_score"])
+        except ValueError:
+            continue
+        played += 1
+        if away_n != home_n:
+            winner = game["away"] if away_n > home_n else game["home"]
+            wins[winner] = wins.get(winner, 0) + 1
+        for team, won in wins.items():
+            if won >= need:
+                return game["date"], team
+        if most is not None and wins[visitor] + (most - played) < need:
+            return game["date"], host
+    return None
+
+
+def _next_day(iso, days=1):
+    return (datetime.date.fromisoformat(iso) + datetime.timedelta(days=days)).isoformat()
+
+
+def postseason_plan(schedule, standings):
+    """Everything about the postseason that one day's row cannot see by itself.
+
+    -> {"labels": {date: {col: cell}}, "japan": {(date, home)},
+        "skip": {(date, home)}, "off": {date}, "merge": {date}}
+
+    ``skip`` holds games still listed after their series was decided; ``merge``
+    the rows whose H:J is one cell.
+    """
+    plan = {"labels": {}, "japan": set(), "skip": set(), "off": set(), "merge": set()}
+    if not standings:
+        return plan
+    labels = plan["labels"]
+
+    # Final places, once every game on the last regular-season day is in.
+    last_day = SEASON_END.isoformat()
+    closing = [g for g in schedule.get(last_day, [])
+               if g["home"] in TEAM_NAMES and g["away"] in TEAM_NAMES]
+    if last_day in schedule and all(g["status"] in FINISHED for g in closing):
+        for team, (league, place) in standings.items():
+            # A club that played the last day has its cell taken; it goes below.
+            day = (_next_day(last_day)
+                   if any(team in (g["home"], g["away"]) for g in closing)
+                   else last_day)
+            labels.setdefault(day, {})[COL_OF[team]] = team_label(
+                f"{LEAGUE_TEXT[league]}   {RANK_TEXT[place]}", team)
+
+    for (stage, league), games in postseason_series(schedule, standings).items():
+        result = series_result(games, stage)
+        if result:
+            plan["skip"].update((g["date"], g["home"]) for g in games
+                                if g["date"] > result[0])
+        live = [g for g in games if not result or g["date"] <= result[0]]
+        first = live[0]["date"]
+        if stage == "japan":
+            plan["japan"].update((g["date"], g["home"]) for g in live)
+            dates = {g["date"] for g in live}
+            title = (f"{first[:4]}  年 度    日  本  シリーズ", rgb("0000FF"),
+                     [run_at(0, fg="FFFFFF", bold=True, size=13)])
+            labels.setdefault(_next_day(first, -1), {})[JAPAN_SERIES_COL] = title
+            plan["merge"].add(_next_day(first, -1))
+            day = first
+            while day < live[-1]["date"]:
+                if day not in dates:
+                    plan["off"].add(day)
+                plan["merge"].add(day)
+                day = _next_day(day)
+            plan["merge"].add(live[-1]["date"])
+            if result:
+                winner = result[1]
+                official = next(o for o, t in OFFICIAL_TO_TEAM.items() if t == winner)
+                bg, fg = TEAM_COLORS[winner]
+                labels.setdefault(_next_day(result[0]), {})[JAPAN_SERIES_COL] = (
+                    f"{official}  日本シリーズ   優  勝", rgb(bg),
+                    [run_at(0, fg=fg, bold=True)])
+                plan["merge"].add(_next_day(result[0]))
+            continue
+        host = COL_OF[games[0]["home"]]
+        labels.setdefault(_next_day(first, -1), {})[host] = (
+            STAGE_TITLE[stage], STAGE_COLOR[league],
+            [run_at(0, fg="FFFFFF", bold=True, size=12)])
+        if result:
+            winner = result[1]
+            labels.setdefault(_next_day(result[0]), {})[host] = team_label(
+                f"{SERIES_NAME[winner]}   {ADVANCE_TEXT[stage]}   進 出"
+                if stage == "first" else
+                f"{SERIES_NAME[winner]}  {ADVANCE_TEXT[stage]}  進 出", winner)
+    return plan
+
+
+def japan_series_merge_dates(schedule, standings):
+    return postseason_plan(schedule, standings)["merge"]
+
+
+def postseason_score_urls(schedule, standings, year):
+    """{(date, home): NPB score page} for the Climax Series and 日本シリーズ.
+
+    These games are missing from the monthly schedule pages, and their URL counts
+    the game within its series rather than the season: /scores/2026/1012/l-f-03/.
+    """
+    out = {}
+    for games in postseason_series(schedule, standings).values():
+        played = 0
+        for game in games:
+            if game["status"] != "試合終了":
+                continue
+            played += 1
+            _, month, day = game["date"].split("-")
+            out[(game["date"], game["home"])] = (
+                f"{NPB_BASE}/scores/{year}/{month}{day}/"
+                f"{NPB_OFFICIAL_CODE[game['home']]}-{NPB_OFFICIAL_CODE[game['away']]}"
+                f"-{played:02d}/")
+    return out
+
 
 def fetch_schedule(start, end, cache=None):
     """Yahoo's daily calendar for every date in range -> {date: [game, ...]}."""
@@ -259,8 +515,16 @@ def fetch_schedule(start, end, cache=None):
                 break
             except requests.RequestException:
                 continue
+        soup = bs(html, "html.parser")
+        # Past the season's last scheduled day Yahoo serves that day's page for
+        # any date asked, so the heading has to agree with the date requested.
+        heading = soup.select_one(".bb-head01__title")
+        shown = re.search(r"(\d{1,2})月(\d{1,2})日", heading.get_text() if heading else "")
+        _, month, day = date.split("-")
+        if shown and (int(shown.group(1)), int(shown.group(2))) != (int(month), int(day)):
+            return date, []
         games = []
-        for item in bs(html, "html.parser").find_all(class_="bb-score__item"):
+        for item in soup.find_all(class_="bb-score__item"):
             games.append({
                 "venue": text(item.find(class_="bb-score__venue")),
                 "home": text(item.find(class_="bb-score__homeLogo")),
@@ -297,6 +561,18 @@ def _announcement_date(unit, year: int) -> str | None:
     if not match:
         return None
     return f"{year:04d}-{int(match.group(1)):02d}-{int(match.group(2)):02d}"
+
+
+def drop_practice_games(schedule, preseason):
+    """Before 開幕, keep only the games NPB lists as オープン戦.
+
+    Yahoo files 練習試合 on the same calendar (2/25–2/26 at SOKKEN and 浦添);
+    they have no box score on npb.jp and are not what the tab records.
+    """
+    opening = SEASON_START.isoformat()
+    return {date: games if date >= opening
+            else [g for g in games if (date, g["home"]) in preseason]
+            for date, games in schedule.items()}
 
 
 def fetch_announced_starters(year: int | None = None):
@@ -475,8 +751,99 @@ def npb_score_urls(year, cache=None, months=None):
     return urls
 
 
+def parse_preseason_box(html):
+    """One オープン戦 box score -> {away/home starter's player id, walk-off flag}.
+
+    The visitors' pitching table is ``tablefix_t_p``, the hosts' ``tablefix_b_p``,
+    each in the order the pitchers went in. In the linescore NPB writes the frame
+    a game was won in as ``1x``; a bare ``x`` is a bottom half never needed.
+    """
+    soup = bs(html, "html.parser")
+
+    def starter(table_id):
+        link = soup.select_one(f"#{table_id} td.player a[href]")
+        found = re.search(r"/players/(\d+)\.html", link["href"]) if link else None
+        return found.group(1) if found else ""
+
+    bottom = [td.get_text(strip=True)
+              for td in soup.select("#tablefix_ls tr.bottom td")
+              if not any(c.startswith("total") for c in td.get("class") or [])]
+    return {"away_starter": starter("tablefix_t_p"),
+            "home_starter": starter("tablefix_b_p"),
+            "walkoff": bool(bottom) and re.fullmatch(r"\d+x", bottom[-1]) is not None}
+
+
+def normalize_full_name(name):
+    """An NPB player page's name, spelled the way 賽錄 spells the same pitcher.
+
+    NFKC folds the CJK compatibility ideographs NPB sometimes uses (伊藤大海's 海
+    is U+FA45) into the ordinary ones; 髙 is not one of them and survives. 賽錄
+    also drops a foreigner's initial (コックス, not Ａ．コックス).
+    """
+    name = unicodedata.normalize("NFKC", name)
+    return _INITIAL.sub("", re.sub(r"\s+", " ", name).strip())
+
+
+def fetch_preseason_starters(year, cache=None):
+    """{(date, home team): {starters' full names, walk-off flag, score URL}}.
+
+    The cache holds the finished result: the オープン戦 are long over by the
+    time anyone reruns this, and a cold run is ~100 box scores plus a player
+    page per starter.
+    """
+    if cache and os.path.exists(cache):
+        return {tuple(k.split("|")): v for k, v in json.load(open(cache)).items()}
+
+    def get(url):
+        for _ in range(3):
+            try:
+                resp = requests.get(url, headers=UA, timeout=30)
+                resp.encoding = "utf-8"
+                return resp.text if resp.status_code == 200 else ""
+            except requests.RequestException:
+                continue
+        return ""
+
+    team_of = {code: team for team, code in NPB_OFFICIAL_CODE.items()}
+    games = {}
+    for anchor in bs(get(NPB_PRESEASON_SCHEDULE.format(year=year)),
+                     "html.parser").find_all("a", href=True):
+        found = re.search(rf"/scores/{year}/(\d\d)(\d\d)/([a-z]+)-([a-z]+)-\d+/",
+                          anchor["href"])
+        if found and found.group(3) in team_of:
+            key = (f"{year}-{found.group(1)}-{found.group(2)}", team_of[found.group(3)])
+            games[key] = NPB_BASE + found.group(0)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        boxes = dict(zip(games, pool.map(
+            lambda url: parse_preseason_box(get(url + "box.html")), games.values())))
+
+    def full_name(player_id):
+        title = bs(get(NPB_PLAYER.format(player_id=player_id)), "html.parser").title
+        # "佐藤　爽（埼玉西武ライオンズ） | 個人年度別成績 | …" -> "佐藤 爽", the
+        # way 賽錄 spells a name.
+        return normalize_full_name(title.get_text().split("（")[0] if title else "")
+
+    ids = {box[side] for box in boxes.values()
+           for side in ("away_starter", "home_starter") if box[side]}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        names = dict(zip(ids, pool.map(full_name, ids)))
+
+    out = {}
+    for key, box in boxes.items():
+        out[key] = {"away_starter": names.get(box["away_starter"], ""),
+                    "home_starter": names.get(box["home_starter"], ""),
+                    "walkoff": box["walkoff"], "score_url": games[key]}
+    # Never freeze a half-played spring.
+    if cache and datetime.date.today() >= SEASON_START:
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        json.dump({"|".join(k): v for k, v in sorted(out.items())}, open(cache, "w"),
+                  ensure_ascii=False, indent=1)
+    return out
+
+
 def mark_walkoff_home_runs(starters, schedule, cache=None, url_cache=None,
-                           window=None):
+                           window=None, standings=None):
     """Set ``walkoff_hr`` on every サヨナラ whose last play was a home run.
 
     Nothing in the box score separates a walk-off single from a walk-off homer, so
@@ -495,15 +862,20 @@ def mark_walkoff_home_runs(starters, schedule, cache=None, url_cache=None,
                if info["walkoff"] and f"{key[0]}|{key[1]}" not in known
                and key in opponents]
     if pending:
+        postseason = postseason_score_urls(schedule, standings or {}, SEASON_START.year)
+        # A オープン戦 game brings its own score page from the box-score sweep.
+        regular = [key for key in pending
+                   if key not in postseason and not starters[key].get("score_url")]
         urls = npb_score_urls(SEASON_START.year, cache=url_cache,
-                              months={int(key[0].split("-")[1]) for key in pending})
+                              months={int(key[0].split("-")[1]) for key in regular}
+                              ) if regular else {}
 
         def probe(key):
             date, home = key
             away = opponents.get(key, "")
             _, month, day = date.split("-")
-            url = urls.get((f"{month}{day}", NPB_OFFICIAL_CODE[home],
-                            NPB_OFFICIAL_CODE.get(away, "")))
+            url = starters[key].get("score_url") or postseason.get(key) or urls.get(
+                (f"{month}{day}", NPB_OFFICIAL_CODE[home], NPB_OFFICIAL_CODE.get(away, "")))
             if not url:
                 return key, False
             try:
@@ -533,9 +905,11 @@ def mark_walkoff_home_runs(starters, schedule, cache=None, url_cache=None,
                if info.get("walkoff_hr") and key in opponents)
 
 
-def load_starters(client):
+def load_starters(client, extra=None):
     """賽錄 -> ({(date, home team): {starters, walk-off flag}}, display-name map).
 
+    ``extra`` adds games 賽錄 does not carry — the オープン戦 — keyed and
+    full-named the same way, so one season-wide spelling covers both.
     The map is returned because 予告先発 names arrive from a different source and
     have to be spelled the same way as the ones already on the sheet.
     """
@@ -566,7 +940,11 @@ def load_starters(client):
         out[key] = {"away_starter": row[idx["客場先發"]].strip(),
                     "home_starter": row[idx["主場先發"]].strip(),
                     "walkoff": walkoff}
+    return resolve_starters({**(extra or {}), **out})
 
+
+def resolve_starters(out):
+    """Full names -> the diary's spelling, in place; -> (starters, display map)."""
     display = resolve_display_names({info[key] for info in out.values()
                                      for key in ("away_starter", "home_starter")
                                      if info[key]})
@@ -684,17 +1062,18 @@ def _game_parts(game, starters):
             game["away_score"], game["home_score"], mark, venue)
 
 
-def solve_name_lengths(schedule, starters):
+def solve_name_lengths(schedule, starters, seed=None):
     """One length per pitcher, season-wide.
 
     Fitting each cell on its own would spell the same pitcher デュプランティエ in
     one game and デュプラ in another. So take the shortest form any cell forces
     and use it everywhere; shortening one cell can push another over, hence the
-    loop to a fixed point.
+    loop to a fixed point. ``seed`` holds lengths already settled elsewhere,
+    which this can shorten further but never lengthen.
     """
     games = [dict(g, date=date) for date, day in schedule.items() for g in day
              if g["home"] in TEAM_NAMES and g["away"] in TEAM_NAMES]
-    limits = {}
+    limits = dict(seed or {})
     for _ in range(8):
         changed = False
         for game in games:
@@ -713,6 +1092,22 @@ def solve_name_lengths(schedule, starters):
         if not changed:
             break
     return {name: length for name, length in limits.items() if length < len(name)}
+
+
+def solve_season_name_lengths(schedule, starters):
+    """(公式戦 lengths, オープン戦 lengths).
+
+    A spring cell is tighter — most are at camp parks, with the venue written
+    into the score — and solved together it cut names on every 公式戦 cell
+    (ウィットリー→ウィット all season). So the 公式戦 are solved alone, as they
+    always were, and the spring starts from their lengths and only shortens.
+    """
+    opening = SEASON_START.isoformat()
+    season = solve_name_lengths(
+        {d: g for d, g in schedule.items() if d >= opening}, starters)
+    early = solve_name_lengths(
+        {d: g for d, g in schedule.items() if d < opening}, starters, seed=season)
+    return season, early
 
 
 def game_text(game, starters, name_limits=None, announced=None):
@@ -787,13 +1182,36 @@ def game_text(game, starters, name_limits=None, announced=None):
     return text, "played", runs
 
 
+def postseason_cells(games, starters, name_limits, announced, plan, standings, iso):
+    """A day after the regular season: every column white, CS games in the
+    host's column, 日本シリーズ games in H (merged across H:J)."""
+    cells = {col: ("", WHITE, None) for col, *_ in TEAMS}
+    for game in games:
+        key = (game["date"], game["home"])
+        if key in plan["skip"]:
+            continue
+        text, kind, runs = game_text(game, starters, name_limits, announced)
+        col = COL_OF[game["home"]]
+        if key in plan["japan"]:
+            col = JAPAN_SERIES_COL
+            if kind == "scheduled":
+                # Which league's park, until the starters are named.
+                text = f"({standings[game['home']][0]}・リーグ)"
+                runs = [run_at(0, bold=True)]
+        cells[col] = (text, BLUE if kind == "cancelled" else WHITE, runs)
+    if iso in plan["off"]:
+        cells[JAPAN_SERIES_COL] = ("", JAPAN_SERIES_OFF, None)
+    return cells
+
+
 def build_rows(schedule, starters, roster=None, name_limits=None, window=None,
-               announced=None):
+               announced=None, standings=None, preseason_limits=None):
     """-> list of (date label, weekday, {col: (text, background, runs)}, note)."""
     rows = []
-    first, last = window or (SEASON_START, SEASON_END)
-    day = max(first, SEASON_START)
-    stop = min(last, SEASON_END)
+    plan = postseason_plan(schedule, standings)
+    first, last = window or (SHEET_START, POSTSEASON_END)
+    day = max(first, SHEET_START)
+    stop = min(last, POSTSEASON_END)
     while day <= stop:
         iso = day.isoformat()
         games = [dict(g, date=iso) for g in schedule.get(iso, [])
@@ -815,7 +1233,10 @@ def build_rows(schedule, starters, roster=None, name_limits=None, window=None,
             day += datetime.timedelta(days=1)
             continue
         banner = BANNERS.get(iso)
-        if banner and not games:
+        if day > SEASON_END:
+            cells = postseason_cells(games, starters, name_limits, announced, plan,
+                                     standings, iso)
+        elif banner and not games:
             title, bg = banner
             for col, *_ in TEAMS:
                 cells[col] = ("", bg, None)
@@ -828,11 +1249,15 @@ def build_rows(schedule, starters, roster=None, name_limits=None, window=None,
             idle = PINK if iso in INTERLEAGUE_TAIL else PURPLE
             for col, *_ in TEAMS:
                 cells[col] = ("", idle, None)
+            limits = preseason_limits if day < SEASON_START else name_limits
             for game in games:
-                text, kind, runs = game_text(game, starters, name_limits, announced)
+                text, kind, runs = game_text(game, starters, limits, announced)
                 bg = BLUE if kind == "cancelled" else WHITE
                 cells[COL_OF[game["home"]]] = (text, bg, runs)
                 cells[COL_OF[game["away"]]] = ("", bg, None)
+        # Standings land on the last regular-season day too, so this is not
+        # confined to the postseason branch above.
+        cells.update(plan["labels"].get(iso, {}))
         label = f"{day.month}/{day.day}"
         note = roster_note(label, (roster or {}).get(iso))
         rows.append((label, WEEKDAY_JP[day.weekday()], cells, note))
@@ -902,8 +1327,10 @@ def sheet_payload(rows, with_header=True):
                 # sheet; the day's 登録抹消 hangs off it as a note. A banner row
                 # takes the bar over, exactly as the 2023 sheet does.
                 dark = any(bg is DARK_PURPLE for _, bg, _ in cells.values())
+                banner = next((bg for text, bg, _ in cells.values()
+                               if text and bg in BANNER_COLORS), None)
                 bar = (PINK if any(bg is PINK for _, bg, _ in cells.values())
-                       else DARK_PURPLE if dark else BLACK)
+                       else DARK_PURPLE if dark else banner or BLACK)
                 values.append(cell("", bg=bar, note=note,
                                    borders=solid_border("993366") if dark else None))
                 continue
@@ -921,7 +1348,7 @@ def sheet_payload(rows, with_header=True):
                                               for r in runs):
                 values.append(cell(text, bg=bg, bold=True, runs=runs, halign="CENTER",
                                    borders=solid_border("BFBFBF")))
-            elif bg is PINK and text:
+            elif text and bg in BANNER_COLORS:
                 # Season-phase banner: same white 18pt as the 2023 sheet's.
                 values.append(cell(text, bg=bg, size=18, bold=True, fg="FFFFFF"))
             else:
@@ -933,8 +1360,57 @@ def sheet_payload(rows, with_header=True):
 def season_window(back, forward):
     """The stretch of days a scheduled run rebuilds, clamped to the season."""
     today = datetime.date.today()
-    return (max(SEASON_START, today - datetime.timedelta(days=back)),
-            min(SEASON_END, today + datetime.timedelta(days=forward)))
+    return (max(SHEET_START, today - datetime.timedelta(days=back)),
+            min(POSTSEASON_END, today + datetime.timedelta(days=forward)))
+
+
+def row_index(date):
+    """0-based sheet row of a date; row 0 is the header."""
+    return (date - SHEET_START).days + 1
+
+
+def japan_series_merges(sheet_id, merge_dates, window):
+    """Re-merge H:J over the postseason rows being written.
+
+    Unmerge first, so a row that stopped being part of the series (a game moved
+    by rain) does not keep its merge. Only after the regular season: the
+    All-Star rows are merged across the same columns and a window in July must
+    leave them alone.
+    """
+    first = max(window[0], SEASON_END + datetime.timedelta(days=1))
+    if first > window[1]:
+        return []
+    start, end = JAPAN_SERIES_SPAN
+    out = [{"unmergeCells": {"range": {
+        "sheetId": sheet_id, "startRowIndex": row_index(first),
+        "endRowIndex": row_index(window[1]) + 1,
+        "startColumnIndex": start, "endColumnIndex": end}}}]
+    for iso in sorted(merge_dates):
+        date = datetime.date.fromisoformat(iso)
+        if first <= date <= window[1]:
+            out.append({"mergeCells": {"range": {
+                "sheetId": sheet_id, "startRowIndex": row_index(date),
+                "endRowIndex": row_index(date) + 1,
+                "startColumnIndex": start, "endColumnIndex": end},
+                "mergeType": "MERGE_ALL"}})
+    return out
+
+
+def grow_to_fit(worksheet, last_row):
+    """Add rows when the window runs past the bottom of the grid.
+
+    The tab was cut at the regular season's length, and updateCells refuses to
+    write past the grid rather than growing it.
+    """
+    missing = last_row + 1 - worksheet.row_count
+    if missing <= 0:
+        return []
+    return [{"appendDimension": {"sheetId": worksheet.id, "dimension": "ROWS",
+                                 "length": missing}},
+            {"updateDimensionProperties": {
+                "range": {"sheetId": worksheet.id, "dimension": "ROWS",
+                          "startIndex": worksheet.row_count, "endIndex": last_row + 1},
+                "properties": {"pixelSize": 26}, "fields": "pixelSize"}}]
 
 
 def warn_on_late_collisions(name_limits, starters, window):
@@ -972,25 +1448,42 @@ def warn_on_late_collisions(name_limits, starters, window):
 def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
          roster_cache=None, full=False, window_back=3, window_forward=21):
     client = GoogleSheetsClient().client
-    window = (SEASON_START, SEASON_END) if full else season_window(window_back, window_forward)
+    window = (SHEET_START, POSTSEASON_END) if full else season_window(window_back, window_forward)
     if not full:
         print(f"增量更新窗口 {window[0]} ~ {window[1]}"
               f"（{(window[1] - window[0]).days + 1} 天）")
-    schedule = fetch_schedule(window[0], window[1], cache=cache)
-    starters, display = load_starters(client)
+    # A window reaching the postseason starts partway through a series. Fetch
+    # back to the last regular-season day, so every stage is followed from its
+    # first game and the standings know who was still playing that day.
+    postseason = window[1] >= SEASON_END
+    schedule = fetch_schedule(min(window[0], SEASON_END) if postseason else window[0],
+                              window[1], cache=cache)
+    standings = fetch_standings(SEASON_START.year) if postseason else {}
+    if postseason:
+        print("最終順位 " + "、".join(
+            f"{league}{place}{team}" for team, (league, place)
+            in sorted(standings.items(), key=lambda kv: kv[1])))
+    preseason = fetch_preseason_starters(SEASON_START.year, cache=PRESEASON_STARTERS)
+    schedule = drop_practice_games(schedule, preseason)
+    starters, display = load_starters(client, extra=preseason)
     homers = mark_walkoff_home_runs(starters, schedule, cache=hr_cache,
-                                    url_cache=url_cache, window=window)
+                                    url_cache=url_cache, window=window,
+                                    standings=standings)
     walkoffs = sum(1 for (date, _), info in starters.items()
                    if info["walkoff"]
                    and window[0].isoformat() <= date <= window[1].isoformat())
     print(f"サヨナラ {walkoffs} 場，其中再見全壘打 {homers} 場")
     roster = fetch_roster_moves(max(SEASON_START, window[0]),
-                                min(SEASON_END, window[1], datetime.date.today()),
+                                min(POSTSEASON_END, window[1], datetime.date.today()),
                                 cache=roster_cache)
-    name_limits = solve_name_lengths(schedule, starters)
+    name_limits, preseason_limits = solve_season_name_lengths(schedule, starters)
     if name_limits:
         print("為了塞進欄寬而統一縮短的投手名: "
               + "、".join(f"{n}→{n[:k]}" for n, k in sorted(name_limits.items())))
+    spring_only = {n: k for n, k in preseason_limits.items() if name_limits.get(n) != k}
+    if spring_only:
+        print("オープン戦 另外縮短的投手名: "
+              + "、".join(f"{n}→{n[:k]}" for n, k in sorted(spring_only.items())))
     def spell(name):
         # The 公示 spelling is not a key in the map, so fall back to the bare
         # family name — which is what the map would have produced anyway.
@@ -1001,7 +1494,9 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
     if announced:
         print(f"予告先発 {len(announced)} 場")
     rows = build_rows(schedule, starters, roster, name_limits, window=window,
-                      announced=announced)
+                      announced=announced, standings=standings,
+                      preseason_limits=preseason_limits)
+    merge_dates = japan_series_merge_dates(schedule, standings)
 
     played = sum(1 for _, _, c, _ in rows for t, bg, _ in c.values() if bg is WHITE and t)
     cancelled = sum(1 for _, _, c, _ in rows for t, bg, _ in c.values() if bg is BLUE and t)
@@ -1023,13 +1518,18 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
 
     if not full:
         # Row 1 is the header, so the season's first day sits on row 2.
-        start_row = (window[0] - SEASON_START).days + 1
-        sheet_id = spreadsheet.worksheet(SHEET_TITLE).id
-        spreadsheet.batch_update({"requests": [{"updateCells": {
-            "rows": sheet_payload(rows, with_header=False),
-            "fields": "userEnteredValue,userEnteredFormat,textFormatRuns,note",
-            "start": {"sheetId": sheet_id, "rowIndex": start_row, "columnIndex": 0},
-        }}]})
+        start_row = row_index(window[0])
+        worksheet = spreadsheet.worksheet(SHEET_TITLE)
+        sheet_id = worksheet.id
+        spreadsheet.batch_update({"requests": [
+            *grow_to_fit(worksheet, start_row + len(rows) - 1),
+            {"updateCells": {
+                "rows": sheet_payload(rows, with_header=False),
+                "fields": "userEnteredValue,userEnteredFormat,textFormatRuns,note",
+                "start": {"sheetId": sheet_id, "rowIndex": start_row, "columnIndex": 0},
+            }},
+            *japan_series_merges(sheet_id, merge_dates, window),
+        ]})
         print(f"已更新第 {start_row + 1}~{start_row + len(rows)} 列")
         stale = warn_on_late_collisions(name_limits, starters, window)
         if stale:
@@ -1041,6 +1541,11 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
         existing = spreadsheet.worksheet(SHEET_TITLE)
         sheet_id = existing.id
         spreadsheet.batch_update({"requests": [
+            *grow_to_fit(existing, len(rows)),
+            # Clearing cells leaves their merges behind, and a merge left on a
+            # row that now holds another day swallows its cells: the オープン戦
+            # moved every row down 35.
+            {"unmergeCells": {"range": {"sheetId": sheet_id}}},
             {"updateCells": {"range": {"sheetId": sheet_id},
                              "fields": "userEnteredValue,userEnteredFormat,"
                                        "textFormatRuns,note"}}]})
@@ -1065,7 +1570,7 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
                                   "endColumnIndex": 2}, "mergeType": "MERGE_ALL"}},
     ]
     for iso in BANNERS:
-        offset = (datetime.date.fromisoformat(iso) - SEASON_START).days
+        offset = row_index(datetime.date.fromisoformat(iso)) - 1
         if 0 <= offset < len(rows):
             # C:O, not the 2023 sheet's H:J — 18pt across 10 full-width glyphs
             # needs ~396px and H:J only spans 265, which clipped the title.
@@ -1074,20 +1579,16 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
                           "endRowIndex": offset + 2, "startColumnIndex": 2,
                           "endColumnIndex": LAST_COL}, "mergeType": "MERGE_ALL"}})
     if ALLSTAR_GAMES:
-        first = min((datetime.date.fromisoformat(d) - SEASON_START).days
-                    for d in ALLSTAR_GAMES) + 1
-        last = max((datetime.date.fromisoformat(d) - SEASON_START).days
-                   for d in ALLSTAR_GAMES) + 2
+        first = min(row_index(datetime.date.fromisoformat(d)) for d in ALLSTAR_GAMES)
+        last = max(row_index(datetime.date.fromisoformat(d)) for d in ALLSTAR_GAMES) + 1
         for date in ALLSTAR_GAMES:
-            offset = (datetime.date.fromisoformat(date) - SEASON_START).days + 1
+            offset = row_index(datetime.date.fromisoformat(date))
             requests_.append({"mergeCells": {
                 "range": {"sheetId": sheet_id, "startRowIndex": offset,
                           "endRowIndex": offset + 1, "startColumnIndex": 7,
                           "endColumnIndex": 10}, "mergeType": "MERGE_ALL"}})
-        top = min((datetime.date.fromisoformat(d) - SEASON_START).days
-                  for d in ALLSTAR_DAYS) + 1
-        bottom = max((datetime.date.fromisoformat(d) - SEASON_START).days
-                     for d in ALLSTAR_DAYS) + 2
+        top = min(row_index(datetime.date.fromisoformat(d)) for d in ALLSTAR_DAYS)
+        bottom = max(row_index(datetime.date.fromisoformat(d)) for d in ALLSTAR_DAYS) + 1
         for start_col, end_col in ALLSTAR_STAR_COLS:
             requests_.append({"mergeCells": {
                 "range": {"sheetId": sheet_id, "startRowIndex": top,
@@ -1098,6 +1599,7 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
                 "range": {"sheetId": sheet_id, "startRowIndex": first,
                           "endRowIndex": last, "startColumnIndex": start_col,
                           "endColumnIndex": end_col}, "mergeType": "MERGE_ALL"}})
+    requests_ += japan_series_merges(sheet_id, merge_dates, window)
     for col, width in [(0, 33), (1, 14), (SPACER_COL, 5)]:
         requests_.append({"updateDimensionProperties": {
             "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
