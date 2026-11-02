@@ -222,10 +222,9 @@ class RecordSync:
         source = TARGET_SHEET if kind == "adopt" else year_tab(from_year)
         if kind == "adopt":
             first = self._values(TARGET_KEY, f"'{TARGET_SHEET}'!A{TARGET_FIRST_ROW}", "FORMULA")
-            formula = bool(first and first[0] and str(first[0][0]).startswith("="))
-        if kind == "adopt" and formula:
-            raise RuntimeError(
-                f"{TARGET_SHEET} 已經是切換年度的公式，但找不到任何年度分頁")
+            if first and first[0] and str(first[0][0]).startswith("="):
+                raise RuntimeError(
+                    f"{TARGET_SHEET} 已經是切換年度的公式，但找不到任何年度分頁")
         self._batch([{"duplicateSheet": {
             "sourceSheetId": tabs[source]["sheetId"],
             "insertSheetIndex": tabs[TARGET_SHEET]["index"] + 1,
