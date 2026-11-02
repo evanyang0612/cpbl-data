@@ -1,4 +1,4 @@
-"""Keep the 「2026・野球日記」 tab of the プロ野球データ分析 workbook current.
+"""Keep each season's 「<year>・野球日記」 tab of the プロ野球データ分析 workbook current.
 
 A straight port of the hand-maintained 「2023・野球日記」 tab (gid 633766240): one
 row per calendar day of the regular season, one column per team, and each game
@@ -41,6 +41,7 @@ sheet quietly inconsistent.
 """
 
 import argparse
+import dataclasses
 import datetime
 import json
 import os
@@ -60,23 +61,12 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.dirname(
 from baseball.sheets import GoogleSheetsClient  # noqa: E402
 
 WORKBOOK_KEY = "1FTn1L5hi3TAHSf9JjoiEpcBYUlJ46cV49cxldfL3Wzc"
-SHEET_TITLE = "2026・野球日記"
 SOURCE_SHEET = "2023・野球日記"
 
-SEASON_START = datetime.date(2026, 3, 27)   # 開幕
-# The tab opens with the オープン戦 (2/21–3/22, npb.jp/preseason/2026/), which
-# 2023 left off. Its first row is the day before, titled like any other stretch
-# of the season (see BANNERS); every row number counts from here.
-PRESEASON_START = datetime.date(2026, 2, 21)
-SHEET_START = PRESEASON_START - datetime.timedelta(days=1)
-# Not the last date on the original schedule (10/4): rainouts were made up
-# 10/5–10/8, and a window clamped to 10/4 silently wrote nothing after it.
-SEASON_END = datetime.date(2026, 10, 8)     # last regular-season game
-# …but not the end of the tab. The Climax Series and the 日本シリーズ follow, and
-# the 2023 sheet carries on through them (see postseason_plan). 11/8 leaves
-# room for a 日本シリーズ stretched by ties and rainouts; the rows after the
-# champion is named stay blank, as 2023's do.
-POSTSEASON_END = datetime.date(2026, 11, 8)
+# SHEET_TITLE, SEASON_START, SEASON_END and the rest of a season's dates are set
+# by use_calendar() — see "The season's calendar" below. Every date used to be
+# typed in here, and a season end typed as 10/4 left the tab stalled for eleven
+# days while rainouts were made up through 10/8.
 
 # How the 2023 sheet marks a walk-off: 。 for an ordinary サヨナラ, * for a
 # サヨナラ本塁打 — the asterisk is the firework.
@@ -145,12 +135,17 @@ NPB_STANDINGS = "https://npb.jp/bis/{year}/stats/std_{league}.html"
 # page and run through the same disambiguation as 賽錄's.
 NPB_PRESEASON_SCHEDULE = "https://npb.jp/preseason/{year}/schedule_detail.html"
 NPB_PLAYER = "https://npb.jp/bis/players/{player_id}.html"
-# The sweep's result, checked in. Display names are resolved season-wide, so
-# every run needs the spring starters — a second 髙橋 who only pitched in March
-# still changes how the others are spelled — and the games never change once
-# played. Without the file, a run would make ~230 npb.jp requests to rebuild it.
-PRESEASON_STARTERS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                  "data", "npb_preseason_2026.json")
+# The sweep's result is kept in baseball/data/npb_preseason_<year>.json (see
+# Calendar.preseason_file). Display names are resolved season-wide, so every run
+# needs the spring starters — a second 髙橋 who only pitched in March still
+# changes how the others are spelled — and the games never change once played.
+# Without the file, a run would make ~230 npb.jp requests to rebuild it.
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+# The 公式戦 schedule, one page per month. It also carries the 交流戦, the
+# All-Star games and, at the end, the CS and 日本シリーズ — unmarked.
+NPB_MONTH_PAGE = "https://npb.jp/games/{year}/schedule_{month:02d}_detail.html"
+NPB_INTERLEAGUE = "https://npb.jp/interleague/{year}/"
+GAMES_PER_TEAM = 143
 
 # 公示 spells teams out in full; the note spells them the way Evan's own 2023
 # comments do, and keeps the two leagues in separate blocks.
@@ -184,28 +179,17 @@ GREY = {"red": 191 / 255, "green": 191 / 255, "blue": 191 / 255}    # BFBFBF 整
 BLACK = {"red": 0.0, "green": 0.0, "blue": 0.0}
 PINK = {"red": 1.0, "green": 0.6, "blue": 0.8}          # FF99CC 交流戦の告知
 
-# The 2023 sheet announces a stretch of the season by taking over the Monday
-# off-day row just before it starts — pink, no games, the title merged across
-# H:J. 交流戦 2026 runs 5/26–6/14 (npb.jp/interleague/2026/), so its Monday is
-# 5/25. Dates are explicit rather than derived: NPB moves these around.
-BANNERS = {
-    "2026-02-20": ("2026 年 オ ー プ ン 戦", PURPLE),
-    # 2023 titles its 公式戦 on the free day before 開幕, in the purple of a day
-    # off (3/28, the day before 3/30's Pacific opener); 2026's free day is 3/26.
-    "2026-03-26": ("2026 年 シーズン 公 式 戦", PURPLE),
-    "2026-05-25": ("2026 日 本 生 命 セ・パ 交 流 戦", PINK),
-}
-
-# …and signs it off by carrying the same pink through the days that follow the
-# last scheduled 交流戦 game — 2023 tints 6/19–6/22 after its 6/18 finish. 2026
-# ends 6/14, so 6/15–6/18. Only the empty cells take the tint: the 予備日 games
-# played inside the window stay white like any other game.
+# The 2023 sheet announces a stretch of the season by taking over the off-day
+# row just before it starts — no games, the title merged across the row — and
+# signs the 交流戦 off by carrying its pink through the four days after its last
+# full day (2023 tints 6/19–6/22 after its 6/18 finish). Only the empty cells
+# take the tint: the 予備日 games played inside the window stay white.
 # The All-Star break gets the same treatment in a darker purple: four tinted days
 # with the two games written across the middle and オールスターゲーム labelled on
 # each league's side (2023 does this over 7/18–7/21). 全セ/全パ are not among the
-# 12 clubs, so these rows are composed by hand from NPB's own box scores.
+# 12 clubs, so these rows are composed from NPB's own box scores.
+# The dates themselves all come from Calendar.
 DARK_PURPLE = {"red": 0.6, "green": 0.2, "blue": 0.4}   # 993366
-ALLSTAR_DAYS = ("2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30")
 ALLSTAR_LABEL = "オールスターゲーム"
 # The 2023 sheet floats four vector star5 shapes across the band. The Sheets API
 # has no drawing layer, so this is the nearest thing it can write: a big white ★
@@ -215,19 +199,10 @@ ALLSTAR_STAR = "★"
 # straddles two columns so the stars sit midway between the label and the score
 # box instead of hugging it.
 ALLSTAR_STAR_COLS = ((2, 3), (5, 7), (10, 12), (14, 15))   # C, F:G, K:L, O
-ALLSTAR_GAMES = {
-    # date: (away starter, away runs, venue, home runs, home starter)
-    "2026-07-28": ("伊藤", "7", "東京", "5", "山野"),      # 全パ 7 - 5 全セ @東京ドーム
-    "2026-07-29": ("髙橋", "8", "富山", "7", "エスピノーザ"),  # 全セ 8 - 7 全パ @富山
-}
 
 # Only a banner puts text on these backgrounds; a day off or the 交流戦 tail
 # never does.
-BANNER_COLORS = tuple({id(bg): bg for _, bg in BANNERS.values()}.values())
-
-INTERLEAGUE_TAIL = frozenset(
-    ("2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18")
-)
+BANNER_COLORS = (PURPLE, PINK)
 
 
 def rgb(hexstr):
@@ -273,6 +248,279 @@ VENUE_SHORT = {
     "ハードオフ新潟": "新潟", "県営大宮": "大宮", "山形市": "山形",
     "ほっと神戸": "神戸",
 }
+
+# --- The season's calendar -----------------------------------------------------
+# Everything about a season that is not a game result: when the tab opens and
+# closes, where the banners go, the All-Star break. It is all read off npb.jp
+# (fetch_calendar), so a new season's tab starts on its own; CALENDAR_2026 is
+# the same thing written out, and what the module runs on until main() swaps in
+# the live one.
+
+@dataclasses.dataclass(frozen=True)
+class Calendar:
+    year: int
+    preseason_start: datetime.date      # first オープン戦
+    season_start: datetime.date         # 開幕
+    # The last 公式戦 game, makeups included — not the last date on the
+    # original schedule.
+    season_end: datetime.date
+    interleague: tuple                  # (first day, last full day) of the 交流戦
+    interleague_title: str              # 日本生命セ・パ交流戦 — the sponsor changes
+    # date: (away starter, away runs, venue, home runs, home starter)
+    allstar_games: dict
+
+    @property
+    def sheet_title(self):
+        return f"{self.year}・野球日記"
+
+    @property
+    def sheet_start(self):
+        """The tab's first row: the day before the オープン戦, carrying its banner.
+        Every row number counts from here."""
+        return self.preseason_start - datetime.timedelta(days=1)
+
+    @property
+    def postseason_end(self):
+        """The Climax Series and the 日本シリーズ follow the season, and the tab
+        carries on through them (see postseason_plan). A month leaves room for a
+        日本シリーズ stretched by ties and rainouts; the rows after the champion
+        is named stay blank, as 2023's do."""
+        return self.season_end + datetime.timedelta(days=31)
+
+    @property
+    def banners(self):
+        before = lambda day: (day - datetime.timedelta(days=1)).isoformat()
+        return {
+            before(self.preseason_start): (f"{self.year} 年 オ ー プ ン 戦", PURPLE),
+            # 2023 titles its 公式戦 on the free day before 開幕, in the purple of
+            # a day off (3/28, the day before 3/30's Pacific opener).
+            before(self.season_start): (f"{self.year} 年 シーズン 公 式 戦", PURPLE),
+            before(self.interleague[0]): (
+                f"{self.year} {spaced_title(self.interleague_title)}", PINK),
+        }
+
+    @property
+    def interleague_tail(self):
+        last = self.interleague[1]
+        return frozenset((last + datetime.timedelta(days=i)).isoformat()
+                         for i in range(1, 5))
+
+    @property
+    def allstar_days(self):
+        """The two games plus a tinted day either side."""
+        if not self.allstar_games:
+            return ()
+        first, last = (datetime.date.fromisoformat(d)
+                       for d in (min(self.allstar_games), max(self.allstar_games)))
+        return tuple((first + datetime.timedelta(days=i)).isoformat()
+                     for i in range(-1, (last - first).days + 2))
+
+    @property
+    def preseason_file(self):
+        return os.path.join(DATA_DIR, f"npb_preseason_{self.year}.json")
+
+
+CALENDAR_2026 = Calendar(
+    year=2026,
+    preseason_start=datetime.date(2026, 2, 21),
+    season_start=datetime.date(2026, 3, 27),
+    season_end=datetime.date(2026, 10, 8),
+    interleague=(datetime.date(2026, 5, 26), datetime.date(2026, 6, 14)),
+    interleague_title="日本生命セ・パ交流戦",
+    allstar_games={
+        "2026-07-28": ("伊藤", "7", "東京", "5", "山野"),      # 全パ 7 - 5 全セ @東京ドーム
+        "2026-07-29": ("髙橋", "8", "富山", "7", "エスピノーザ"),  # 全セ 8 - 7 全パ @富山
+    },
+)
+
+
+def use_calendar(calendar):
+    """Point the module at one season.
+
+    The dates are read as module globals all through the row building, so
+    switching seasons rebinds them rather than threading a calendar through
+    every function.
+    """
+    global CALENDAR, SHEET_TITLE, PRESEASON_START, SHEET_START, SEASON_START
+    global SEASON_END, POSTSEASON_END, BANNERS, INTERLEAGUE_TAIL, ALLSTAR_DAYS
+    global ALLSTAR_GAMES, PRESEASON_STARTERS
+    CALENDAR = calendar
+    SHEET_TITLE = calendar.sheet_title
+    PRESEASON_START = calendar.preseason_start
+    SHEET_START = calendar.sheet_start
+    SEASON_START = calendar.season_start
+    SEASON_END = calendar.season_end
+    POSTSEASON_END = calendar.postseason_end
+    BANNERS = calendar.banners
+    INTERLEAGUE_TAIL = calendar.interleague_tail
+    ALLSTAR_DAYS = calendar.allstar_days
+    ALLSTAR_GAMES = dict(calendar.allstar_games)
+    PRESEASON_STARTERS = calendar.preseason_file
+
+
+def spaced_title(title):
+    """日本生命セ・パ交流戦 -> 日 本 生 命 セ・パ 交 流 戦, the 2023 banner's spacing."""
+    return " ".join(re.findall(r"セ・パ|\S", title))
+
+
+def parse_schedule_page(html, year):
+    """One npb.jp schedule page -> [{date, home, away, cancelled}, ...].
+
+    A day's first row opens with ``<th>4/1（水）</th>``, and any further games of
+    the day sit in the rows under it (the 公式戦 pages also id the row
+    ``date0401``; the オープン戦 page does not). A game's first team is the
+    host. A game not played yet is listed like any other, a rained-out one
+    carries ``div.cancel``.
+    """
+    games, date = [], None
+    for tr in bs(html, "html.parser").find_all("tr"):
+        head = tr.find("th")
+        found = re.match(r"(\d{1,2})/(\d{1,2})", head.get_text(strip=True)) if head else None
+        if found:
+            date = f"{year}-{int(found.group(1)):02d}-{int(found.group(2)):02d}"
+        if not date:
+            continue
+        for td in tr.find_all("td"):
+            home, away = td.select_one(".team1"), td.select_one(".team2")
+            if home and away:
+                games.append({"date": date, "home": home.get_text(strip=True),
+                              "away": away.get_text(strip=True),
+                              "cancelled": td.select_one(".cancel") is not None})
+    return games
+
+
+def season_bounds(games):
+    """(開幕, last 公式戦 day) from the monthly pages' games.
+
+    The pages run on into the CS and 日本シリーズ without marking them, so the
+    season is over the day all twelve clubs have their 143. Until then every
+    game listed is a 公式戦, and the end is the last one scheduled — which moves
+    as rainouts are given new dates.
+    """
+    played = {team: 0 for team in TEAM_NAMES}
+    games = sorted((g for g in games
+                    if g["home"] in TEAM_NAMES and g["away"] in TEAM_NAMES),
+                   key=lambda g: g["date"])
+    for game in games:
+        if game["cancelled"]:
+            continue
+        played[game["home"]] += 1
+        played[game["away"]] += 1
+        if min(played.values()) >= GAMES_PER_TEAM:
+            return (datetime.date.fromisoformat(games[0]["date"]),
+                    datetime.date.fromisoformat(game["date"]))
+    return (datetime.date.fromisoformat(games[0]["date"]),
+            datetime.date.fromisoformat(games[-1]["date"]))
+
+
+def interleague_bounds(games):
+    """(first day, last full day) of the 交流戦.
+
+    A full day is all six pairings crossing the leagues; the 予備日 makeups that
+    trail it come one or two at a time and are not where the banner's tail starts.
+    """
+    league = {name: col < SPACER_COL for col, name, *_ in TEAMS}
+    per_day = {}
+    for g in games:
+        if g["home"] in league and g["away"] in league \
+                and league[g["home"]] != league[g["away"]]:
+            per_day[g["date"]] = per_day.get(g["date"], 0) + 1
+    full = sorted(d for d, n in per_day.items() if n >= 3)
+    return (datetime.date.fromisoformat(min(per_day)),
+            datetime.date.fromisoformat(full[-1]))
+
+
+def parse_allstar_box(html):
+    """An All-Star box score -> (away starter, away runs, venue, home runs,
+    home starter), the shape the band's cells are written from."""
+    soup = bs(html, "html.parser")
+    title = soup.select_one(".game_tit").get_text(" ", strip=True)
+    # "2026年7月29日（水） 富 山 【オールスターゲーム】 …": the park sits between
+    # the date and the bracket, and NPB pads short names with spaces.
+    venue = re.sub(r"\s", "", re.search(r"）\s*(.+?)\s*【", title).group(1))
+    venue = VENUE_SHORT.get(venue, venue.replace("ドーム", ""))
+
+    def starter(table_id):
+        return soup.select_one(f"#{table_id} td.player a").get_text(strip=True)
+
+    runs = [row.select_one("td.total-1").get_text(strip=True)
+            for row in soup.select("#tablefix_ls tbody tr")]
+    return (starter("tablefix_t_p"), runs[0], venue, runs[1], starter("tablefix_b_p"))
+
+
+class CalendarMissing(RuntimeError):
+    """npb.jp has no schedule for a season that should be under way."""
+
+
+def run_window(today, calendar, back, forward, year=None):
+    """The days a scheduled run rebuilds, or None when there is nothing to do.
+
+    Nothing to do is the winter: before the tab opens, after it closes, or
+    before npb.jp has published the season at all — but only until March.
+    """
+    if calendar is None:
+        if missing_calendar_is_an_error(today):
+            raise CalendarMissing(f"npb.jp 沒有 {year or today.year} 年的賽程")
+        return None
+    start = max(calendar.sheet_start, today - datetime.timedelta(days=back))
+    end = min(calendar.postseason_end, today + datetime.timedelta(days=forward))
+    return (start, end) if start <= end else None
+
+
+def missing_calendar_is_an_error(today):
+    """npb.jp publishes next season's schedule some time over the winter; from
+    March on, not having it means the diary has stopped."""
+    return today.month >= 3
+
+
+def fetch_calendar(year):
+    """The season's Calendar from npb.jp, or None while it is not published."""
+    def get(url):
+        for _ in range(3):
+            try:
+                resp = requests.get(url, headers=UA, timeout=30)
+                resp.encoding = "utf-8"
+                return resp.text if resp.status_code == 200 else ""
+            except requests.RequestException:
+                continue
+        raise RuntimeError(f"npb.jp did not answer: {url}")
+
+    pages = {month: get(NPB_MONTH_PAGE.format(year=year, month=month))
+             for month in range(3, 12)}
+    games = [g for month in pages for g in parse_schedule_page(pages[month], year)]
+    spring = parse_schedule_page(get(NPB_PRESEASON_SCHEDULE.format(year=year)), year)
+    clubs = [g for g in games if g["home"] in TEAM_NAMES and g["away"] in TEAM_NAMES]
+    if not clubs or not spring:
+        return None
+    season_start, season_end = season_bounds(clubs)
+
+    title = bs(get(NPB_INTERLEAGUE.format(year=year)), "html.parser").title
+    # "日本生命セ・パ交流戦 2026 | NPB.jp 日本野球機構"
+    sponsor = re.sub(r"\s*\d{4}.*$", "", title.get_text(strip=True)) if title else ""
+
+    allstar = {}
+    # 全セ and 全パ are cl and pl in the score URLs.
+    links = re.findall(rf"/scores/{year}/\d{{4}}/(?:cl-pl|pl-cl)-\d+/",
+                       "".join(pages.values()))
+    for path in sorted(set(links)):
+        mmdd = path.split("/")[3]
+        box = get(f"{NPB_BASE}{path}box.html")
+        if box and "tablefix_t_p" in box:
+            allstar[f"{year}-{mmdd[:2]}-{mmdd[2:]}"] = parse_allstar_box(box)
+
+    return Calendar(
+        year=year,
+        preseason_start=datetime.date.fromisoformat(min(g["date"] for g in spring)),
+        season_start=season_start,
+        season_end=season_end,
+        interleague=interleague_bounds(clubs),
+        interleague_title=sponsor or "セ・パ交流戦",
+        allstar_games=allstar,
+    )
+
+
+use_calendar(CALENDAR_2026)
+
 
 # --- Postseason ---------------------------------------------------------------
 # Laid out the way Evan carries his own 2026 sheet on by hand, and 2023's before
@@ -784,12 +1032,13 @@ def normalize_full_name(name):
     return _INITIAL.sub("", re.sub(r"\s+", " ", name).strip())
 
 
-def fetch_preseason_starters(year, cache=None):
+def fetch_preseason_starters(year, cache=None, dates=None):
     """{(date, home team): {starters' full names, walk-off flag, score URL}}.
 
     The cache holds the finished result: the オープン戦 are long over by the
     time anyone reruns this, and a cold run is ~100 box scores plus a player
-    page per starter.
+    page per starter. ``dates`` (first, last) narrows a run made while they are
+    still being played to the games it will write; that is never cached.
     """
     if cache and os.path.exists(cache):
         return {tuple(k.split("|")): v for k, v in json.load(open(cache)).items()}
@@ -812,6 +1061,8 @@ def fetch_preseason_starters(year, cache=None):
                           anchor["href"])
         if found and found.group(3) in team_of:
             key = (f"{year}-{found.group(1)}-{found.group(2)}", team_of[found.group(3)])
+            if dates and not dates[0] <= key[0] <= dates[1]:
+                continue
             games[key] = NPB_BASE + found.group(0)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -835,7 +1086,7 @@ def fetch_preseason_starters(year, cache=None):
                     "home_starter": names.get(box["home_starter"], ""),
                     "walkoff": box["walkoff"], "score_url": games[key]}
     # Never freeze a half-played spring.
-    if cache and datetime.date.today() >= SEASON_START:
+    if cache and not dates and datetime.date.today() >= SEASON_START:
         os.makedirs(os.path.dirname(cache), exist_ok=True)
         json.dump({"|".join(k): v for k, v in sorted(out.items())}, open(cache, "w"),
                   ensure_ascii=False, indent=1)
@@ -926,7 +1177,7 @@ def load_starters(client, extra=None):
 
     out = {}
     for row in rows[1:]:
-        if not any(row) or not row[idx["日期"]].startswith("2026"):
+        if not any(row) or not row[idx["日期"]].startswith(str(SEASON_START.year)):
             continue
         away = [num(row[idx[f"客{i}"]]) for i in range(1, 13)]
         home = [num(row[idx[f"主{i}"]]) for i in range(1, 13)]
@@ -1357,13 +1608,6 @@ def sheet_payload(rows, with_header=True):
     return data
 
 
-def season_window(back, forward):
-    """The stretch of days a scheduled run rebuilds, clamped to the season."""
-    today = datetime.date.today()
-    return (max(SHEET_START, today - datetime.timedelta(days=back)),
-            min(POSTSEASON_END, today + datetime.timedelta(days=forward)))
-
-
 def row_index(date):
     """0-based sheet row of a date; row 0 is the header."""
     return (date - SHEET_START).days + 1
@@ -1446,24 +1690,56 @@ def warn_on_late_collisions(name_limits, starters, window):
 
 
 def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
-         roster_cache=None, full=False, window_back=3, window_forward=21):
+         roster_cache=None, full=False, window_back=3, window_forward=21, year=None):
+    today = datetime.date.today()
+    calendar = fetch_calendar(year or today.year)
+    if full:
+        if calendar is None:
+            raise CalendarMissing(f"npb.jp 沒有 {year or today.year} 年的賽程")
+        use_calendar(calendar)
+        window = (SHEET_START, POSTSEASON_END)
+    else:
+        window = run_window(today, calendar, window_back, window_forward,
+                            year=year or today.year)
+        if window is None:
+            print("賽季外，沒有要更新的日期")
+            return
+        use_calendar(calendar)
+    print(f"{SHEET_TITLE}：オープン戦 {PRESEASON_START}、開幕 {SEASON_START}、"
+          f"最終戦 {SEASON_END}，分頁寫到 {POSTSEASON_END}")
+
     client = GoogleSheetsClient().client
-    window = (SHEET_START, POSTSEASON_END) if full else season_window(window_back, window_forward)
+    spreadsheet = client.open_by_key(WORKBOOK_KEY)
+    # A new season's tab is laid out whole, like --full, but only the days the
+    # scheduled window covers are worth asking Yahoo about yet; the rest fill
+    # in as the window reaches them.
+    fetch_until = window[1]
+    if not full and SHEET_TITLE not in {ws.title for ws in spreadsheet.worksheets()}:
+        print(f"還沒有「{SHEET_TITLE}」，整張建立")
+        full, window = True, (SHEET_START, POSTSEASON_END)
     if not full:
         print(f"增量更新窗口 {window[0]} ~ {window[1]}"
               f"（{(window[1] - window[0]).days + 1} 天）")
     # A window reaching the postseason starts partway through a series. Fetch
     # back to the last regular-season day, so every stage is followed from its
     # first game and the standings know who was still playing that day.
-    postseason = window[1] >= SEASON_END
+    postseason = fetch_until >= SEASON_END
     schedule = fetch_schedule(min(window[0], SEASON_END) if postseason else window[0],
-                              window[1], cache=cache)
+                              fetch_until, cache=cache)
     standings = fetch_standings(SEASON_START.year) if postseason else {}
     if postseason:
         print("最終順位 " + "、".join(
             f"{league}{place}{team}" for team, (league, place)
             in sorted(standings.items(), key=lambda kv: kv[1])))
-    preseason = fetch_preseason_starters(SEASON_START.year, cache=PRESEASON_STARTERS)
+    if os.path.exists(PRESEASON_STARTERS) or today >= SEASON_START:
+        preseason = fetch_preseason_starters(SEASON_START.year, cache=PRESEASON_STARTERS)
+    elif window[0] < SEASON_START:
+        # Spring, and the games so far are not settled into a file yet.
+        last = min(window[1], SEASON_START - datetime.timedelta(days=1))
+        preseason = fetch_preseason_starters(
+            SEASON_START.year, dates=(window[0].isoformat(), last.isoformat()))
+    else:
+        preseason = {}
     schedule = drop_practice_games(schedule, preseason)
     starters, display = load_starters(client, extra=preseason)
     homers = mark_walkoff_home_runs(starters, schedule, cache=hr_cache,
@@ -1514,8 +1790,6 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
             print(f"{label:>5} {weekday}  {line}")
         return
 
-    spreadsheet = client.open_by_key(WORKBOOK_KEY)
-
     if not full:
         # Row 1 is the header, so the season's first day sits on row 2.
         start_row = row_index(window[0])
@@ -1537,8 +1811,9 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
                   f"那些列不會被改到，需要跑一次 --full：{'、'.join(stale)}")
         return
 
-    try:
-        existing = spreadsheet.worksheet(SHEET_TITLE)
+    tabs = {ws.title: ws for ws in spreadsheet.worksheets()}
+    if SHEET_TITLE in tabs:
+        existing = tabs[SHEET_TITLE]
         sheet_id = existing.id
         spreadsheet.batch_update({"requests": [
             *grow_to_fit(existing, len(rows)),
@@ -1549,8 +1824,9 @@ def main(dry_run=False, cache=None, hr_cache=None, url_cache=None,
             {"updateCells": {"range": {"sheetId": sheet_id},
                              "fields": "userEnteredValue,userEnteredFormat,"
                                        "textFormatRuns,note"}}]})
-    except Exception:
-        source = spreadsheet.worksheet(SOURCE_SHEET)
+    else:
+        # Next to last season's tab, or the 2023 one the layout was taken from.
+        source = tabs.get(f"{SEASON_START.year - 1}・野球日記") or tabs[SOURCE_SHEET]
         created = spreadsheet.batch_update({"requests": [{"addSheet": {"properties": {
             "title": SHEET_TITLE,
             "index": source.index + 1,
@@ -1634,10 +1910,11 @@ if __name__ == "__main__":
                         help="重建整張表（會掃 Yahoo 整季，只在改版面時用）")
     parser.add_argument("--window-back", type=int, default=3,
                         help="增量模式往回幾天（預設 3）")
+    parser.add_argument("--year", type=int, help="指定年度（預設今年）")
     parser.add_argument("--window-forward", type=int, default=21,
                         help="增量模式往後幾天（預設 21）")
     args = parser.parse_args()
     main(dry_run=args.dry_run, cache=args.cache, hr_cache=args.hr_cache,
          url_cache=args.url_cache, roster_cache=args.roster_cache,
          full=args.full, window_back=args.window_back,
-         window_forward=args.window_forward)
+         window_forward=args.window_forward, year=args.year)

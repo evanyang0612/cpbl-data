@@ -501,3 +501,240 @@ def test_a_crowded_spring_cell_does_not_shorten_a_name_all_season():
         window=(nd.SHEET_START, datetime.date(2026, 3, 31)))}
     assert rows["3/31"][nd.COL_OF["阪神"]][0].startswith("ウィットリー")
     assert not rows["2/23"][nd.COL_OF["巨人"]][0].startswith("ウィットリー")
+
+
+# --- Rolling over to the next season --------------------------------------
+#
+# Nothing about a season is typed in any more: its dates come off npb.jp, so
+# the diary starts 2027's tab on its own. 2026, derived the same way, has to
+# come out exactly as it was laid out by hand.
+
+SCHEDULE_PAGE = """
+<table>
+<tr id="date0401" class="">
+  <th rowspan="2">4/1（水）</th>
+  <td><div class="team1">ヤクルト</div>
+      <a href="/scores/2026/0401/s-c-02/"><div class="cancel">中止</div></a>
+      <div class="team2">広島</div></td>
+  <td><div class="place">神　宮</div></td>
+</tr>
+<tr>
+  <td><div class="team1">阪神</div>
+      <a href="/scores/2026/0401/t-g-02/"><div class="score1">3</div>
+      <div class="state">-</div><div class="score2">1</div></a>
+      <div class="team2">巨人</div></td>
+  <td><div class="place">甲子園</div></td>
+</tr>
+<tr id="date0402" class=" last">
+  <th>4/2（木）</th><td>&nbsp;</td><td>&nbsp;</td>
+</tr>
+<tr id="date0403" class="">
+  <th>4/3（金）</th>
+  <td><div class="team1">西武</div><div class="team2">楽天</div></td>
+  <td><div class="place">ベルーナドーム</div></td>
+</tr>
+</table>
+"""
+
+
+def test_a_schedule_page_lists_every_game_and_marks_rainouts():
+    games = nd.parse_schedule_page(SCHEDULE_PAGE, 2026)
+    assert games == [
+        {"date": "2026-04-01", "home": "ヤクルト", "away": "広島", "cancelled": True},
+        {"date": "2026-04-01", "home": "阪神", "away": "巨人", "cancelled": False},
+        # Not played yet: still on the schedule, still counts.
+        {"date": "2026-04-03", "home": "西武", "away": "楽天", "cancelled": False},
+    ]
+
+
+def _season(days, rainout=None):
+    """Six pairings a day; ``rainout`` is a date whose games were called off."""
+    pairs = [("巨人", "阪神"), ("中日", "広島"), ("ヤクルト", "DeNA"),
+             ("西武", "楽天"), ("ロッテ", "日本ハム"), ("ソフトバンク", "オリックス")]
+    return [{"date": d, "home": h, "away": a, "cancelled": d == rainout}
+            for d in days for h, a in pairs]
+
+
+def test_the_season_ends_the_day_every_club_has_played_its_quota(monkeypatch):
+    """The monthly pages run on into the CS and 日本シリーズ with nothing to mark
+    them; the regular season is over once all twelve clubs reach 143."""
+    monkeypatch.setattr(nd, "GAMES_PER_TEAM", 3)
+    games = _season(["2026-03-27", "2026-03-28", "2026-03-29"])
+    games.append({"date": "2026-10-10", "home": "巨人", "away": "DeNA", "cancelled": False})
+    assert nd.season_bounds(games) == (datetime.date(2026, 3, 27),
+                                       datetime.date(2026, 3, 29))
+
+
+def test_a_rainout_does_not_count_toward_the_quota(monkeypatch):
+    monkeypatch.setattr(nd, "GAMES_PER_TEAM", 3)
+    games = _season(["2026-03-27", "2026-03-28", "2026-03-29", "2026-03-30"],
+                    rainout="2026-03-28")
+    assert nd.season_bounds(games)[1] == datetime.date(2026, 3, 30)
+
+
+def test_an_unfinished_season_runs_to_its_last_scheduled_day(monkeypatch):
+    """Mid-season the quota is not reached yet — makeups are still unscheduled —
+    so the end is the last day on the schedule, and moves when one is added."""
+    monkeypatch.setattr(nd, "GAMES_PER_TEAM", 143)
+    games = _season(["2026-03-27", "2026-09-30"])
+    assert nd.season_bounds(games)[1] == datetime.date(2026, 9, 30)
+
+
+def test_interleague_ends_on_its_last_full_day_not_its_makeups():
+    """2026: six games a day 5/26–6/14, then makeups 6/16–6/17 one or two at a
+    time. The banner tail starts after 6/14, the way the hand layout had it."""
+    central = ["巨人", "阪神", "中日", "広島", "ヤクルト", "DeNA"]
+    pacific = ["西武", "楽天", "ロッテ", "日本ハム", "ソフトバンク", "オリックス"]
+    full_day = lambda d: [{"date": d, "home": c, "away": p, "cancelled": False}
+                          for c, p in zip(central, pacific)]
+    games = (full_day("2026-05-26") + full_day("2026-06-14")
+             + [{"date": "2026-06-16", "home": "阪神", "away": "西武", "cancelled": False}]
+             + [{"date": "2026-06-20", "home": "阪神", "away": "巨人", "cancelled": False}])
+    assert nd.interleague_bounds(games) == (datetime.date(2026, 5, 26),
+                                            datetime.date(2026, 6, 14))
+
+
+def test_the_sponsor_title_is_spaced_out_but_keeps_se_pa_whole():
+    assert nd.spaced_title("日本生命セ・パ交流戦") == "日 本 生 命 セ・パ 交 流 戦"
+
+
+ALLSTAR_BOX = """
+<div class="game_tit">2026年7月29日（水） 富 山 【オールスターゲーム】 パシフィック・リーグ vs セントラル・リーグ 第2戦</div>
+<table id="tablefix_ls"><tbody>
+  <tr class="top"><th>セ</th><td>1</td><td class="total-1">8</td><td class="total-2">12</td><td class="total-2">0</td></tr>
+  <tr class="bottom"><th>パ</th><td>2</td><td class="total-1">7</td><td class="total-2">9</td><td class="total-2">1</td></tr>
+</tbody></table>
+<table id="tablefix_t_p"><tr><td class="player"><a href="/bis/players/1.html">髙橋</a></td></tr></table>
+<table id="tablefix_b_p"><tr><td class="player"><a href="/bis/players/2.html">エスピノーザ</a></td></tr></table>
+"""
+
+
+def test_an_allstar_game_is_read_off_its_box_score():
+    """Exactly what was typed in by hand for 2026's second game."""
+    assert nd.parse_allstar_box(ALLSTAR_BOX) == ("髙橋", "8", "富山", "7", "エスピノーザ")
+    # The live page pads it with an ideographic space.
+    assert nd.parse_allstar_box(ALLSTAR_BOX.replace("富 山", "富\u3000山"))[2] == "富山"
+    tokyo = ALLSTAR_BOX.replace("富 山", "東京ドーム")
+    assert nd.parse_allstar_box(tokyo)[2] == "東京"
+
+
+CALENDAR_2026 = dict(
+    year=2026,
+    preseason_start=datetime.date(2026, 2, 21),
+    season_start=datetime.date(2026, 3, 27),
+    season_end=datetime.date(2026, 10, 8),
+    interleague=(datetime.date(2026, 5, 26), datetime.date(2026, 6, 14)),
+    interleague_title="日本生命セ・パ交流戦",
+    allstar_games={
+        "2026-07-28": ("伊藤", "7", "東京", "5", "山野"),
+        "2026-07-29": ("髙橋", "8", "富山", "7", "エスピノーザ"),
+    },
+)
+
+
+def test_2026_derived_from_its_dates_is_the_2026_laid_out_by_hand():
+    cal = nd.Calendar(**CALENDAR_2026)
+    assert cal.sheet_title == "2026・野球日記"
+    assert cal.sheet_start == datetime.date(2026, 2, 20)
+    assert cal.postseason_end == datetime.date(2026, 11, 8)
+    assert cal.banners == {
+        "2026-02-20": ("2026 年 オ ー プ ン 戦", nd.PURPLE),
+        "2026-03-26": ("2026 年 シーズン 公 式 戦", nd.PURPLE),
+        "2026-05-25": ("2026 日 本 生 命 セ・パ 交 流 戦", nd.PINK),
+    }
+    assert cal.allstar_days == ("2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30")
+    assert cal.interleague_tail == frozenset(
+        ("2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18"))
+    assert cal.preseason_file.endswith("npb_preseason_2026.json")
+
+
+def test_using_a_calendar_moves_the_whole_tab_to_that_year():
+    later = dict(CALENDAR_2026, year=2027,
+                 preseason_start=datetime.date(2027, 2, 20),
+                 season_start=datetime.date(2027, 3, 26),
+                 season_end=datetime.date(2027, 10, 3),
+                 interleague=(datetime.date(2027, 5, 25), datetime.date(2027, 6, 13)),
+                 allstar_games={})
+    before = nd.Calendar(**CALENDAR_2026)
+    try:
+        nd.use_calendar(nd.Calendar(**later))
+        assert nd.SHEET_TITLE == "2027・野球日記"
+        assert nd.row_index(datetime.date(2027, 2, 19)) == 1
+        rows = nd.build_rows({}, {}, window=(nd.SHEET_START, nd.SEASON_START))
+        assert rows[0][0] == "2/19" and "2027" in rows[0][2][nd.TEAMS[0][0]][0]
+    finally:
+        nd.use_calendar(before)
+    assert nd.SHEET_TITLE == "2026・野球日記"
+
+
+def test_no_calendar_is_quiet_in_the_winter_and_an_alarm_once_spring_comes():
+    """npb.jp publishes next year's schedule some time over the winter. Before
+    March a missing one is normal; after that it is the 10/4 stall again."""
+    assert nd.missing_calendar_is_an_error(datetime.date(2027, 1, 10)) is False
+    assert nd.missing_calendar_is_an_error(datetime.date(2027, 2, 28)) is False
+    assert nd.missing_calendar_is_an_error(datetime.date(2027, 3, 1)) is True
+
+
+def test_the_preseason_page_dates_its_rows_only_in_the_header_cell():
+    """npb.jp/preseason/ has no tr#dateMMDD — just ``<th>2/21（土）</th>``."""
+    page = """<table><tbody>
+      <tr><th class="saturday" rowspan="2">2/21（土）</th>
+        <td><div class="team1">楽天</div><div class="team2">ロッテ</div></td></tr>
+      <tr><td><div class="team1">中日</div><div class="team2">阪神</div></td></tr>
+    </tbody></table>"""
+    games = nd.parse_schedule_page(page, 2026)
+    assert [(g["date"], g["home"]) for g in games] == [
+        ("2026-02-21", "楽天"), ("2026-02-21", "中日")]
+
+
+def test_a_season_not_yet_published_is_quiet_until_march():
+    winter = datetime.date(2027, 1, 15)
+    assert nd.run_window(winter, None, back=3, forward=21) is None
+    try:
+        nd.run_window(datetime.date(2027, 3, 2), None, back=3, forward=21)
+    except nd.CalendarMissing:
+        pass
+    else:
+        raise AssertionError("a missing calendar in March must fail the run")
+
+
+def test_the_window_is_empty_before_the_tab_opens_and_after_it_closes():
+    cal = nd.Calendar(**CALENDAR_2026)
+    assert nd.run_window(datetime.date(2026, 1, 20), cal, back=3, forward=21) is None
+    assert nd.run_window(datetime.date(2026, 12, 1), cal, back=3, forward=21) is None
+    # Three weeks ahead reaches into the tab before it opens.
+    assert nd.run_window(datetime.date(2026, 2, 5), cal, back=3, forward=21) == (
+        datetime.date(2026, 2, 20), datetime.date(2026, 2, 26))
+    assert nd.run_window(datetime.date(2026, 11, 7), cal, back=3, forward=21) == (
+        datetime.date(2026, 11, 4), datetime.date(2026, 11, 8))
+
+
+PRESEASON_SCHEDULE_PAGE = """
+<a href="/scores/2026/0221/e-m-01/">x</a>
+<a href="/scores/2026/0307/g-s-01/">x</a>
+"""
+
+
+def test_a_spring_run_reads_only_the_box_scores_in_its_window(monkeypatch, tmp_path):
+    """While the オープン戦 are on there is no finished file to read, and
+    re-reading every box score so far on each 30-minute run is ~200 requests."""
+    asked = []
+
+    class _Resp:
+        status_code = 200
+        encoding = "utf-8"
+
+        def __init__(self, url):
+            self.text = (PRESEASON_SCHEDULE_PAGE if "schedule_detail" in url
+                         else PRESEASON_BOX if url.endswith("box.html")
+                         else "<title>佐藤　爽（埼玉西武ライオンズ）</title>")
+
+    monkeypatch.setattr(nd.requests, "get",
+                        lambda url, **kw: asked.append(url) or _Resp(url))
+    cache = tmp_path / "npb_preseason_2026.json"
+    out = nd.fetch_preseason_starters(2026, cache=str(cache),
+                                      dates=("2026-03-05", "2026-03-08"))
+    assert list(out) == [("2026-03-07", "巨人")]
+    assert not any("0221" in url for url in asked)
+    # A partial sweep is never saved as if it were the finished one.
+    assert not cache.exists()
