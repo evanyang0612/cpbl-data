@@ -3154,9 +3154,13 @@ class NpbAnalysisService:
         season_rows = [
             row for row in rows[2:] if rows_service.analysis_row_year(row) == year
         ]
+        # The identity carries the date, so it never collides across seasons.
+        # The full-season scan compares counts and needs one season's rows; the
+        # daily path checks every row, because ANALYSIS_SEASON is a constant and
+        # still names last season once the next one has started.
         existing = {
             ident
-            for row in season_rows
+            for row in (season_rows if full_season else rows[2:])
             if (ident := rows_service.analysis_identity_from_row(row))
         }
         last_seq = rows_service.last_analysis_seq(rows)

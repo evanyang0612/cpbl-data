@@ -804,6 +804,44 @@ class TestNpbAnalysisService:
         assert fetched == []
         assert sheet.rows[2][1] == "2026/6/4"
 
+    def test_a_game_already_logged_is_not_logged_again_in_a_later_year(self):
+        # ANALYSIS_SEASON is a constant, so in 2027 it still says 2026. The
+        # daily path must not mistake a 2027 game it logged on the last sweep
+        # for a missing one just because the row is from another season.
+        sheet = FakePredictionSheet([["seq"], ["header"]])
+
+        class FakeModule:
+            ANALYSIS_SEASON = 2026
+            ANALYSIS_SHEET_NAME = "分析表紀錄"
+            NPB_SPREADSHEET_KEY = "spreadsheet"
+            NPB_TEAMS = NPB_TEAMS
+            ANALYSIS_FIELDS = {}
+            NPB_TEAM_HOME_FIELDS = {}
+
+            @staticmethod
+            def get_worksheet(sheet_name, spreadsheet_key):
+                return sheet
+
+            @staticmethod
+            def display_team_name(team_name):
+                return NPB_TEAMS[team_name]["name"]
+
+            @staticmethod
+            def _date_key(target_date=None):
+                return "2026-06-04"
+
+        game = [("game-1", _make_schedule_game_data("game-1"))]
+        service = NpbAnalysisService(module=FakeModule)
+        asyncio.run(service.update(AsyncMock(), game_ids=["game-1"], scraped_games=game))
+        FakeModule.ANALYSIS_SEASON = 2025
+
+        inserted = asyncio.run(
+            service.update(AsyncMock(), game_ids=["game-1"], scraped_games=game)
+        )
+
+        assert inserted == 0
+        assert len(sheet.rows) == 3
+
 
 def _balance_after_formula(row_num):
     return (
