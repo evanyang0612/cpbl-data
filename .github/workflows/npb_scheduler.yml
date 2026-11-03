@@ -53,12 +53,25 @@ jobs:
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=NPB 紀錄總表 mirror failed (the sweep itself was fine). Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+      # The diary's オープン戦 starters cost ~230 npb.jp requests to sweep, and
+      # the first run after 開幕 does it once and writes
+      # baseball/data/npb_preseason_<year>.json. A runner starts clean, so the
+      # file is carried from run to run here; without it every run would sweep.
+      - name: Restore the diary's オープン戦 starters
+        uses: actions/cache@v4
+        with:
+          path: baseball/data
+          key: npb-diary-data-${{ github.run_id }}
+          restore-keys: npb-diary-data-
+
       # Same shape as the mirror above, and it rides along every 30 minutes for
       # the same kind of reason: only the days around today are rebuilt, so
       # Yahoo is asked for about two dozen schedule pages instead of the
-      # season's 226. A --full rebuild is a manual job, for when the layout
-      # itself changes.
-      - name: Update 2026・野球日記
+      # season's 260-odd. The season itself is read off npb.jp each run, so a
+      # new year's tab starts on its own; from March on, a season npb.jp has no
+      # schedule for fails the step and the alert below fires. A --full
+      # rebuild is a manual job, for when the layout itself changes.
+      - name: Update 野球日記
         id: diary
         continue-on-error: true
         env:

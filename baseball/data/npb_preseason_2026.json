@@ -1,0 +1,608 @@
+{
+ "2026-02-21|DeNA": {
+  "away_starter": "齊藤 汰直",
+  "home_starter": "コックス",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0221/db-c-01/"
+ },
+ "2026-02-21|中日": {
+  "away_starter": "髙橋 遥人",
+  "home_starter": "大野 雄大",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0221/d-t-01/"
+ },
+ "2026-02-21|巨人": {
+  "away_starter": "ウォルターズ",
+  "home_starter": "山﨑 伊織",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0221/g-s-01/"
+ },
+ "2026-02-21|楽天": {
+  "away_starter": "西野 勇士",
+  "home_starter": "荘司 康誠",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0221/e-m-01/"
+ },
+ "2026-02-22|DeNA": {
+  "away_starter": "前田 健太",
+  "home_starter": "藤浪 晋太郎",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0222/db-e-01/"
+ },
+ "2026-02-22|ヤクルト": {
+  "away_starter": "村上 頌樹",
+  "home_starter": "奥川 恭伸",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0222/s-t-01/"
+ },
+ "2026-02-22|中日": {
+  "away_starter": "則本 昂大",
+  "home_starter": "金丸 夢斗",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0222/d-g-01/"
+ },
+ "2026-02-22|日本ハム": {
+  "away_starter": "ターノック",
+  "home_starter": "浅利 太門",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0222/f-c-01/"
+ },
+ "2026-02-23|ヤクルト": {
+  "away_starter": "栗林 良吏",
+  "home_starter": "山野 太一",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0223/s-c-01/"
+ },
+ "2026-02-23|中日": {
+  "away_starter": "石川 柊太",
+  "home_starter": "アブレウ",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0223/d-m-01/"
+ },
+ "2026-02-23|巨人": {
+  "away_starter": "藤原 聡大",
+  "home_starter": "ウィットリー",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0223/g-e-01/"
+ },
+ "2026-02-23|日本ハム": {
+  "away_starter": "ラグズデール",
+  "home_starter": "達 孝太",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0223/f-t-01/"
+ },
+ "2026-02-28|ロッテ": {
+  "away_starter": "松本 航",
+  "home_starter": "西野 勇士",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0228/m-l-01/"
+ },
+ "2026-02-28|楽天": {
+  "away_starter": "森 翔平",
+  "home_starter": "古謝 樹",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0228/e-c-01/"
+ },
+ "2026-03-01|ソフトバンク": {
+  "away_starter": "佐藤 爽",
+  "home_starter": "東浜 巨",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0301/h-l-01/"
+ },
+ "2026-03-01|中日": {
+  "away_starter": "東 克樹",
+  "home_starter": "涌井 秀章",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0301/d-db-01/"
+ },
+ "2026-03-01|楽天": {
+  "away_starter": "ターノック",
+  "home_starter": "瀧中 瞭太",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0301/e-c-02/"
+ },
+ "2026-03-03|DeNA": {
+  "away_starter": "",
+  "home_starter": "",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0303/db-d-02/"
+ },
+ "2026-03-03|ソフトバンク": {
+  "away_starter": "ウォルターズ",
+  "home_starter": "上茶谷 大河",
+  "walkoff": true,
+  "score_url": "https://npb.jp/scores/2026/0303/h-s-01/"
+ },
+ "2026-03-04|DeNA": {
+  "away_starter": "中西 聖輝",
+  "home_starter": "デュプランティエ",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0304/db-d-02/"
+ },
+ "2026-03-04|オリックス": {
+  "away_starter": "床田 寛樹",
+  "home_starter": "山下 舜平大",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0304/b-c-01/"
+ },
+ "2026-03-04|ソフトバンク": {
+  "away_starter": "下川 隼佑",
+  "home_starter": "大関 友久",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0304/h-s-02/"
+ },
+ "2026-03-04|日本ハム": {
+  "away_starter": "渡邉 勇太朗",
+  "home_starter": "達 孝太",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0304/f-l-01/"
+ },
+ "2026-03-04|楽天": {
+  "away_starter": "ジャクソン",
+  "home_starter": "藤原 聡大",
+  "walkoff": true,
+  "score_url": "https://npb.jp/scores/2026/0304/e-m-02/"
+ },
+ "2026-03-05|DeNA": {
+  "away_starter": "柳 裕也",
+  "home_starter": "竹田 祐",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0305/db-d-03/"
+ },
+ "2026-03-05|ソフトバンク": {
+  "away_starter": "吉村 貢司郎",
+  "home_starter": "上沢 直之",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0305/h-s-03/"
+ },
+ "2026-03-05|日本ハム": {
+  "away_starter": "武内 夏暉",
+  "home_starter": "山﨑 福也",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0305/f-l-02/"
+ },
+ "2026-03-05|楽天": {
+  "away_starter": "毛利 海大",
+  "home_starter": "荘司 康誠",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0305/e-m-03/"
+ },
+ "2026-03-06|オリックス": {
+  "away_starter": "山﨑 伊織",
+  "home_starter": "山岡 泰輔",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0306/b-g-01/"
+ },
+ "2026-03-06|阪神": {
+  "away_starter": "松本 晴",
+  "home_starter": "村上 頌樹",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0306/t-h-01/"
+ },
+ "2026-03-07|オリックス": {
+  "away_starter": "マタ",
+  "home_starter": "九里 亜蓮",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0307/b-g-02/"
+ },
+ "2026-03-07|広島": {
+  "away_starter": "松木平 優太",
+  "home_starter": "森 翔平",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0307/c-d-01/"
+ },
+ "2026-03-07|日本ハム": {
+  "away_starter": "田中 晴也",
+  "home_starter": "浅利 太門",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0307/f-m-01/"
+ },
+ "2026-03-07|楽天": {
+  "away_starter": "東 克樹",
+  "home_starter": "前田 健太",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0307/e-db-02/"
+ },
+ "2026-03-07|西武": {
+  "away_starter": "山野 太一",
+  "home_starter": "平良 海馬",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0307/l-s-01/"
+ },
+ "2026-03-07|阪神": {
+  "away_starter": "尾形 崇斗",
+  "home_starter": "大竹 耕太郎",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0307/t-h-02/"
+ },
+ "2026-03-08|オリックス": {
+  "away_starter": "スチュワート・ジュニア",
+  "home_starter": "田嶋 大樹",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0308/b-h-01/"
+ },
+ "2026-03-08|広島": {
+  "away_starter": "大野 雄大",
+  "home_starter": "赤木 晴哉",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0308/c-d-02/"
+ },
+ "2026-03-08|日本ハム": {
+  "away_starter": "西野 勇士",
+  "home_starter": "有原 航平",
+  "walkoff": true,
+  "score_url": "https://npb.jp/scores/2026/0308/f-m-02/"
+ },
+ "2026-03-08|楽天": {
+  "away_starter": "石田 裕太郎",
+  "home_starter": "ウレーニャ",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0308/e-db-03/"
+ },
+ "2026-03-08|西武": {
+  "away_starter": "高梨 裕稔",
+  "home_starter": "菅井 信也",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0308/l-s-02/"
+ },
+ "2026-03-08|阪神": {
+  "away_starter": "田中 将大",
+  "home_starter": "伊原 陵人",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0308/t-g-01/"
+ },
+ "2026-03-10|DeNA": {
+  "away_starter": "森下 暢仁",
+  "home_starter": "デュプランティエ",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0310/db-c-02/"
+ },
+ "2026-03-10|ソフトバンク": {
+  "away_starter": "竹丸 和幸",
+  "home_starter": "東浜 巨",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0310/h-g-01/"
+ },
+ "2026-03-10|ロッテ": {
+  "away_starter": "ジェリー",
+  "home_starter": "木村 優人",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0310/m-b-01/"
+ },
+ "2026-03-10|中日": {
+  "away_starter": "松本 健吾",
+  "home_starter": "三浦 瑞樹",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0310/d-s-01/"
+ },
+ "2026-03-10|阪神": {
+  "away_starter": "髙橋 光成",
+  "home_starter": "ルーカス",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0310/t-l-01/"
+ },
+ "2026-03-11|DeNA": {
+  "away_starter": "床田 寛樹",
+  "home_starter": "藤浪 晋太郎",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0311/db-c-03/"
+ },
+ "2026-03-11|ソフトバンク": {
+  "away_starter": "ウィットリー",
+  "home_starter": "大津 亮介",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0311/h-g-02/"
+ },
+ "2026-03-11|ロッテ": {
+  "away_starter": "山下 舜平大",
+  "home_starter": "石川 柊太",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0311/m-b-02/"
+ },
+ "2026-03-11|中日": {
+  "away_starter": "奥川 恭伸",
+  "home_starter": "櫻井 頼之介",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0311/d-s-02/"
+ },
+ "2026-03-11|楽天": {
+  "away_starter": "加藤 貴之",
+  "home_starter": "藤原 聡大",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0311/e-f-01/"
+ },
+ "2026-03-11|阪神": {
+  "away_starter": "與座 海人",
+  "home_starter": "ラグズデール",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0311/t-l-02/"
+ },
+ "2026-03-12|DeNA": {
+  "away_starter": "栗林 良吏",
+  "home_starter": "竹田 祐",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0312/db-c-04/"
+ },
+ "2026-03-12|ソフトバンク": {
+  "away_starter": "山城 京平",
+  "home_starter": "上沢 直之",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0312/h-g-03/"
+ },
+ "2026-03-12|楽天": {
+  "away_starter": "ラオ",
+  "home_starter": "西口 直人",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0312/e-f-02/"
+ },
+ "2026-03-13|ヤクルト": {
+  "away_starter": "山岡 泰輔",
+  "home_starter": "吉村 貢司郎",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0313/s-b-01/"
+ },
+ "2026-03-13|ロッテ": {
+  "away_starter": "武内 夏暉",
+  "home_starter": "毛利 海大",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0313/m-l-02/"
+ },
+ "2026-03-13|中日": {
+  "away_starter": "荘司 康誠",
+  "home_starter": "柳 裕也",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0313/d-e-01/"
+ },
+ "2026-03-14|DeNA": {
+  "away_starter": "松本 晴",
+  "home_starter": "東 克樹",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0314/db-h-01/"
+ },
+ "2026-03-14|ヤクルト": {
+  "away_starter": "九里 亜蓮",
+  "home_starter": "山野 太一",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0314/s-b-02/"
+ },
+ "2026-03-14|ロッテ": {
+  "away_starter": "平良 海馬",
+  "home_starter": "田中 晴也",
+  "walkoff": true,
+  "score_url": "https://npb.jp/scores/2026/0314/m-l-03/"
+ },
+ "2026-03-14|中日": {
+  "away_starter": "瀧中 瞭太",
+  "home_starter": "松葉 貴大",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0314/d-e-02/"
+ },
+ "2026-03-14|巨人": {
+  "away_starter": "細野 晴希",
+  "home_starter": "ハワード",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0314/g-f-01/"
+ },
+ "2026-03-14|広島": {
+  "away_starter": "髙橋 遥人",
+  "home_starter": "髙 太一",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0314/c-t-01/"
+ },
+ "2026-03-15|DeNA": {
+  "away_starter": "スチュワート・ジュニア",
+  "home_starter": "深沢 鳳介",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0315/db-h-02/"
+ },
+ "2026-03-15|ヤクルト": {
+  "away_starter": "田嶋 大樹",
+  "home_starter": "高梨 裕稔",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0315/s-b-03/"
+ },
+ "2026-03-15|ロッテ": {
+  "away_starter": "松本 航",
+  "home_starter": "小島 和哉",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0315/m-l-04/"
+ },
+ "2026-03-15|中日": {
+  "away_starter": "古謝 樹",
+  "home_starter": "涌井 秀章",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0315/d-e-03/"
+ },
+ "2026-03-15|巨人": {
+  "away_starter": "有原 航平",
+  "home_starter": "則本 昂大",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0315/g-f-02/"
+ },
+ "2026-03-15|広島": {
+  "away_starter": "西 勇輝",
+  "home_starter": "森 翔平",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0315/c-t-02/"
+ },
+ "2026-03-17|オリックス": {
+  "away_starter": "森下 暢仁",
+  "home_starter": "ジェリー",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0317/b-c-02/"
+ },
+ "2026-03-17|ソフトバンク": {
+  "away_starter": "大野 雄大",
+  "home_starter": "大関 友久",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0317/h-d-01/"
+ },
+ "2026-03-17|ロッテ": {
+  "away_starter": "才木 浩人",
+  "home_starter": "西野 勇士",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0317/m-t-01/"
+ },
+ "2026-03-17|巨人": {
+  "away_starter": "松本 健吾",
+  "home_starter": "戸郷 翔征",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0317/g-s-02/"
+ },
+ "2026-03-17|日本ハム": {
+  "away_starter": "デュプランティエ",
+  "home_starter": "金村 尚真",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0317/f-db-01/"
+ },
+ "2026-03-17|西武": {
+  "away_starter": "前田 健太",
+  "home_starter": "髙橋 光成",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0317/l-e-01/"
+ },
+ "2026-03-18|オリックス": {
+  "away_starter": "岡本 駿",
+  "home_starter": "エスピノーザ",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0318/b-c-03/"
+ },
+ "2026-03-18|ソフトバンク": {
+  "away_starter": "中西 聖輝",
+  "home_starter": "徐 若熙",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0318/h-d-02/"
+ },
+ "2026-03-18|ロッテ": {
+  "away_starter": "ルーカス",
+  "home_starter": "木村 優人",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0318/m-t-02/"
+ },
+ "2026-03-18|巨人": {
+  "away_starter": "奥川 恭伸",
+  "home_starter": "田中 将大",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0318/g-s-03/"
+ },
+ "2026-03-18|日本ハム": {
+  "away_starter": "コックス",
+  "home_starter": "加藤 貴之",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0318/f-db-02/"
+ },
+ "2026-03-18|西武": {
+  "away_starter": "ウレーニャ",
+  "home_starter": "渡邉 勇太朗",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0318/l-e-02/"
+ },
+ "2026-03-20|オリックス": {
+  "away_starter": "村上 頌樹",
+  "home_starter": "髙谷 舟",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0320/b-t-01/"
+ },
+ "2026-03-20|ソフトバンク": {
+  "away_starter": "床田 寛樹",
+  "home_starter": "上沢 直之",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0320/h-c-01/"
+ },
+ "2026-03-20|中日": {
+  "away_starter": "毛利 海大",
+  "home_starter": "柳 裕也",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0320/d-m-02/"
+ },
+ "2026-03-20|巨人": {
+  "away_starter": "荘司 康誠",
+  "home_starter": "竹丸 和幸",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0320/g-e-02/"
+ },
+ "2026-03-20|日本ハム": {
+  "away_starter": "吉村 貢司郎",
+  "home_starter": "達 孝太",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0320/f-s-01/"
+ },
+ "2026-03-20|西武": {
+  "away_starter": "東 克樹",
+  "home_starter": "武内 夏暉",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0320/l-db-01/"
+ },
+ "2026-03-21|ソフトバンク": {
+  "away_starter": "ターノック",
+  "home_starter": "松本 晴",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0321/h-c-02/"
+ },
+ "2026-03-21|中日": {
+  "away_starter": "田中 晴也",
+  "home_starter": "櫻井 頼之介",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0321/d-m-03/"
+ },
+ "2026-03-21|巨人": {
+  "away_starter": "瀧中 瞭太",
+  "home_starter": "ハワード",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0321/g-e-03/"
+ },
+ "2026-03-21|日本ハム": {
+  "away_starter": "山野 太一",
+  "home_starter": "伊藤 大海",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0321/f-s-02/"
+ },
+ "2026-03-21|西武": {
+  "away_starter": "平良 拳太郎",
+  "home_starter": "平良 海馬",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0321/l-db-02/"
+ },
+ "2026-03-21|阪神": {
+  "away_starter": "九里 亜蓮",
+  "home_starter": "髙橋 遥人",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0321/t-b-02/"
+ },
+ "2026-03-22|オリックス": {
+  "away_starter": "伊原 陵人",
+  "home_starter": "髙島 泰都",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0322/b-t-03/"
+ },
+ "2026-03-22|中日": {
+  "away_starter": "小島 和哉",
+  "home_starter": "マラー",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0322/d-m-04/"
+ },
+ "2026-03-22|巨人": {
+  "away_starter": "藤原 聡大",
+  "home_starter": "則本 昂大",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0322/g-e-04/"
+ },
+ "2026-03-22|広島": {
+  "away_starter": "スチュワート・ジュニア",
+  "home_starter": "栗林 良吏",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0322/c-h-03/"
+ },
+ "2026-03-22|日本ハム": {
+  "away_starter": "小川 泰弘",
+  "home_starter": "有原 航平",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0322/f-s-03/"
+ },
+ "2026-03-22|西武": {
+  "away_starter": "石田 裕太郎",
+  "home_starter": "隅田 知一郎",
+  "walkoff": false,
+  "score_url": "https://npb.jp/scores/2026/0322/l-db-03/"
+ }
+}
