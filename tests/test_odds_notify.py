@@ -53,7 +53,7 @@ def _rows(text, fixture="広島 @ 巨人"):
 
 
 def test_message_names_the_team_laying_the_handicap():
-    """The sheet writes the line bare — ``1+35``, not ``-1 +35``.
+    """The sheet writes the line bare — ``1+50``, not ``-1 +50``.
 
     Which side gives the runs is carried by whose line the number sits on, so a
     minus in front of the line would only read as a second water level.
@@ -61,9 +61,9 @@ def test_message_names_the_team_laying_the_handicap():
     text = on.build_message([_snapshot()], now=NOW)
     assert "広島 @ 巨人" in text
     away_side, home_side = _rows(text)
-    assert home_side == "巨人　１＋３５"   # G(1) = 0.55, home is the favourite
+    assert home_side == "巨人　１＋５０"   # G(1) = 0.55 decided; NPB ties lift the water from +35 to +50
     assert away_side.startswith("広島")   # which side lays is said by position
-    assert "１＋３５" not in away_side
+    assert "１＋５０" not in away_side
 
 
 def test_total_is_quoted_from_the_over_side_alone():
@@ -394,7 +394,7 @@ def test_an_unannounced_starter_falls_back_to_the_team():
     text = on.build_message([_snapshot()], now=NOW)
     away_side, home_side = _rows(text)
     assert away_side.startswith("広島")
-    assert home_side == "巨人　１＋３５"
+    assert home_side == "巨人　１＋５０"
 
 
 def test_a_game_without_a_known_starter_still_shows_the_team():
@@ -422,13 +422,13 @@ def test_the_total_keeps_its_column_whether_or_not_a_handicap_precedes_it():
     # Home lays, so the away line carries the total alone.
     text = on.build_message([_snapshot()], now=NOW)
     away_side, home_side = _rows(text)
-    assert home_side == "巨人　１＋３５"
+    assert home_side == "巨人　１＋５０"
     gap = away_side[len("広島"):away_side.index("７－１５")]
-    assert len(gap) == len("　１＋３５　")   # the same width the handicap took
+    assert len(gap) == len("　１＋５０　")   # the same width the handicap took
 
 
 def test_a_short_handicap_is_padded_to_the_same_slot():
-    """ＰＫ is two characters where １＋３５ is four; without padding the total
+    """ＰＫ is two characters where １＋５０ is four; without padding the total
     would sit a column to the left on pick'em games."""
     even = _snapshot(
         all_spreads=[{"hdp": 1.5, "home": 1 / 0.64, "away": 1 / 0.36}],
@@ -436,7 +436,7 @@ def test_a_short_handicap_is_padded_to_the_same_slot():
     )
     text = on.build_message([even], now=NOW)
     away_side, _home = _rows(text)
-    assert away_side.index("７－１５") == len("広島") + len("　１＋３５　")
+    assert away_side.index("７－１５") == len("広島") + len("　１＋５０　")
 
 
 def test_pitcher_names_share_a_column_across_the_whole_slate():
@@ -450,8 +450,8 @@ def test_pitcher_names_share_a_column_across_the_whole_slate():
         [_snapshot(event_id="1", home="ヤクルト", away="巨人"),
          _snapshot(event_id="2", home="DeNA", away="広島")],
         now=NOW, context=Slate(starters=starters, weather={}))
-    columns = {line.index("１＋３５") for line in text.splitlines()
-               if "１＋３５" in line}
+    columns = {line.index("１＋５０") for line in text.splitlines()
+               if "１＋５０" in line}
     assert len(columns) == 1   # every handicap starts in the same column
 
 
@@ -767,3 +767,17 @@ def test_the_schedule_is_only_asked_once_the_board_is_otherwise_ready(monkeypatc
     slate[0]["all_totals"] = TOTALS
     on.run_once(league, game_date="2026-08-25", phase="open", ledger=_Ledger())
     assert asked == ["2026-08-25"]
+
+
+def test_npb_quotes_account_for_ties_and_mlb_does_not():
+    from baseball import asian_lines as al
+    from baseball.pinnacle_odds import MLB, NPB
+
+    snap = _snapshot()
+    npb_handicap, _ = on._quotes(snap, NPB)
+    mlb_handicap, _ = on._quotes(snap, MLB)
+    margin = al.margin_curve(SPREADS, snap["ml_home"], snap["ml_away"],
+                             tie_rate=al.NPB_TIE_RATE)
+    assert npb_handicap == al.handicap_quote(margin)
+    assert mlb_handicap == al.handicap_quote(
+        al.margin_curve(SPREADS, snap["ml_home"], snap["ml_away"]))

@@ -35,6 +35,11 @@ from dataclasses import dataclass, replace
 # ratio, and are solved against a neighbour that is already known.
 _MAX_SOLVE_PASSES = 4
 
+# Share of NPB regular-season games that end level: 95 of 3,523 in 2022–2025
+# (npb.jp box scores). 2021 is left out — it played no extra innings at all
+# and tied 106 times.
+NPB_TIE_RATE = 0.027
+
 # A coinflip laying a whole run needs the entire stake back on the push case
 # (X = 1). Above this the handicap is more than the edge can carry and the book
 # posts a pick'em instead.
@@ -107,12 +112,20 @@ def _solve_whole_lines(points: dict[int, float], constraints: list[tuple[int, fl
 
 
 def margin_curve(spreads: list[dict], ml_home: float | None = None,
-                 ml_away: float | None = None) -> Curve:
+                 ml_away: float | None = None, *,
+                 tie_rate: float = 0.0) -> Curve:
     """Build ``P(home margin >= k)`` from the run-line ladder and moneyline.
 
     ``spreads`` are the rows stored in the ``盤口`` sheet's ``all_spreads``:
     ``hdp`` is the home team's handicap (negative = home gives runs) and
     ``home``/``away`` are that side's decimal prices.
+
+    ``tie_rate`` is ``P(margin == 0)`` for a league whose games can end level.
+    Its two-way moneyline refunds a tie, so the price is
+    ``P(win) / (P(win) + P(lose))``, not ``P(win)``: taken at face value it
+    overstates ``G(1)`` by about half the tie rate, and the push case at one
+    run — what the water is divided by — with it. On NPB's ~3% that put the
+    water on a favourite laying one run some 13 points too low.
     """
     points: dict[int, float] = {}
     constraints: list[tuple[int, float]] = []
@@ -128,7 +141,11 @@ def margin_curve(spreads: list[dict], ml_home: float | None = None,
             # Home covers iff the margin clears the half run: margin >= -hdp+0.5.
             points[int(-hdp + 0.5)] = p_home
     if ml_home and ml_away:
-        points.setdefault(1, devig(ml_home, ml_away)[0])
+        p_decided = devig(ml_home, ml_away)[0]
+        if 1 not in points:
+            points[1] = p_decided * (1.0 - tie_rate)
+            if tie_rate > 0:
+                points.setdefault(0, points[1] + tie_rate)
     _solve_whole_lines(points, constraints)
     # Draws are rare enough in baseball that P(margin >= 0) collapses onto
     # P(home wins) unless the ladder actually quoted a +0.5 line.
@@ -291,12 +308,18 @@ def handicap_quote(curve: Curve, *, pk_above: float = PK_ABOVE,
     win = curve.at(1)
     if win is None:
         return None
+    # Who is favoured, and by how much, is P(win) against P(lose) — the
+    # moneyline's own reading. Against 0.5 it would hand a home side at 49%
+    # to win, 5% to tie and 46% to lose to the away team.
+    tie_or_better = curve.at(0)
+    lose = 1.0 - (tie_or_better if tie_or_better is not None else win)
+    decided = win / (win + lose) if win + lose > 0 else 0.5
     # A level moneyline is a pick'em outright: no handicap at all, and the tie
     # pushes. That is a different claim from laying half a run, so it is
     # settled before any line is considered.
-    if abs(win - 0.5) <= even_within + 1e-9:
-        return Quote(side="home" if win >= 0.5 else "away", line=0, water=None)
-    side = "home" if win >= 0.5 else "away"
+    if abs(decided - 0.5) <= even_within + 1e-9:
+        return Quote(side="home" if decided >= 0.5 else "away", line=0, water=None)
+    side = "home" if decided >= 0.5 else "away"
     whole, half = None, None
     for line in range(1, max_line + 1):
         value = water(curve, side, line)
