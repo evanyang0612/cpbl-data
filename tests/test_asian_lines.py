@@ -286,3 +286,53 @@ def test_a_number_reached_from_outside_the_ladder_says_so():
     assert al.total_quote(al.total_curve(FAIR_TOTALS)).estimated is False
     assert al.handicap_quote(
         al.margin_curve(FAIR_SPREADS, FAIR_ML_HOME, FAIR_ML_AWAY)).estimated is False
+
+
+# --- ties: NPB games can end level, and its moneyline refunds them ---
+#
+#   P(home by 2+) = 0.40   P(home by 1) = 0.15   P(tie) = 0.04
+#   P(away by 1)  = 0.13   P(away by 2+) = 0.28
+#
+# so G(2) = 0.40, G(1) = 0.55, G(0) = 0.59, G(-1) = 0.72. The two-way
+# moneyline settles only decided games: it prices 0.55 / (0.55 + 0.41).
+TIED_SPREADS = [
+    {"hdp": -1.5, "home": 1 / 0.40, "away": 1 / 0.60},
+    {"hdp": 1.5, "home": 1 / 0.72, "away": 1 / 0.28},
+]
+TIED_P_ML = 0.55 / 0.96
+
+
+def test_moneyline_that_refunds_ties_is_not_the_probability_of_winning():
+    curve = al.margin_curve(TIED_SPREADS, 1 / TIED_P_ML, 1 / (1 - TIED_P_ML),
+                            tie_rate=0.04)
+    assert curve.at(1) == pytest.approx(0.55)
+    assert curve.at(0) == pytest.approx(0.59)
+
+
+def test_ignoring_ties_understates_the_layers_water():
+    fair = (0.45 - 0.40) / 0.15          # [P(lose) - P(win)] / P(exactly 1)
+    tied = al.margin_curve(TIED_SPREADS, 1 / TIED_P_ML, 1 / (1 - TIED_P_ML),
+                           tie_rate=0.04)
+    assert al.water(tied, "home", 1) == pytest.approx(fair)
+
+
+def test_no_tie_rate_keeps_the_moneyline_as_is():
+    curve = al.margin_curve(FAIR_SPREADS, FAIR_ML_HOME, FAIR_ML_AWAY)
+    assert curve.at(1) == pytest.approx(0.55)
+    assert curve.at(0) == pytest.approx(0.55)
+
+
+def test_favourite_and_pick_em_compare_winning_with_losing_not_with_half():
+    # 47.7% to win, 2.7% to tie, 49.6% to lose: a level moneyline, so a PK —
+    # not an away favourite just because the home side is below 0.5.
+    p_ml = 0.49
+    curve = al.margin_curve([{"hdp": 1.5, "home": 1 / 0.64, "away": 1 / 0.36}],
+                            1 / p_ml, 1 / (1 - p_ml), tie_rate=0.027)
+    quote = al.handicap_quote(curve)
+    assert quote.line == 0
+
+
+def test_home_favourite_stays_home_below_one_half_when_ties_eat_the_rest():
+    # 0.49 to win, 0.05 to tie, 0.46 to lose: home is still the favourite.
+    curve = al.Curve({2: 0.30, 1: 0.49, 0: 0.54, -1: 0.70})
+    assert al.handicap_quote(curve, even_within=0.0).side == "home"
