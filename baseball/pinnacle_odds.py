@@ -23,8 +23,9 @@ Each event:
 
 Prices are decimal odds as strings ("1.826"); "" means no price.
 
-This module fetches, parses, and (optionally) appends snapshot rows to a
-``盤口`` worksheet, one per league: NPB lines go to the main NPB spreadsheet
+This module fetches, parses, and (optionally) appends snapshot rows to the
+盤口 ledger. Since the 2026-27 off-season that is BigQuery
+(``baseball/odds_ledger.py``); before it, a ``盤口`` worksheet per league: NPB lines go to the main NPB spreadsheet
 (``NPB_SPREADSHEET_KEY``, alongside 彙資/分析表紀錄), MLB lines to the MLB
 spreadsheet (alongside 紀錄), CPBL lines to the CPBL spreadsheet (alongside
 賽程/彙資). All so open/close lines can be compared against the recorded games
@@ -614,40 +615,11 @@ def snapshots_to_rows(snapshots: list[dict], snapshot_type: str,
     return rows
 
 
-def _open_worksheet(league: LeagueSpec):
-    import gspread
-
-    from baseball.sheets import GoogleSheetsClient
-
-    headers = league.sheet_headers()
-    client = GoogleSheetsClient()
-    spreadsheet = client.spreadsheet(league.spreadsheet_key())
-    try:
-        ws = spreadsheet.worksheet(SHEET_NAME)
-    except Exception:  # gspread WorksheetNotFound
-        ws = spreadsheet.add_worksheet(
-            title=SHEET_NAME, rows=1000, cols=len(headers)
-        )
-        ws.append_row(headers, value_input_option="USER_ENTERED")
-        return ws
-    values = ws.get_all_values()
-    if not values:
-        ws.append_row(headers, value_input_option="USER_ENTERED")
-        return ws
-    # A column added after the tab was created is missing from its header row;
-    # every existing row keeps its values because the new column is appended.
-    if len(values[0]) < len(headers):
-        ws.update([headers], f"A1:{gspread.utils.rowcol_to_a1(1, len(headers))}",
-                  value_input_option="USER_ENTERED")
-    return ws
-
-
 def write_snapshots(rows: list[list], league: LeagueSpec = NPB) -> int:
-    if not rows:
-        return 0
-    ws = _open_worksheet(league)
-    ws.append_rows(rows, value_input_option="USER_ENTERED")
-    return len(rows)
+    """Append to the 盤口 ledger, which is in BigQuery since the 2026-27 off-season
+    (see baseball/odds_ledger.py); the worksheets are frozen."""
+    from baseball import odds_ledger
+    return odds_ledger.append(rows, league)
 
 
 def _now_local(league: LeagueSpec) -> str:
@@ -704,7 +676,7 @@ def run_once(snapshot_type: str = "interim", *, write: bool = True,
     if write and snapshots:
         rows = snapshots_to_rows(snapshots, snapshot_type, captured_at, league)
         n = write_snapshots(rows, league)
-        print(f"[odds] wrote {n} rows to '{SHEET_NAME}'")
+        print(f"[odds] wrote {n} rows to the 盤口 ledger (BigQuery)")
     if refused and not snapshots:
         # Every row unreadable means the feed's field order moved, not that one
         # game is odd. Raise so the workflow's failure alert fires instead of
@@ -753,7 +725,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="fetch and print parsed odds without writing to the sheet",
+        help="fetch and print parsed odds without writing to the ledger",
     )
     parser.add_argument(
         "--include-live", action="store_true",
