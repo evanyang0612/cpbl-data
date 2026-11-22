@@ -75,7 +75,7 @@ LOCAL_START_HOURS = {"npb": ("14:00", "18:00"),
 TEAM_SUBSTRING_MAP = {
     "giants": "巨人", "yomiuri": "巨人",
     "swallows": "ヤクルト", "yakult": "ヤクルト",
-    "baystars": "DeNA", "dena": "DeNA",
+    "baystars": "DeNA", "bay stars": "DeNA", "dena": "DeNA",
     "dragons": "中日", "chunichi": "中日",
     "tigers": "阪神", "hanshin": "阪神",
     "carp": "広島", "hiroshima": "広島",
