@@ -3105,12 +3105,24 @@ UNKNOWN_TEAM_GAME_HTML = """
 """
 
 
-def _cal_html(*entries):
+def _cal_html(*entries, shown=None):
     """Build a minimal calendar schedule page.
 
     Each entry dict supports keys: day, status (text), href, links (list of hrefs).
+    ``shown`` = (year, month) renders Yahoo's month navigation with that month
+    selected, which is how the page says which month it is actually showing.
     """
     parts = ["<html><body>"]
+    if shown is not None:
+        year, month = shown
+        parts.append('<nav class="bb-scheduleNavi">')
+        parts.append(f'<ul class="bb-scheduleNavi__month" id="month_t{year}">')
+        parts.append(f'<li class="bb-scheduleNavi__item">{year}年</li>')
+        parts.append(
+            '<li class="bb-scheduleNavi__item bb-scheduleNavi__item--selected">'
+            f"{month}月</li>"
+        )
+        parts.append("</ul></nav>")
     for e in entries:
         day = e.get("day", "")
         status_text = e.get("status", "")
@@ -3604,6 +3616,41 @@ class TestGetLastNGameIds:
             with patch("npb._fetch", new=AsyncMock(side_effect=[html] + [None] * 12)):
                 result = self._run(get_last_n_game_ids(1, 5, self._mock_session()))
         assert result.count("2026030201") == 1
+
+    def test_offseason_fallback_to_october_does_not_crash(self):
+        # Out of season Yahoo ignores ?month=2026-11 and serves October,
+        # whose 31st does not exist in November.
+        fake_now = datetime(2026, 11, 11)
+        october = _cal_html(
+            {"day": "30", "status": "試合終了", "href": "/npb/game/2026103001/top"},
+            {"day": "31", "status": "試合終了", "href": "/npb/game/2026103101/top"},
+            shown=(2026, 10),
+        )
+        with self._patch_now(fake_now):
+            with patch("npb._fetch", new=AsyncMock(return_value=october)):
+                result = self._run(get_last_n_game_ids(1, 2, self._mock_session()))
+        assert result == ["2026103101", "2026103001"]
+
+    def test_offseason_fallback_moves_on_from_the_month_shown(self):
+        # After being served October for a November request, the next
+        # request is September, not October again.
+        fake_now = datetime(2026, 11, 11)
+        october = _cal_html(
+            {"day": "31", "status": "試合終了", "href": "/npb/game/2026103101/top"},
+            shown=(2026, 10),
+        )
+        september = _cal_html(
+            {"day": "30", "status": "試合終了", "href": "/npb/game/2026093001/top"},
+            shown=(2026, 9),
+        )
+        fetch = AsyncMock(side_effect=[october, september])
+        with self._patch_now(fake_now):
+            with patch("npb._fetch", new=fetch):
+                result = self._run(get_last_n_game_ids(1, 2, self._mock_session()))
+        assert result == ["2026103101", "2026093001"]
+        urls = [c.args[1] for c in fetch.call_args_list]
+        assert urls[0].endswith("month=2026-11")
+        assert urls[1].endswith("month=2026-09")
 
     def test_respects_n_limit(self):
         fake_now = datetime(2026, 3, 26)
