@@ -149,13 +149,12 @@ def main() -> None:
 
     from dotenv import load_dotenv
     load_dotenv()
+    from baseball import odds_ledger
     from baseball import pinnacle_odds as po
-    from baseball.sheets import GoogleSheetsClient
 
     specs = [po.LEAGUES[args.league]] if args.league else [po.NPB, po.MLB, po.CPBL]
-    client = GoogleSheetsClient()
     for spec in specs:
-        values = client.spreadsheet(spec.spreadsheet_key()).worksheet("盤口").get_all_values()
+        values = odds_ledger.read_values(spec)
         if len(values) < 2:
             print(f"{spec.key.upper():<5} 盤口 是空的")
             continue
