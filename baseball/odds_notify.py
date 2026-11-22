@@ -75,18 +75,25 @@ SETTLE_WITHIN_MINUTES = 10
 LAST_CALL_MINUTES = 30
 
 
-def _quotes(snapshot: dict) -> tuple[al.Quote | None, al.Quote | None]:
+# Leagues whose games can end level, and how often. Their moneyline refunds a
+# tie, so the handicap has to be told; MLB plays every game to a result.
+TIE_RATES = {"npb": al.NPB_TIE_RATE}
+
+
+def _quotes(snapshot: dict, league: LeagueSpec = NPB
+            ) -> tuple[al.Quote | None, al.Quote | None]:
     """Price one game's handicap and total from its full odds ladder."""
     margin = al.margin_curve(
         snapshot.get("all_spreads") or [],
         snapshot.get("ml_home"),
         snapshot.get("ml_away"),
+        tie_rate=TIE_RATES.get(league.key, 0.0),
     )
     total = al.total_curve(snapshot.get("all_totals") or [])
     return al.handicap_quote(margin), al.total_quote(total)
 
 
-def _unsettled(snapshots: list[dict]) -> list[str]:
+def _unsettled(snapshots: list[dict], league: LeagueSpec = NPB) -> list[str]:
     """Games the board has not settled a postable line for yet.
 
     Two things count as unsettled, and neither is a line worth announcing: a
@@ -98,7 +105,7 @@ def _unsettled(snapshots: list[dict]) -> list[str]:
     """
     unsettled = []
     for snap in _pick_full_game(snapshots).values():
-        if any(quote is None or quote.estimated for quote in _quotes(snap)):
+        if any(quote is None or quote.estimated for quote in _quotes(snap, league)):
             away = snap.get("away_norm") or snap.get("away_team") or ""
             home = snap.get("home_norm") or snap.get("home_team") or ""
             unsettled.append(f"{away} @ {home}")
@@ -273,7 +280,7 @@ def build_message(snapshots: list[dict], *, now: datetime,
     # as its title.
     lines = [f"⚾ {title} {_slate_label(rows, now)} {phase_label}", ""]
     for snap in rows:
-        handicap, total = _quotes(snap)
+        handicap, total = _quotes(snap, league)
         _, clock = _start_time(snap, league)
         away = snap.get("away_norm") or snap.get("away_team") or ""
         home = snap.get("home_norm") or snap.get("home_team") or ""
@@ -470,7 +477,7 @@ def _broadcast(games: list[dict], *, league: LeagueSpec, game_date: str | None,
     # and a gap in the post beats no post at all.
     patient = lead is not None and lead > settle_within and not _last_call(now)
     if patient:
-        unsettled = _unsettled(games)
+        unsettled = _unsettled(games, league)
         if unsettled:
             print(f"[notify] the board has not settled {', '.join(unsettled)}; "
                   f"holding {slot} for a later run")
