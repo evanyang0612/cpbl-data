@@ -1127,6 +1127,27 @@ async def get_game_info(game_id: str, session: aiohttp.ClientSession) -> Optiona
     return result
 
 
+def _shown_schedule_month(soup) -> Optional[tuple[int, int]]:
+    """The month a Yahoo team schedule page is showing, from its month nav.
+
+    Returns (year, month), or None when the nav is missing.
+    """
+    selected = soup.find(class_="bb-scheduleNavi__item--selected")
+    if selected is None:
+        return None
+    month_match = re.fullmatch(r"\s*(\d{1,2})月\s*", selected.get_text())
+    nav = selected.find_parent(class_="bb-scheduleNavi__month")
+    year_match = None
+    if nav is not None:
+        year_match = re.search(r"(\d{4})年", nav.get_text())
+    if not month_match or not year_match:
+        return None
+    month = int(month_match.group(1))
+    if not 1 <= month <= 12:
+        return None
+    return int(year_match.group(1)), month
+
+
 async def get_last_n_game_ids(
     team_id: int, n: int, session: aiohttp.ClientSession
 ) -> list[str]:
@@ -1145,6 +1166,11 @@ async def get_last_n_game_ids(
             continue
 
         soup = bs(html, "html.parser")
+        # Out of season Yahoo ignores ?month= and serves the last month it
+        # has, so date the cells by the month the page says it is showing.
+        shown = _shown_schedule_month(soup)
+        if shown is not None:
+            month_cursor = month_cursor.replace(year=shown[0], month=shown[1])
         entries = list(soup.find_all(class_="bb-calendarTable__data"))
         entries.reverse()
 
