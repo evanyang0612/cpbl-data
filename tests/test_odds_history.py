@@ -180,3 +180,9 @@ def test_backfilled_rows_are_labelled_with_their_own_source():
     assert rows[0]["source"] == oh.SOURCE != po.SOURCE
     values = po.snapshots_to_rows(rows, "close", rows[0]["captured_at"], po.NPB)
     assert dict(zip(po.NPB.sheet_headers(), values[0]))["source"] == "the_odds_api"
+
+
+def test_normalize_team_folds_bay_stars_with_a_space():
+    # Pinnacle's own feed (BettingIsCool) spells it "Yokohama Bay Stars"
+    assert oh.normalize_team("Yokohama Bay Stars") == "DeNA"
+    assert oh.normalize_team("G1 Yokohama Bay Stars") == "DeNA"
