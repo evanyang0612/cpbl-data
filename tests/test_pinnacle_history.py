@@ -216,6 +216,43 @@ def test_pull_skips_an_event_that_keeps_failing(tmp_path):
     assert ph.done_ids(tmp_path) == {1}
 
 
+class WallClock:
+    """time.time stand-in: each nap advances it, and so can a laptop lid."""
+
+    def __init__(self, start=1_000_000.0):
+        self.now = start
+        self.naps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.naps.append(seconds)
+        self.now += seconds
+
+
+def test_wait_until_naps_in_short_steps_up_to_the_deadline():
+    clock = WallClock()
+    ph.wait_until(clock.now + 150, sleep=clock.sleep, clock=clock, step=60)
+    assert clock.naps == [60, 60, 30]
+
+
+def test_wait_until_wakes_on_wall_time_after_the_machine_slept():
+    # time.sleep does not count system sleep on macOS: a 19-hour nap taken
+    # before the lid closed for 5 hours would end 5 hours late. Checking the
+    # wall clock between short naps ends it on time.
+    clock = WallClock()
+    deadline = clock.now + 19 * 3600
+
+    def nap(seconds):
+        clock.naps.append(seconds)
+        clock.now += seconds + (5 * 3600 if len(clock.naps) == 1 else 0)
+    ph.wait_until(deadline, sleep=nap, clock=clock, step=60)
+    assert clock.now >= deadline
+    assert clock.now - deadline < 60
+    assert len(clock.naps) < 19 * 60 - 5 * 60 + 2
+
+
 def test_pull_with_wait_sleeps_to_the_reset_and_carries_on(tmp_path):
     state = {"blocked": True}
 
@@ -223,14 +260,14 @@ def test_pull_with_wait_sleeps_to_the_reset_and_carries_on(tmp_path):
         if state["blocked"]:
             return FakeResponse({}, status=429, headers={"Retry-After": "120"})
         return FakeResponse([])
-    slept = []
+    clock = WallClock()
 
     def fake_sleep(seconds):
-        slept.append(seconds)
+        clock.sleep(seconds)
         state["blocked"] = False
     client, _ = _client({"/api/odds": odds,
                          "/api/results": lambda p: FakeResponse([])})
     stats = ph.pull(client, [_fixture(1, "2024-04-01T09:00:00Z")], tmp_path,
-                    wait=True, sleep=fake_sleep)
+                    wait=True, sleep=fake_sleep, clock=clock)
     assert stats == {"saved": 1, "left": 0, "failed": []}
-    assert slept == [120 + ph.RESET_SLACK_SECONDS]
+    assert sum(clock.naps) == 120 + ph.RESET_SLACK_SECONDS

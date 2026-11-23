@@ -237,8 +237,22 @@ def seconds_to_reset(now: dt.datetime | None = None) -> int:
     return int((midnight - now).total_seconds())
 
 
+def wait_until(deadline: float, *, sleep=time.sleep, clock=time.time,
+               step: float = 60) -> None:
+    """Sleep until the wall clock reaches ``deadline`` (epoch seconds).
+
+    Not one long ``time.sleep``: on macOS that does not count time the machine
+    spends asleep, so a 19-hour wait begun before a 5-hour lid-close ends 5
+    hours late, and the day's quota goes unspent (it did on 2026-11-23). Short
+    naps against ``time.time`` end within ``step`` of the deadline either way.
+    """
+    while (left := deadline - clock()) > 0:
+        sleep(min(step, left))
+
+
 def pull(client: Client, todo: list[dict], events_dir, *, wait: bool = False,
-         reserve: int = DEFAULT_RESERVE, pause: float = 0.0, sleep=time.sleep) -> dict:
+         reserve: int = DEFAULT_RESERVE, pause: float = 0.0, sleep=time.sleep,
+         clock=time.time) -> dict:
     """Fetch and save each fixture in order until done, or until the day's cap.
 
     With ``wait`` the loop sleeps through the reset instead of returning, so a
@@ -252,7 +266,7 @@ def pull(client: Client, todo: list[dict], events_dir, *, wait: bool = False,
             delay = seconds_to_reset() + RESET_SLACK_SECONDS
             print(f"[pinnacle_history] 剩 {client.remaining} tokens，"
                   f"睡 {delay // 60} 分鐘等 UTC 午夜重置")
-            sleep(delay)
+            wait_until(clock() + delay, sleep=sleep, clock=clock)
             client.remaining = None
             continue
         fixture = todo[i]
@@ -263,7 +277,7 @@ def pull(client: Client, todo: list[dict], events_dir, *, wait: bool = False,
                 break
             delay = (exc.retry_after or seconds_to_reset()) + RESET_SLACK_SECONDS
             print(f"[pinnacle_history] 今日額度用完，睡 {delay // 60} 分鐘")
-            sleep(delay)
+            wait_until(clock() + delay, sleep=sleep, clock=clock)
             client.remaining = None
             continue
         except requests.RequestException as exc:
