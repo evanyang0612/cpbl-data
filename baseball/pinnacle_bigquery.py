@@ -174,8 +174,11 @@ def sync_snapshots(events_dir, league: str, store, *,
     the raw sync: change the rules, drop the table, run this again. One load
     job per batch is atomic, so a crash leaves no half-built event.
     """
+    from baseball.pinnacle_snapshots import SOURCE
+    # Only rows this builder made: the scraper's rows copied from the sheets
+    # carry the same Pinnacle event ids and say nothing about ours.
     todo = sorted((done_ids(events_dir) & store.loaded_ids(league))
-                  - store.snapshot_ids(league))
+                  - store.snapshot_ids(league, SOURCE))
     for i in range(0, len(todo), batch_events):
         rows = [row for event_id in todo[i:i + batch_events]
                 for row in snapshot_rows(_read(events_dir, event_id), league)]
@@ -243,12 +246,13 @@ class BigQueryStore:
                 self.bq.ScalarQueryParameter("league", "STRING", league)]))
         return {row.event_id for row in job.result()}
 
-    def snapshot_ids(self, league: str) -> set[int]:
+    def snapshot_ids(self, league: str, source: str) -> set[int]:
         job = self.client.query(
             f"SELECT DISTINCT event_id FROM `{self._table('odds_snapshots')}` "
-            "WHERE league_key = @league",
+            "WHERE league_key = @league AND source = @source",
             job_config=self.bq.QueryJobConfig(query_parameters=[
-                self.bq.ScalarQueryParameter("league", "STRING", league)]))
+                self.bq.ScalarQueryParameter("league", "STRING", league),
+                self.bq.ScalarQueryParameter("source", "STRING", source)]))
         return {row.event_id for row in job.result()}
 
     def ledger_rows(self, league_key: str, exclude_source: str | None = None) -> list[dict]:

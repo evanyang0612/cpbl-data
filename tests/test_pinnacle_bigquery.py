@@ -125,12 +125,14 @@ def _board_record(event_id):
 
 
 class SnapshotStore(FakeStore):
-    def __init__(self, loaded=(), snapshotted=()):
-        super().__init__(loaded)
-        self.snapshotted = set(snapshotted)
+    """``snapshotted`` maps source -> event ids that already have rows."""
 
-    def snapshot_ids(self, league):
-        return set(self.snapshotted)
+    def __init__(self, loaded=(), snapshotted=None):
+        super().__init__(loaded)
+        self.snapshotted = snapshotted or {}
+
+    def snapshot_ids(self, league, source):
+        return set(self.snapshotted.get(source, ()))
 
 
 def test_snapshot_rows_are_typed_for_the_ledger_table():
@@ -143,10 +145,17 @@ def test_snapshot_rows_are_typed_for_the_ledger_table():
     assert row["total_line"] == 7.5 and row["mins_to_start"] == 90
 
 
+def test_scraper_rows_for_the_same_game_do_not_count_as_snapshotted(tmp_path):
+    # PS3838 rows copied from the sheets carry the same Pinnacle event ids
+    ph.save_event(tmp_path, _board_record(1))
+    store = SnapshotStore(loaded={1}, snapshotted={"ps3838": {1}})
+    assert pbq.sync_snapshots(tmp_path, "npb", store) == 1
+
+
 def test_sync_snapshots_builds_only_loaded_events_not_yet_snapshotted(tmp_path):
     for i in (1, 2, 3):
         ph.save_event(tmp_path, _board_record(i))
-    store = SnapshotStore(loaded={1, 2}, snapshotted={1})
+    store = SnapshotStore(loaded={1, 2}, snapshotted={"bettingiscool": {1}})
     assert pbq.sync_snapshots(tmp_path, "npb", store) == 1
     [(table, rows)] = store.loads
     assert table == "odds_snapshots"
