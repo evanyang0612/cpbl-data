@@ -100,26 +100,54 @@ def test_first_five_period_is_labelled_half():
 
 # --- one event -> snapshot rows ----------------------------------------------
 
-def test_event_snapshots_samples_open_lead_points_and_close():
+def test_full_history_samples_open_plus_30_every_hour_and_the_close():
     odds = _board("2026-08-21T20:00:00", 1, total=9.5) + \
         _board("2026-08-22T06:30:00", 2, total=8.5) + \
-        _board("2026-08-22T08:57:00", 3, total=7.5)   # after the close instant
-    snaps = ps.event_snapshots(_record(odds), "npb")
+        _board("2026-08-22T08:57:00", 3, total=7.5) + \
+        _board("2026-08-22T09:10:00", 4, total=6.5)   # in play: not pregame
+    snaps = [s for s in ps.event_snapshots(_record(odds), "npb") if s["period"] == "final"]
     got = [(s["snapshot_type"], s["captured_at"], s["mins_to_start"], s["total_line"])
            for s in snaps]
-    assert got == [
-        ("open", "2026-08-22 05:00:00", 780, 9.5),
-        ("interim", "2026-08-22 06:00:00", 720, 9.5),
-        ("interim", "2026-08-22 15:00:00", 180, 9.5),
-        ("interim", "2026-08-22 17:00:00", 60, 8.5),
-        ("close", "2026-08-22 17:55:00", 5, 8.5),   # the 17:57 move is not seen
-    ]
+    hourly = [("interim", f"2026-08-22 {h:02d}:00:00", (18 - h) * 60,
+               9.5 if h <= 15 else 8.5) for h in range(6, 18)]
+    assert got == [("open", "2026-08-22 05:30:00", 750, 9.5)] + hourly + \
+        [("close", "2026-08-22 17:57:00", 3, 7.5)]
 
 
-def test_event_snapshots_skips_lead_points_before_the_board_opened():
-    odds = _board("2026-08-22T07:30:00", 1)          # opens 90 minutes out
-    types = [s["snapshot_type"] for s in ps.event_snapshots(_record(odds), "npb")]
-    assert types == ["open", "interim", "close"]      # only the 60-minute point
+def test_a_board_opened_less_than_30_minutes_out_has_no_open_row():
+    odds = _board("2026-08-22T08:45:00", 1)
+    types = [s["snapshot_type"] for s in ps.event_snapshots(_record(odds), "npb")
+             if s["period"] == "final"]
+    assert types == ["close"]
+
+
+def _oc_record(opening, closing):
+    rec = _record([])
+    del rec["odds"]
+    rec.update({"opening": opening, "closing": closing, "mode": "openclose"})
+    return rec
+
+
+def test_openclose_record_builds_open_from_the_first_board():
+    first = _board("2026-08-21T20:00:00", 1, total=8.5)
+    # an alternate total Pinnacle only added at noon has a later first price
+    late_line = [_row("2026-08-22T03:00:00", 9, "totals", 6.5, 1.3, 3.4)]
+    snaps = ps.event_snapshots(_oc_record(first + late_line, []), "npb")
+    [snap] = snaps
+    assert (snap["snapshot_type"], snap["captured_at"]) == ("open", "2026-08-22 05:00:00")
+    assert 6.5 not in [t["line"] for t in json.loads(snap["all_totals"])]
+
+
+def test_openclose_record_builds_close_from_the_lines_still_up_at_the_end():
+    board = _board("2026-08-22T08:59:30", 7, total=7.5)
+    # 9.5 was pulled at 10:00 JST; /api/closing still returns its last price
+    stale = [_row("2026-08-22T01:00:00", 2, "totals", 9.5, 2.5, 1.5)]
+    snaps = ps.event_snapshots(_oc_record([], board + stale), "npb")
+    [snap] = snaps
+    assert (snap["snapshot_type"], snap["captured_at"], snap["mins_to_start"]) == \
+        ("close", "2026-08-22 17:59:30", 0)
+    assert 9.5 not in [t["line"] for t in json.loads(snap["all_totals"])]
+    assert snap["total_line"] == 7.5
 
 
 def test_event_snapshots_fill_the_ledger_identity_columns():
@@ -138,7 +166,7 @@ def test_event_snapshots_open_each_period_on_its_own_first_update():
         _board("2026-08-22T07:00:00", 5, period=1, ml=None)
     opens = [(s["period"], s["captured_at"]) for s in ps.event_snapshots(
         _record(odds), "npb") if s["snapshot_type"] == "open"]
-    assert opens == [("final", "2026-08-22 05:00:00"), ("half", "2026-08-22 16:00:00")]
+    assert opens == [("final", "2026-08-22 05:30:00"), ("half", "2026-08-22 16:30:00")]
 
 
 def test_open_is_the_first_bettable_update_not_a_board_posted_closed():
@@ -147,7 +175,7 @@ def test_open_is_the_first_bettable_update_not_a_board_posted_closed():
     opens = [s for s in ps.event_snapshots(_record(odds), "npb")
              if s["snapshot_type"] == "open"]
     assert [(s["captured_at"], s["total_line"]) for s in opens] == \
-        [("2026-08-22 05:00:05", 8.5)]
+        [("2026-08-22 05:30:05", 8.5)]
 
 
 def test_event_snapshots_drop_incoherent_boards():
@@ -156,6 +184,16 @@ def test_event_snapshots_drop_incoherent_boards():
     odds = [dict(r, odds1=1.30, odds2=3.50) if r["market"] == "spread" and r["line"] == -1.5
             else r for r in odds]
     assert ps.event_snapshots(_record(odds), "npb") == []
+
+
+def test_mlb_keeps_the_feed_spelling_and_eastern_dates():
+    rec = _record(_board("2026-08-22T23:00:00", 1),
+                  home="New York Yankees", away="Boston Red Sox")
+    rec["fixture"]["starts"] = "2026-08-23T23:05:00"        # 19:05 ET
+    snap = ps.event_snapshots(rec, "mlb")[0]
+    assert snap["start_et"] == "2026-08-23T19:05:00-04:00"
+    assert snap["game_date"] == "2026-08-23"
+    assert (snap["home_norm"], snap["away_norm"]) == ("New York Yankees", "Boston Red Sox")
 
 
 def test_cpbl_uses_its_own_clock_and_names():

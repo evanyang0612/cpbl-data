@@ -28,12 +28,12 @@ import pathlib
 from google.oauth2 import service_account
 
 from baseball.pinnacle_history import CACHE_ROOT, LEAGUE_IDS, _parse_ts, done_ids
-from baseball.pinnacle_odds import JST, TPE
+from baseball.pinnacle_odds import ET, JST, TPE
 
 PROJECT = os.getenv("PINNACLE_BQ_PROJECT", "project-e0a5748a-0bec-4063-a99")
 DATASET = os.getenv("PINNACLE_BQ_DATASET", "pinnacle_history")
 LOCATION = "asia-east1"
-LEAGUE_TZ = {"npb": JST, "cpbl": TPE}
+LEAGUE_TZ = {"npb": JST, "cpbl": TPE, "mlb": ET}
 # ~1,800 rows an event, so 200 events is a ~360k-row load: big enough to keep
 # the job count low, small enough that a failure costs little to redo.
 BATCH_EVENTS = 200
@@ -53,6 +53,10 @@ SCHEMAS = {
         ("todds1", "FLOAT64"), ("todds0", "FLOAT64"), ("todds2", "FLOAT64"),
         ("timestamp", "TIMESTAMP"), ("cutoff", "TIMESTAMP"), ("max_win", "FLOAT64"),
         ("status", "INT64"), ("is_open", "INT64"), ("bettable", "INT64"),
+        # tick = a row of the full history; opening / closing = a line's
+        # first / last price from those endpoints (the default pull since
+        # 2026-11-23). Added after the table, so it is last.
+        ("kind", "STRING"),
     ],
     "results": [
         ("league", "STRING"), ("event_id", "INT64"), ("game_date", "DATE"),
@@ -118,9 +122,13 @@ def to_rows(record: dict, league: str) -> tuple[dict, list[dict], list[dict]]:
     starts = _parse_ts(fixture["starts"])
     base = {"league": league, "event_id": int(fixture["event_id"]),
             "game_date": starts.astimezone(LEAGUE_TZ[league]).date().isoformat()}
-    fixture_row = _row({**fixture, "odds_rows": len(record["odds"]),
+    if "opening" in record:
+        odds = ([_row(r, "odds", {**base, "kind": "opening"}) for r in record["opening"]]
+                + [_row(r, "odds", {**base, "kind": "closing"}) for r in record["closing"]])
+    else:
+        odds = [_row(r, "odds", {**base, "kind": "tick"}) for r in record["odds"]]
+    fixture_row = _row({**fixture, "odds_rows": len(odds),
                         "fetched_at": record.get("fetched_at")}, "fixtures", base)
-    odds = [_row(r, "odds", base) for r in record["odds"]]
     results = [_row(r, "results", base) for r in record["results"]]
     return fixture_row, odds, results
 
@@ -220,7 +228,13 @@ class BigQueryStore:
             table.time_partitioning = self.bq.TimePartitioning(
                 type_=self.bq.TimePartitioningType.MONTH, field="game_date")
             table.clustering_fields = CLUSTERING.get(name, ["league", "event_id"])
-            self.client.create_table(table, exists_ok=True)
+            table = self.client.create_table(table, exists_ok=True)
+            # A column added to SCHEMAS after the table was created
+            have = {f.name for f in table.schema}
+            missing = [f for f in self._schema(name) if f.name not in have]
+            if missing:
+                table.schema = list(table.schema) + missing
+                self.client.update_table(table, ["schema"])
 
     def loaded_ids(self, league: str) -> set[int]:
         job = self.client.query(
@@ -277,7 +291,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Load the Pinnacle history into BigQuery")
     parser.add_argument("command", choices=["sync"])
-    parser.add_argument("--league", nargs="+", default=["npb", "cpbl"],
+    parser.add_argument("--league", nargs="+", default=["npb", "cpbl", "mlb"],
                         choices=sorted(LEAGUE_IDS))
     args = parser.parse_args()
     sync_leagues(args.league)

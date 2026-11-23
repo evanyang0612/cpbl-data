@@ -124,6 +124,7 @@ def test_pending_skips_specials_tests_and_all_star_games(tmp_path):
         named(4, "Test 1", "Test 2"),
         named(5, "DO NOT BET", "123"),
         named(6, "Central League", "Pacific League"),
+        named(9, "American League", "National League"),
         named(7, "G1 Hanshin Tigers", "G1 Chunichi Dragons"),   # doubleheader: real
         named(8, "Yokohama Bay Stars", "Yomiuri Giants"),
     ]
@@ -160,6 +161,42 @@ def test_fetch_event_pages_a_truncated_history_without_losing_tied_rows():
                          "/api/results": lambda p: FakeResponse([])})
     record = ph.fetch_event(client, _fixture(9, "2026-08-22T09:00:00Z"))
     assert [r["market"] for r in record["odds"]] == ["moneyline", "spread", "totals"]
+
+
+def test_fetch_event_openclose_pulls_only_opening_closing_and_results():
+    opening = [{"period": 0, "market": "moneyline", "timestamp": "2026-08-21T14:00:00"}]
+    closing = [{"period": 0, "market": "moneyline", "timestamp": "2026-08-22T08:59:00"}]
+    client, session = _client({
+        "/api/opening": lambda p: FakeResponse(opening),
+        "/api/closing": lambda p: FakeResponse(closing),
+        "/api/results": lambda p: FakeResponse([{"period": 0, "score_home": 2}]),
+    })
+    record = ph.fetch_event_openclose(client, _fixture(7, "2026-08-22T09:00:00Z"))
+    assert (record["opening"], record["closing"]) == (opening, closing)
+    assert record["results"] == [{"period": 0, "score_home": 2}]
+    assert record["mode"] == "openclose" and "odds" not in record
+    assert [c[0] for c in session.calls] == ["/api/opening", "/api/closing", "/api/results"]
+
+
+def test_each_league_has_its_own_default_fetch():
+    # the Taiwan line needs the real ladder at bet time, so NPB/CPBL keep every
+    # tick; MLB is ~3,400 rows a game and only fits as opening/closing
+    assert ph.DEFAULT_FETCH["npb"] is ph.fetch_event
+    assert ph.DEFAULT_FETCH["cpbl"] is ph.fetch_event
+    assert ph.DEFAULT_FETCH["mlb"] is ph.fetch_event_openclose
+    assert ph.LEAGUE_IDS["mlb"] == 246
+
+
+def test_pull_uses_the_fetcher_it_is_given(tmp_path):
+    client, session = _client({
+        "/api/opening": lambda p: FakeResponse([]),
+        "/api/closing": lambda p: FakeResponse([]),
+        "/api/results": lambda p: FakeResponse([]),
+    })
+    stats = ph.pull(client, [_fixture(1, "2024-04-01T09:00:00Z")], tmp_path,
+                    fetch=ph.fetch_event_openclose)
+    assert stats["saved"] == 1
+    assert "/api/odds" not in {c[0] for c in session.calls}
 
 
 def test_save_event_round_trips_through_gzip(tmp_path):
