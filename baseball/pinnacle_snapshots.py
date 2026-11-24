@@ -7,12 +7,21 @@ the board as it stood, then runs it through the scraper's **own** parsing —
 ``parse_period`` picks the main total / run line, ``incoherence`` refuses
 impossible boards — so a backfilled row and a live row are made by one rule.
 
-Instants per (event, period), matching what was agreed for the backtest:
+Per (event, period), from a full tick history (NPB, CPBL):
 
-* ``open``    — the period's first update;
-* ``interim`` — 12 h, 3 h and 1 h before first pitch (skipped if not yet open);
-* ``close``   — 5 minutes before first pitch, the scraper's last poll, not
-  the last tick Pinnacle took.
+* ``open``    — the board 30 minutes after the first bettable price. Pinnacle
+  opens on low limits and the first price is bought: in 2026 the main total
+  had moved within 30 minutes in 46% of games, and our scraper's first
+  capture came a median 36 minutes after the open.
+* ``interim`` — every whole hour after that until first pitch. Bets go in
+  anywhere from the night before to an hour out (the pick ledger), so the
+  backtest picks the hour it wants.
+* ``close``   — Pinnacle's last pregame board, timestamped when it was set.
+
+From an opening/closing record (MLB, too large for full history) only
+``open`` (the raw first price, with the bias above) and ``close`` exist,
+each the earliest / latest update of each market, which drops alternate
+lines Pinnacle only added later and lines it pulled before the end.
 
 Rows carry ``source = "bettingiscool"``. Team totals have no 盤口 column and
 are left in the raw ``odds`` table.
@@ -25,17 +34,18 @@ from baseball import odds_history
 from baseball.cpbl_games import normalize_team as cpbl_team
 from baseball.odds_audit import incoherence
 from baseball.pinnacle_history import _parse_ts
-from baseball.pinnacle_odds import CPBL, NPB, parse_period
+from baseball.pinnacle_odds import CPBL, MLB, NPB, parse_period
 
 SOURCE = "bettingiscool"
-LEADS_MIN = (720, 180, 60)
-CLOSE_MIN = 5
-LEAGUE_SPECS = {"npb": NPB, "cpbl": CPBL}
+OPEN_SETTLE = dt.timedelta(minutes=30)
+LEAGUE_SPECS = {"npb": NPB, "cpbl": CPBL, "mlb": MLB}
 LEDGER_MARKETS = ("moneyline", "spread", "totals")
 
 
 def _norm(name: str, league: str) -> str:
-    return cpbl_team(name) if league == "cpbl" else odds_history.normalize_team(name)
+    if league == "cpbl":
+        return cpbl_team(name)
+    return odds_history.normalize_team(name, LEAGUE_SPECS[league])
 
 
 # --- the board at an instant -------------------------------------------------
@@ -104,21 +114,56 @@ def parse_board(period: int, board: dict) -> dict | None:
 
 # --- one event -> snapshots --------------------------------------------------
 
-def _instants(first: dt.datetime, start: dt.datetime) -> list[tuple[str, dt.datetime]]:
-    out = [("open", first)]
-    for lead in LEADS_MIN:
-        at = start - dt.timedelta(minutes=lead)
-        if at > first:
-            out.append(("interim", at))
-    close = start - dt.timedelta(minutes=CLOSE_MIN)
-    if close >= first:
-        out.append(("close", close))
+def _bettable(row: dict) -> bool:
+    return (row.get("market") in LEDGER_MARKETS and row.get("status") != 2
+            and row.get("is_open") != 0)
+
+
+def _edge_board(rows: list[dict], period: int, *, latest: bool) -> dict:
+    """{market: rows} at each market's first (or last) bettable update."""
+    by_market: dict[str, list] = {}
+    for row in rows:
+        if row.get("period") == period and _bettable(row):
+            by_market.setdefault(row["market"], []).append(row)
+    board = {}
+    for market, mrows in by_market.items():
+        pick = (max if latest else min)(_parse_ts(r["timestamp"]) for r in mrows)
+        board[market] = [r for r in mrows if _parse_ts(r["timestamp"]) == pick]
+    return board
+
+
+def _boards(record: dict, period: int, start: dt.datetime):
+    """[(snapshot_type, board, captured_at or None)]; None = the board's own time."""
+    if "opening" in record:
+        return [("open", _edge_board(record["opening"], period, latest=False), None),
+                ("close", _edge_board(record["closing"], period, latest=True), None)]
+    odds = record["odds"]
+    stamps = [_parse_ts(r["timestamp"]) for r in odds
+              if r.get("period") == period and _bettable(r)]
+    if not stamps or min(stamps) >= start:
+        return []
+    out = []
+    at = min(stamps) + OPEN_SETTLE
+    if at < start:
+        # board_at re-reads every market's latest update, so a partial update
+        # (moneyline only) still shows the ladder that stood with it.
+        out.append(("open", board_at(odds, period, at), at))
+        hour = at.replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)
+        while hour < start:
+            out.append(("interim", board_at(odds, period, hour), hour))
+            hour += dt.timedelta(hours=1)
+    out.append(("close", board_at(odds, period, start - dt.timedelta(seconds=1)), None))
     return out
+
+
+def _board_time(board: dict) -> dt.datetime | None:
+    stamps = [_parse_ts(r["timestamp"]) for rows in board.values() for r in rows]
+    return max(stamps) if stamps else None
 
 
 def event_snapshots(record: dict, league: str) -> list[dict]:
     spec = LEAGUE_SPECS[league]
-    fixture, odds = record["fixture"], record["odds"]
+    fixture = record["fixture"]
     start = _parse_ts(fixture["starts"])
     start_local = start.astimezone(spec.tz)
     base = {
@@ -133,20 +178,14 @@ def event_snapshots(record: dict, league: str) -> list[dict]:
         "status": "pregame",
         "source": SOURCE,
     }
+    rows = record.get("odds") or (record.get("opening", []) + record.get("closing", []))
     out = []
-    for period in sorted({r.get("period") for r in odds if r.get("market") in LEDGER_MARKETS}):
-        # Pinnacle sometimes posts a board closed (status 2) seconds before it
-        # takes bets; the open is the first price anyone could have bet.
-        stamps = [_parse_ts(r["timestamp"]) for r in odds
-                  if r.get("period") == period and r.get("market") in LEDGER_MARKETS
-                  and r.get("status") != 2 and r.get("is_open") != 0]
-        if not stamps:
-            continue
-        first = min(stamps)
-        if first >= start:
-            continue
-        for kind, at in _instants(first, start):
-            parsed = parse_board(period, board_at(odds, period, at))
+    for period in sorted({r.get("period") for r in rows if r.get("market") in LEDGER_MARKETS}):
+        for kind, board, sampled in _boards(record, period, start):
+            at = sampled or _board_time(board)
+            if at is None or at >= start or not board:
+                continue
+            parsed = parse_board(period, board)
             if not parsed or incoherence(parsed):
                 continue
             out.append({

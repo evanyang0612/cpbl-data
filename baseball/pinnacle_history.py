@@ -22,7 +22,7 @@ which is the durable copy; the local files are the staging area.
 
     uv run python -m baseball.pinnacle_history leagues          # confirm the ids
     uv run python -m baseball.pinnacle_history status           # quota + progress
-    uv run python -m baseball.pinnacle_history pull --league npb cpbl --wait
+    uv run python -m baseball.pinnacle_history pull --league npb cpbl mlb --wait
 """
 
 import argparse
@@ -36,20 +36,22 @@ import time
 
 import requests
 
-from baseball.pinnacle_odds import BASEBALL_SPORT_ID, CPBL_LEAGUE_ID, NPB_LEAGUE_ID
+from baseball.pinnacle_odds import (
+    BASEBALL_SPORT_ID, CPBL_LEAGUE_ID, MLB_LEAGUE_ID, NPB_LEAGUE_ID,
+)
 
 API_BASE = os.getenv("PINNACLE_DATA_API_BASE", "https://api.bettingiscool.com").rstrip("/")
 API_KEY_ENV = "PINNACLE_DATA_API_KEY"
 
 # The archive's prematch history starts in March 2021 for both leagues.
 HISTORY_START = "2021-03-01"
-LEAGUE_IDS = {"npb": NPB_LEAGUE_ID, "cpbl": CPBL_LEAGUE_ID}
+LEAGUE_IDS = {"npb": NPB_LEAGUE_ID, "cpbl": CPBL_LEAGUE_ID, "mlb": MLB_LEAGUE_ID}
 
 CACHE_ROOT = pathlib.Path(__file__).resolve().parent.parent / ".cache" / "pinnacle_history"
 
-# An event's full history runs to a few thousand rows and its cost is unknown
-# until it comes back, so stop for the day while this much is still left
-# rather than let one event straddle the cap.
+# An event's cost is unknown until it comes back (a full history runs to a few
+# thousand rows), so stop for the day while this much is still left rather
+# than let one event straddle the cap.
 DEFAULT_RESERVE = 6000
 # Sleep a little past the reset so the first call of the day is not refused.
 RESET_SLACK_SECONDS = 90
@@ -65,7 +67,8 @@ MAIN_UNITS = {None, "", "Regular"}
 # ("Central League" v "Pacific League"). ~330 of NPB's 5,928 fixtures, each a
 # full-price pull. Doubleheaders ("G1 Hanshin Tigers") are real and kept.
 NOT_A_GAME = re.compile(
-    r"test|do not bet|\bruns\b|\bgames?\)|^\s*(central|pacific)( league)?\s*$|^\s*\d+\s*$",
+    r"test|do not bet|\bruns\b|\bgames?\)|^\s*(central|pacific|american|national)"
+    r"( league)?\s*$|^\s*\d+\s*$",
     re.IGNORECASE)
 
 
@@ -228,6 +231,27 @@ def fetch_event(client: Client, fixture: dict) -> dict:
             "fetched_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
+def fetch_event_openclose(client: Client, fixture: dict) -> dict:
+    """Each line's first and last price, plus results — about 80 rows a game
+    against ~1,600 for the full tick history, which is all the model and the
+    Taiwan-line settlement use."""
+    event_id = fixture["event_id"]
+    return {"fixture": fixture, "mode": "openclose",
+            "opening": client.get("/api/opening", event_id=event_id),
+            "closing": client.get("/api/closing", event_id=event_id),
+            "results": client.get("/api/results", event_id=event_id),
+            "fetched_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+# The Taiwan line is settled on the real ladder at bet time, which only the
+# full history has: rebuilding it from the main line put the full-game
+# handicap on a different Taiwan line in 29% of NPB games, and first-five
+# water off by 40+ points for one game in ten (2026-11-23, 598 games at T-6h).
+# MLB's full history is ~3,400 rows a game, ~44M tokens, out of reach on
+# Starter, so it gets opening/closing only.
+DEFAULT_FETCH = {"npb": fetch_event, "cpbl": fetch_event, "mlb": fetch_event_openclose}
+
+
 # --- the run loop -----------------------------------------------------------
 
 def seconds_to_reset(now: dt.datetime | None = None) -> int:
@@ -252,7 +276,7 @@ def wait_until(deadline: float, *, sleep=time.sleep, clock=time.time,
 
 def pull(client: Client, todo: list[dict], events_dir, *, wait: bool = False,
          reserve: int = DEFAULT_RESERVE, pause: float = 0.0, sleep=time.sleep,
-         clock=time.time) -> dict:
+         clock=time.time, fetch=None) -> dict:
     """Fetch and save each fixture in order until done, or until the day's cap.
 
     With ``wait`` the loop sleeps through the reset instead of returning, so a
@@ -271,7 +295,7 @@ def pull(client: Client, todo: list[dict], events_dir, *, wait: bool = False,
             continue
         fixture = todo[i]
         try:
-            record = fetch_event(client, fixture)
+            record = (fetch or fetch_event)(client, fixture)
         except QuotaExhausted as exc:
             if not wait:
                 break
@@ -295,9 +319,11 @@ def pull(client: Client, todo: list[dict], events_dir, *, wait: bool = False,
         save_event(events_dir, record)
         saved += 1
         attempts, i = 0, i + 1
+        rows = len(record.get("odds") or []) + len(record.get("opening") or []) \
+            + len(record.get("closing") or [])
         print(f"[pinnacle_history] {fixture['starts'][:10]} "
               f"{fixture.get('runner_away')} @ {fixture.get('runner_home')} "
-              f"-> {len(record['odds'])} 列（剩 {client.remaining} tokens，"
+              f"-> {rows} 列（剩 {client.remaining} tokens，"
               f"還有 {len(todo) - i} 場）")
         if pause:
             sleep(pause)
@@ -335,7 +361,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Pull Pinnacle's NPB/CPBL odds history from BettingIsCool")
     parser.add_argument("command", choices=["leagues", "status", "pull"])
-    parser.add_argument("--league", nargs="+", default=["npb", "cpbl"],
+    parser.add_argument("--league", nargs="+", default=["npb", "cpbl", "mlb"],
                         choices=sorted(LEAGUE_IDS),
                         help="pulled in this order (default: npb cpbl)")
     parser.add_argument("--start", default=HISTORY_START)
@@ -344,6 +370,10 @@ def main() -> None:
                         help="sleep through the daily reset instead of stopping")
     parser.add_argument("--refresh-fixtures", action="store_true")
     parser.add_argument("--reserve", type=int, default=DEFAULT_RESERVE)
+    parser.add_argument("--fetch", choices=["default", "full", "openclose"],
+                        default="default",
+                        help="full = every price change; openclose = each line's "
+                             "first and last price; default = per league (DEFAULT_FETCH)")
     parser.add_argument("--no-bigquery", action="store_true",
                         help="keep the pull local; sync later with pinnacle_bigquery")
     args = parser.parse_args()
@@ -379,7 +409,9 @@ def main() -> None:
         _sync(store, events, league)        # whatever an earlier run left unsynced
         for i in range(0, max(len(todo), 1), SYNC_EVERY):
             chunk = todo[i:i + SYNC_EVERY]
-            stats = pull(client, chunk, events, wait=args.wait, reserve=args.reserve)
+            stats = pull(client, chunk, events, wait=args.wait, reserve=args.reserve,
+                         fetch={"full": fetch_event, "openclose": fetch_event_openclose}
+                         .get(args.fetch, DEFAULT_FETCH[league]))
             _sync(store, events, league)
             if stats["failed"]:
                 print(f"[pinnacle_history] {league.upper()} 失敗跳過：{stats['failed']}"
